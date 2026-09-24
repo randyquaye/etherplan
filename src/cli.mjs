@@ -6,22 +6,24 @@ import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { generateAdapters, loadArtifacts } from './artifacts.mjs';
 import { applyPlan, acquireLock } from './execution/index.mjs';
+import { hashJson } from './identity.mjs';
 import { createPlan, prepareResources } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
 import { graph, impact, parseSpec } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (flag === '--parallel') {
-      if (options.parallel) throw new Error('Duplicate option --parallel.');
-      options.parallel = true;
+    if (flag === '--parallel' || flag === '--pipeline') {
+      const name = flag.slice(2);
+      if (options[name]) throw new Error(`Duplicate option ${flag}.`);
+      options[name] = true;
       continue;
     }
     const value = args[++index];
@@ -158,11 +160,20 @@ async function run(command, options) {
   if (command === 'apply') {
     const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
-    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false }));
+    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
     return;
   }
   const state = await readState(stateFile);
-  const plan = await createPlan({ spec, artifacts, client, state });
+  const pipeline = options.pipeline ? {
+    deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
+  } : null;
+  const plan = command === 'schedule' && options.plan
+    ? JSON.parse(await readFile(path.resolve(options.plan), 'utf8'))
+    : await createPlan({ spec, artifacts, client, state, pipeline });
+  if (command === 'schedule' && options.plan) {
+    const { planHash, ...fields } = plan;
+    if (hashJson(fields) !== planHash) throw new Error('Saved plan content does not match its planHash.');
+  }
   if (command === 'plan') {
     if (options.out) await writeJsonAtomic(path.resolve(options.out), plan);
     print(plan);
@@ -177,9 +188,10 @@ async function run(command, options) {
     if (status !== 'verified') process.exitCode = 1;
     return;
   }
-  if (!options.deployers) throw new Error('schedule needs --deployers <address,address>.');
-  const deployers = options.deployers.split(',');
-  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? null });
+  const deployers = options.deployers?.split(',') ?? plan.pipeline?.deployers;
+  if (!deployers) throw new Error('schedule needs --deployers <address,address>.');
+  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? plan.pipeline?.owner ?? null, parallel: options.parallel ?? plan.pipeline?.parallel ?? true, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
+  if (plan.pipeline && hashJson(schedule.waves) !== hashJson(plan.pipeline.waves)) throw new Error('The requested schedule differs from the saved pipeline plan.');
   const funding = await Promise.all(deployers.map(async address => ({ address, balanceWei: (await client.getBalance({ address })).toString() })));
   if (funding.some(account => account.balanceWei === '0')) throw new Error('Every supplied deployer must have a nonzero native-token balance.');
   const requested = new Map(deployers.map(address => [address.toLowerCase(), address]));

@@ -25,7 +25,17 @@ function laneFor(resource, primary, owner) {
 }
 
 // Packs one wave into batches. A batch has at most one transaction per account. Pinned actions go first, then pooled deploys fill free lanes.
-function pack(actions, pool, parallel) {
+function pack(actions, pool, parallel, pipeline) {
+  if (pipeline) {
+    let next = 0;
+    const entries = actions.map(action => ({ ...action, signer: action.pooled ? pool[next++ % pool.length] : action.lane }));
+    const offsets = new Map();
+    return [entries.map(entry => {
+      const nonceOffset = offsets.get(entry.signer) ?? 0;
+      offsets.set(entry.signer, nonceOffset + 1);
+      return { ...entry, nonceOffset };
+    })];
+  }
   const batches = [];
   const place = (action, candidates) => {
     for (const batch of batches) {
@@ -41,7 +51,7 @@ function pack(actions, pool, parallel) {
 }
 
 export function createSchedule(plan, deployers, options = {}) {
-  const { owner = null, parallel = true } = options;
+  const { owner = null, parallel = true, pipeline = false } = options;
   assert(plan && Array.isArray(plan.resources), 'Schedule needs a plan with resources[].');
   assert(Array.isArray(deployers) && deployers.length > 0, 'Supply at least one deployer address.');
   assert(deployers.every(address => isAddress(address, { strict: false })), 'Every deployer must be an Ethereum address.');
@@ -65,7 +75,18 @@ export function createSchedule(plan, deployers, options = {}) {
   while (remaining.size > 0) {
     const ready = [...remaining.values()].filter(action => byId.get(action.id).dependencies.every(dep => satisfied.has(dep)));
     if (ready.length === 0) break;
-    waves.push({ wave: waves.length + 1, batches: pack(ready, pool, parallel) });
+    const batches = pack(ready, pool, parallel, pipeline);
+    const wave = { wave: waves.length + 1, batches };
+    if (pipeline) {
+      const groups = new Map();
+      for (const entry of batches.flat()) {
+        if (!groups.has(entry.signer)) groups.set(entry.signer, []);
+        groups.get(entry.signer).push({ id: entry.id, nonceOffset: entry.nonceOffset });
+      }
+      wave.signerGroups = [...groups].map(([signer, actions]) => ({ signer, actions }));
+      wave.receiptBarrier = true;
+    }
+    waves.push(wave);
     for (const action of ready) {
       remaining.delete(action.id);
       satisfied.add(action.id);
@@ -85,6 +106,7 @@ export function createSchedule(plan, deployers, options = {}) {
   }
   return {
     parallel,
+    pipeline,
     lanes: [...lanes.values()].map(lane => ({ ...lane, roles: [...lane.roles].sort() })),
     waves,
     deferred: [...remaining.values()].map(action => ({

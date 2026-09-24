@@ -47,10 +47,37 @@ export async function signEnvelope(signer, envelope) {
   return { rawTransaction, transactionHash: keccak256(rawTransaction) };
 }
 
+// Recovery must validate bytes from disk before resending them. The saved plan supplies
+// the payload, while the intent supplies the live nonce, gas and fee choices.
+export async function validateSignedTransaction(signed, intent, planned, chainId) {
+  if (typeof signed.rawTransaction !== 'string' || keccak256(signed.rawTransaction).toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Signed transaction hash differs from its raw bytes.');
+  for (const field of ['reservationId', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas']) {
+    if (String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) throw new Error(`Signed ${field} differs from the durable intent.`);
+  }
+  const parsed = parseTransaction(signed.rawTransaction);
+  const sender = await recoverTransactionAddress({ serializedTransaction: signed.rawTransaction });
+  const expected = {
+    chainId,
+    nonce: Number(intent.nonce),
+    to: planned.tx.to.toLowerCase(),
+    data: planned.tx.data.toLowerCase(),
+    value: BigInt(planned.tx.value),
+    gas: BigInt(intent.gas),
+    maxFeePerGas: BigInt(intent.maxFeePerGas),
+    maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas),
+  };
+  if (parsed.type !== 'eip1559' || parsed.chainId !== expected.chainId || parsed.nonce !== expected.nonce ||
+    parsed.to?.toLowerCase() !== expected.to || (parsed.data ?? '0x').toLowerCase() !== expected.data ||
+    (parsed.value ?? 0n) !== expected.value || parsed.gas !== expected.gas ||
+    parsed.maxFeePerGas !== expected.maxFeePerGas || parsed.maxPriorityFeePerGas !== expected.maxPriorityFeePerGas ||
+    sender.toLowerCase() !== intent.signer?.toLowerCase() || signed.signer?.toLowerCase() !== intent.signer?.toLowerCase() ||
+    String(signed.nonce) !== String(intent.nonce)) throw new Error('Saved signed transaction differs from its plan or intent.');
+}
+
 function errorText(error) {
   const parts = [];
   for (let item = error; item; item = item.cause) parts.push(item.details, item.shortMessage, item.message);
-  return parts.filter(Boolean).join(' ');
+  return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{100,}/g, '[transaction bytes redacted]');
 }
 
 export async function broadcast(client, rawTransaction) {

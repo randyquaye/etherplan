@@ -2,6 +2,7 @@ import { keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
 import { graph, parseSpec } from '../spec/index.mjs';
 import { prepareResources, transactionFor } from './resources.mjs';
+import { createSchedule } from '../scheduling/index.mjs';
 
 export { prepareResources, transactionFor } from './resources.mjs';
 
@@ -97,7 +98,7 @@ function assertStateChain(state, chain) {
  * marks dependents unsafe when an earlier action cannot be applied, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null }) {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null }) {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const ordered = graph(spec);
@@ -161,5 +162,17 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     artifactHashes,
     resources: planned,
   };
+  if (pipeline) {
+    const deployers = (pipeline.parallel ? pipeline.deployers : pipeline.deployers.slice(0, 1)).map(address => address.toLowerCase());
+    const schedule = createSchedule(fields, deployers, { owner: pipeline.owner ?? null, parallel: pipeline.parallel ?? false, pipeline: true });
+    if (schedule.ownerActions.length && !pipeline.owner) throw new Error('A pipeline plan with owner actions needs --owner <address>.');
+    if (schedule.deferred.length) throw new Error(`Cannot pipeline unschedulable actions: ${schedule.deferred.map(entry => entry.id).join(', ')}.`);
+    fields.pipeline = {
+      deployers,
+      owner: pipeline.owner?.toLowerCase() ?? null,
+      parallel: pipeline.parallel ?? false,
+      waves: schedule.waves,
+    };
+  }
   return { ...fields, planHash: hashJson(fields) };
 }
