@@ -83,6 +83,10 @@ export async function acquireLock(file, { planHash }) {
       file,
       holder,
       recovered,
+      async assertHeld() {
+        const current = await readHolder(file);
+        if (current?.id !== holder.id) throw new LockError(`State lock ${file} is no longer held by this process.`, current);
+      },
       async release() {
         if (released) return;
         released = true;

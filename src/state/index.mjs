@@ -75,7 +75,7 @@ function validateResource(id, resource) {
   resource.transactions.forEach((transaction, index) => assertHash(transaction, `${id} transactions[${index}]`));
 }
 
-function validateState(state) {
+export function validateState(state) {
   assert(isObject(state), 'State must be an object.');
   assertNoSecrets(state);
   assert(Object.keys(state).every(key => key === 'formatVersion' || key === 'chain' || key === 'resources'), 'State has unknown fields.');

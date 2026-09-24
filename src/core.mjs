@@ -3,5 +3,8 @@ export { prepareResources, transactionFor, createPlan } from './planning/index.m
 export { validateResources } from './validation/index.mjs';
 export { create2Address, linkBytecode, compareRuntime, verifyResource, verifyCreation } from './verification/index.mjs';
 export { createSchedule } from './scheduling/index.mjs';
-export { readState, writeStateAtomic, importResource, recordResource } from './state/index.mjs';
+export { readState, writeStateAtomic, importResource, recordResource, validateState } from './state/index.mjs';
 export { applyPlan, acquireLock, openJournal } from './execution/index.mjs';
+export { acquireLeases, deploymentScope, encryptionContext, inspectDeployment, lockScopes, openStoredJournal, scopeKey, validateJournal } from './execution/backends.mjs';
+export { createAwsBackend } from './execution/aws.mjs';
+export { createSignerServiceProvider } from './execution/signer-service.mjs';

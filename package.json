@@ -13,6 +13,10 @@
     "check": "for file in src/*.mjs src/*/*.mjs test/*.mjs test/*/*.mjs; do node --check \"$file\" || exit; done"
   },
   "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1140.0",
+    "@aws-sdk/client-kms": "^3.1140.0",
+    "@aws-sdk/client-s3": "^3.1140.0",
+    "@aws-sdk/lib-dynamodb": "^3.1140.0",
     "viem": "2.56.8"
   }
 }

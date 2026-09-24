@@ -3,9 +3,9 @@ import path from 'node:path';
 import { canonicalJson } from '../identity.mjs';
 
 export const JOURNAL_FORMAT_VERSION = 1;
-export const PHASES = ['intent', 'signed', 'broadcast', 'receipt', 'verified', 'failed'];
+export const PHASES = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
 // A transaction in one of these phases may still change the chain or hold its signer's next nonce.
-export const LIVE_PHASES = new Set(['signed', 'broadcast', 'receipt']);
+export const LIVE_PHASES = new Set(['signed', 'broadcast-attempt', 'broadcast', 'receipt']);
 const SECRET_KEY = /private|secret|mnemonic|seed|passphrase/i;
 
 function assertNoSecrets(value, where = 'record') {
