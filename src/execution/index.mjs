@@ -270,7 +270,12 @@ async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
       if (!dependency || (requireCompleted && !ctx.outcomes.get(id)?.verification)) {
         throw new ApplyError('dependency', `${item.planned.id} needs completed dependency ${id} before signing.`, { actionId: item.planned.id });
       }
-      if (!checked.has(id)) checked.set(id, await verify(ctx, dependency));
+      if (!checked.has(id)) {
+        const evidence = ctx.journal.forAction(ctx.plan.planHash, id)
+          .filter(record => ['receipt', 'verified'].includes(record.phase) && record.transactionHash).at(-1);
+        const transactionHash = ctx.outcomes.get(id)?.transactionHash ?? evidence?.transactionHash;
+        checked.set(id, await verify(ctx, dependency, transactionHash ? { transactionHash } : {}));
+      }
       const verification = checked.get(id);
       if (verification.status !== 'verified') {
         throw new ApplyError('dependency', `${item.planned.id} needs verified dependency ${id}; it is now ${verification.status}.`, {
