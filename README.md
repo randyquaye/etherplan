@@ -14,7 +14,7 @@ npm run check
 npm test
 ```
 
-The package has one runtime dependency, `viem`. It is private and is not published to npm.
+The package uses `viem` and the AWS SDK packages for its production backend. It is private and is not published to npm.
 
 ## Describe desired state
 

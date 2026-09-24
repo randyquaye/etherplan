@@ -123,7 +123,11 @@ export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherp
       } while (ExclusiveStartKey);
     },
     async append(scope, record, { expectedSequence, expectedPreviousHash, fence } = {}) {
-      if (record.sequence !== expectedSequence || record.previousHash !== expectedPreviousHash || !fence) throw new Error('Journal append needs the exact expected sequence, predecessor, and fence.');
+      if (!Number.isSafeInteger(expectedSequence) || expectedSequence < 1 ||
+        record.sequence !== expectedSequence || record.previousHash !== expectedPreviousHash ||
+        (expectedSequence === 1 ? expectedPreviousHash !== null : !/^0x[0-9a-fA-F]{64}$/.test(expectedPreviousHash ?? '')) || !fence) {
+        throw new Error('Journal append needs the exact expected sequence, predecessor, and fence.');
+      }
       const PK = deploymentKey(scope);
       const previous = expectedSequence - 1;
       await send(new TransactWriteCommand({ TransactItems: [

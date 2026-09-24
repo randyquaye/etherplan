@@ -44,6 +44,7 @@ export function validateJournal(records, scope) {
   for (const [index, record] of records.entries()) {
     if (record.formatVersion !== 2 || record.sequence !== index + 1 || record.previousHash !== previousHash || record.recordHash !== recordHash(record)) throw new Error(`Journal integrity failure at sequence ${index + 1}.`);
     if (typeof record.planHash !== 'string' || !HASH.test(record.planHash) || typeof record.actionId !== 'string' || typeof record.phase !== 'string' || !['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'].includes(record.phase)) throw new Error(`Journal record ${index + 1} has invalid identity or phase.`);
+    if (typeof record.principal !== 'string' || !record.principal || typeof record.at !== 'string' || !Number.isFinite(Date.parse(record.at))) throw new Error(`Journal record ${index + 1} lacks audit metadata.`);
     if (record.chain?.id !== scope.chainId || record.chain.genesisHash?.toLowerCase() !== scope.genesisHash) throw new Error(`Journal chain differs from deployment scope at sequence ${index + 1}.`);
     if (Object.hasOwn(record, 'rawTransaction')) throw new Error('Journal contains plaintext signed transaction bytes.');
     if (record.phase === 'signed' && !record.encryptedRawTransaction) throw new Error(`Signed journal record ${index + 1} has no ciphertext.`);
