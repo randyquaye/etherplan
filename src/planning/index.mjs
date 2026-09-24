@@ -1,6 +1,7 @@
 import { keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
-import { graph, parseSpec } from '../spec/index.mjs';
+import { dependencyGraphs, dependencyWarnings, executionOrder, graph, parseSpec, usesDependencyPlan } from '../spec/index.mjs';
+import { executionWaves } from '../scheduling/index.mjs';
 import { prepareResources, transactionFor } from './resources.mjs';
 
 export { prepareResources, transactionFor } from './resources.mjs';
@@ -22,13 +23,14 @@ function planResource(resource, observation, action) {
     dependencies: resource.dependencies,
     address: resource.address,
   };
+  copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
     copyDefined(result, resource, ['artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent']);
   } else if (resource.kind === 'external') {
     copyDefined(result, resource, ['expectedCodeHash', 'checks']);
     result.signerRole = null;
   } else {
-    copyDefined(result, resource, ['targetId', 'method', 'args', 'check', 'before', 'after', 'signerRole']);
+    copyDefined(result, resource, ['targetId', 'method', 'args', 'check', 'before', 'after', 'signerRole', 'ownerOnly', 'transfersOwnership']);
   }
   result.action = action;
   result.observation = observation;
@@ -93,13 +95,14 @@ function assertStateChain(state, chain) {
 }
 
 /**
- * Builds a plan from one observed chain block. Verifies resources in dependency order,
- * marks dependents unsafe when an earlier action cannot be applied, and confirms the
+ * Builds a plan from one observed chain block. Resolves values in resolution order,
+ * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
 export async function createPlan({ spec: specInput, artifacts, client, state = null }) {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
+  const described = usesDependencyPlan(spec);
   const ordered = graph(spec);
   const { resources } = prepareResources(spec, ordered, artifacts);
   const chainId = await client.getChainId();
@@ -120,7 +123,8 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
   }
 
   const { verifyResource } = await import('../verification/index.mjs');
-  const planned = [];
+  const observations = new Map();
+  const resourceById = new Map(resources.map(resource => [resource.id, resource]));
   const plannedById = new Map();
   for (const resource of resources) {
     const options = { blockNumber: observed.number };
@@ -128,11 +132,17 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     if (transactionHash) options.transactionHash = transactionHash;
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state?.resources?.[resource.id]);
-    let observation = stateComparison ? { ...verification, stateComparison: {
+    const observation = stateComparison ? { ...verification, stateComparison: {
       ...stateComparison,
       liveCodeMatchesState: state?.resources?.[resource.id]?.codeHash === null || state?.resources?.[resource.id]?.codeHash === undefined ||
         state.resources[resource.id].codeHash.toLowerCase() === verification.codeHash?.toLowerCase(),
     } } : verification;
+    observations.set(resource.id, { observation, verification, stateComparison });
+  }
+  for (const node of executionOrder(ordered)) {
+    const resource = resourceById.get(node.id);
+    const { verification, stateComparison } = observations.get(node.id);
+    let { observation } = observations.get(node.id);
     let action = stateComparison?.conflict ? 'conflict' : decide(resource, verification, plannedById);
     const unsafeDependencies = resource.dependencies.filter(dependency => ['conflict', 'unverified'].includes(plannedById.get(dependency)?.action));
     if (unsafeDependencies.length > 0) {
@@ -142,9 +152,9 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
       observation = { ...observation, pending: { reason: 'Target contract is deployed earlier in this plan.', targetId: resource.targetId } };
     }
     const entry = planResource(resource, observation, action);
-    planned.push(entry);
     plannedById.set(entry.id, entry);
   }
+  const planned = resources.map(resource => plannedById.get(resource.id));
 
   const confirmed = await client.getBlock({ blockNumber: observed.number });
   assertBlock(confirmed, 'Confirmed observation');
@@ -154,12 +164,19 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     .filter(resource => resource.kind === 'contract')
     .map(resource => [resource.id, resource.artifactHash]));
   const fields = {
-    formatVersion: 1,
+    formatVersion: described ? 2 : 1,
     chain,
     observed: { blockNumber: observed.number.toString(), blockHash: observed.hash },
     specHash: hashJson(spec),
     artifactHashes,
     resources: planned,
+    ...(described ? {
+      dependencyMode: spec.dependencyMode ?? (spec.schema === 2 ? 'split' : 'compatibility'),
+      graphs: dependencyGraphs(ordered),
+      executionWaves: executionWaves(planned),
+      executionAssumptions: spec.executionAssumptions ?? [],
+      warnings: dependencyWarnings(spec, ordered),
+    } : {}),
   };
   return { ...fields, planHash: hashJson(fields) };
 }

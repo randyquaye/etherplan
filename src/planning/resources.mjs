@@ -1,6 +1,6 @@
 import { concatHex, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
-import { graph, parseSpec, resolve } from '../spec/index.mjs';
+import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.mjs';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.mjs';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -21,13 +21,18 @@ function checks(value, spec, addresses) {
 }
 
 /**
- * Resolves the spec in dependency order into concrete contracts, externals, and calls.
+ * Resolves the spec in resolution order into concrete contracts, externals, and calls.
  * Contract addresses are known before dependent arguments and call targets are resolved.
  * Validates the resulting resources without reading the chain.
  */
 export function prepareResources(specInput, orderedInput, artifacts) {
   const spec = parseSpec(specInput);
   const ordered = orderedInput ?? graph(spec);
+  const describeDependencies = usesDependencyPlan(spec);
+  const dependencyFields = node => describeDependencies ? {
+    resolutionDependencies: [...node.resolutionDependencies],
+    executionEdges: node.executionEdges,
+  } : {};
   assert(artifacts instanceof Map, 'Artifacts must be a Map keyed by contract ID.');
   const addresses = {};
   const resources = [];
@@ -41,6 +46,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
         id: node.id,
         kind: 'external',
         dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+        ...dependencyFields(node),
         address: item.address,
         expectedCodeHash: item.codeHash ?? null,
         checks: checks(item.checks, spec, addresses),
@@ -74,6 +80,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
         id: node.id,
         kind: 'contract',
         dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+        ...dependencyFields(node),
         address,
         artifact,
         artifactHash: artifact.artifactHash,
@@ -115,6 +122,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
       id: node.id,
       kind: 'call',
       dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+      ...dependencyFields(node),
       address: target.address,
       targetId: target.id,
       targetArtifact: target.artifact,
@@ -125,6 +133,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
       before,
       after,
       signerRole: item.signerRole ?? 'owner',
+      ...(describeDependencies ? { ownerOnly: item.ownerOnly ?? false, transfersOwnership: item.transfersOwnership || item.method === 'transferOwnership' } : {}),
     });
   }
 

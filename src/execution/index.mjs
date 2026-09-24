@@ -148,6 +148,7 @@ async function settle(ctx, item, signed) {
   if (!receipt) {
     const observed = await precondition(ctx, item);
     if (observed.satisfied) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
+    await checkExecutionDependencies(ctx, [{ item }], false);
     receipt = await send(ctx, item, signed, { rebroadcast: true });
   }
   await recordReceipt(ctx, item, signed, receipt);
@@ -261,7 +262,27 @@ async function checkBatchFunding(ctx, work) {
   }
 }
 
+async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
+  const checked = new Map();
+  for (const { item } of work) {
+    for (const id of item.planned.dependencies) {
+      const dependency = ctx.prepared.get(id);
+      if (!dependency || (requireCompleted && !ctx.outcomes.get(id)?.verification)) {
+        throw new ApplyError('dependency', `${item.planned.id} needs completed dependency ${id} before signing.`, { actionId: item.planned.id });
+      }
+      if (!checked.has(id)) checked.set(id, await verify(ctx, dependency));
+      const verification = checked.get(id);
+      if (verification.status !== 'verified') {
+        throw new ApplyError('dependency', `${item.planned.id} needs verified dependency ${id}; it is now ${verification.status}.`, {
+          actionId: item.planned.id, evidence: { dependency: id, verification: summarizeVerification(verification) },
+        });
+      }
+    }
+  }
+}
+
 async function signBatch(ctx, wave, work) {
+  await checkExecutionDependencies(ctx, work);
   // Read every signer's nonce and reject pending transactions before recording any intent.
   for (const job of work) {
     const [latest, pending] = await Promise.all([

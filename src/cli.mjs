@@ -8,7 +8,7 @@ import { generateAdapters, loadArtifacts } from './artifacts.mjs';
 import { applyPlan, acquireLock } from './execution/index.mjs';
 import { createPlan, prepareResources } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
-import { graph, impact, parseSpec } from './spec/index.mjs';
+import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
@@ -126,7 +126,9 @@ async function run(command, options) {
   const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const ordered = graph(spec);
   if (command === 'graph') {
-    print(ordered.map(node => ({ id: node.id, deps: node.dependencies })));
+    print(usesDependencyPlan(spec)
+      ? { ...dependencyGraphs(ordered), warnings: dependencyWarnings(spec, ordered) }
+      : ordered.map(node => ({ id: node.id, deps: node.dependencies })));
     return;
   }
   if (command === 'impact') {

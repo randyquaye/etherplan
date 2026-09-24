@@ -17,6 +17,22 @@ export function poolable(resource) {
     PERMISSIONLESS_FACTORY_CODE_HASHES.has(resource.factory?.codeHash?.toLowerCase());
 }
 
+export function executionWaves(resources) {
+  const satisfied = new Set(resources.filter(resource => resource.action === 'reuse').map(resource => resource.id));
+  const remaining = new Map(resources.filter(resource => ['deploy', 'call'].includes(resource.action)).map(resource => [resource.id, resource]));
+  const waves = [];
+  while (remaining.size > 0) {
+    const ready = [...remaining.values()].filter(resource => resource.dependencies.every(id => satisfied.has(id)));
+    if (ready.length === 0) break;
+    waves.push(ready.map(resource => resource.id));
+    for (const resource of ready) {
+      remaining.delete(resource.id);
+      satisfied.add(resource.id);
+    }
+  }
+  return { waves, deferred: [...remaining.values()].map(resource => ({ id: resource.id, waitingFor: resource.dependencies.filter(id => !satisfied.has(id)) })) };
+}
+
 function laneFor(resource, primary, owner) {
   const role = resource.signerRole ?? (resource.kind === 'call' ? 'owner' : 'deployer');
   if (role === 'deployer') return { role, lane: primary };
@@ -57,7 +73,8 @@ export function createSchedule(plan, deployers, options = {}) {
   const actions = plan.resources.map((resource, order) => ({ resource, order })).filter(({ resource }) => resource.action !== 'reuse').map(({ resource, order }) => {
     const { role, lane } = laneFor(resource, pool[0], ownerLane);
     const pooled = parallel && pool.length > 1 && poolable(resource);
-    return { id: resource.id, action: resource.action, kind: resource.kind, address: resource.address, signerRole: role, lane, pooled, order };
+    return { id: resource.id, action: resource.action, kind: resource.kind, address: resource.address, signerRole: role, lane, pooled, order,
+      ...(resource.executionEdges ? { after: resource.executionEdges } : {}) };
   });
 
   const remaining = new Map(actions.map(action => [action.id, action]));
@@ -85,6 +102,7 @@ export function createSchedule(plan, deployers, options = {}) {
   }
   return {
     parallel,
+    ...(plan.graphs ? { graphs: plan.graphs, warnings: plan.warnings ?? [] } : {}),
     lanes: [...lanes.values()].map(lane => ({ ...lane, roles: [...lane.roles].sort() })),
     waves,
     deferred: [...remaining.values()].map(action => ({

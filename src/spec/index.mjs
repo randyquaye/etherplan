@@ -55,7 +55,9 @@ function assertHash(value, location) {
 }
 
 function assertAddressOrReference(value, location) {
-  assert(isAddress(value) || (isObject(value) && Object.keys(value).length === 1 && typeof value.ref === 'string'), `${location} must be an Ethereum address or one reference.`);
+  assert(isAddress(value) || (isObject(value) && typeof value.ref === 'string' &&
+    Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
+    (value.requiresLive === undefined || typeof value.requiresLive === 'boolean')), `${location} must be an Ethereum address or one reference.`);
 }
 
 function assertChecks(value, location) {
@@ -75,13 +77,33 @@ function collectReferences(value, into = new Set(), location = 'value') {
     value.forEach((item, index) => collectReferences(item, into, `${location}[${index}]`));
   } else if (isObject(value)) {
     if (Object.hasOwn(value, 'ref')) {
-      assert(Object.keys(value).length === 1 && typeof value.ref === 'string', `${location} must use a reference object with only ref.`);
+      assert(typeof value.ref === 'string' && Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
+        (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'), `${location} must use a reference object with ref and optional boolean requiresLive.`);
       into.add(value.ref);
     } else {
       for (const [key, item] of Object.entries(value)) collectReferences(item, into, `${location}.${key}`);
     }
   }
   return into;
+}
+
+function referenceDetails(value, location, into = []) {
+  if (Array.isArray(value)) value.forEach((item, index) => referenceDetails(item, `${location}[${index}]`, into));
+  else if (isObject(value)) {
+    if (Object.hasOwn(value, 'ref')) {
+      collectReferences(value, new Set(), location);
+      into.push({ reference: value.ref, requiresLive: value.requiresLive === true, location });
+    } else for (const [key, item] of Object.entries(value)) referenceDetails(item, `${location}.${key}`, into);
+  }
+  return into;
+}
+
+export function dependencyMode(spec) {
+  return spec.dependencyMode ?? (spec.schema === 2 ? 'split' : 'compatibility');
+}
+
+export function usesDependencyPlan(spec) {
+  return spec.schema === 2 || spec.dependencyMode !== undefined || spec.executionAssumptions !== undefined;
 }
 
 function validateReferences(spec) {
@@ -97,9 +119,10 @@ function validateReferences(spec) {
   for (const item of spec.calls) candidates.push([`call:${item.id}`, [item.args, item.check, item.before]]);
 
   for (const [owner, values] of candidates) {
-    for (const reference of collectReferences(values)) {
+    for (const { reference, requiresLive } of referenceDetails(values, owner)) {
       const parts = reference.split('.');
       if (parts[0] === 'values') {
+        assert(!requiresLive, `${owner} cannot use requiresLive on value ${reference}.`);
         assert(parts.length === 2, `${owner} has invalid reference ${reference}.`);
         assert(Object.hasOwn(spec.values, parts[1]), `Missing value ${parts[1]} for ${owner}.`);
       } else if (parts[0] === 'externals') {
@@ -119,8 +142,12 @@ export function parseSpec(raw) {
   const spec = cloneJson(raw);
   assert(isObject(spec), 'Spec must be an object.');
   assertNoSecrets(spec);
-  assertKeys(spec, new Set(['schema', 'chainId', 'values', 'externals', 'factory', 'contracts', 'calls']), 'Spec');
-  assert(spec.schema === 1, 'Spec must have schema: 1.');
+  assertKeys(spec, new Set(['schema', 'chainId', 'values', 'externals', 'factory', 'contracts', 'calls', 'dependencyMode', 'executionAssumptions']), 'Spec');
+  assert(spec.schema === 1 || spec.schema === 2, 'Spec must have schema: 1 or 2.');
+  assert(spec.dependencyMode === undefined || ['split', 'compatibility'].includes(spec.dependencyMode), 'Spec dependencyMode must be split or compatibility.');
+  if (spec.executionAssumptions !== undefined) {
+    assert(Array.isArray(spec.executionAssumptions) && spec.executionAssumptions.every(value => typeof value === 'string' && value.trim().length > 0), 'Spec executionAssumptions must be nonempty strings.');
+  }
   assert(Number.isSafeInteger(spec.chainId) && spec.chainId > 0, 'Spec needs a positive numeric chainId.');
   assert(Array.isArray(spec.contracts) && spec.contracts.length > 0, 'Spec needs a nonempty contracts array.');
   spec.values ??= {};
@@ -167,7 +194,7 @@ export function parseSpec(raw) {
 
   for (const item of spec.calls) {
     assert(isObject(item), 'Every call must be an object.');
-    assertKeys(item, new Set(['id', 'target', 'method', 'args', 'check', 'before', 'after', 'signerRole']), `Call ${item.id ?? '<unknown>'}`);
+    assertKeys(item, new Set(['id', 'target', 'method', 'args', 'check', 'before', 'after', 'signerRole', 'ownerOnly', 'transfersOwnership']), `Call ${item.id ?? '<unknown>'}`);
     assertId(item.id, 'Call ID');
     const fullId = `call:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
@@ -185,6 +212,8 @@ export function parseSpec(raw) {
     assert(Object.hasOwn(item.before, 'equals'), `${fullId} needs before.equals.`);
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.signerRole !== undefined) assert(typeof item.signerRole === 'string' && ROLE.test(item.signerRole), `${fullId} signerRole is invalid.`);
+    if (item.ownerOnly !== undefined) assert(typeof item.ownerOnly === 'boolean', `${fullId} ownerOnly must be boolean.`);
+    if (item.transfersOwnership !== undefined) assert(typeof item.transfersOwnership === 'boolean', `${fullId} transfersOwnership must be boolean.`);
   }
 
   if (spec.contracts.some(item => item.salt !== undefined)) {
@@ -205,45 +234,112 @@ function references(value) {
   return collectReferences(value);
 }
 
-export function graph(spec) {
-  const nodes = new Map();
-  for (const [name, item] of Object.entries(spec.externals)) nodes.set(`external:${name}`, { id: `external:${name}`, kind: 'external', type: 'external', item, dependencies: [], deps: [] });
-  for (const item of spec.contracts) nodes.set(`contract:${item.id}`, { id: `contract:${item.id}`, kind: 'contract', type: 'contract', item, dependencies: [], deps: [] });
-  for (const item of spec.calls) nodes.set(`call:${item.id}`, { id: `call:${item.id}`, kind: 'call', type: 'call', item, dependencies: [], deps: [] });
-
-  for (const node of nodes.values()) {
-    const candidates = references(
-      node.kind === 'contract' ? [node.item.address, node.item.args, node.item.libraries, node.item.checks]
-        : node.kind === 'external' ? [node.item.checks]
-          : [node.item.args, node.item.check, node.item.before],
-    );
-    if (node.kind === 'call') candidates.add(`contracts.${node.item.target}.address`);
-    const dependencies = [];
-    for (const reference of candidates) {
-      const [root, name] = reference.split('.');
-      if (root === 'contracts') dependencies.push(`contract:${name}`);
-      if (root === 'externals') dependencies.push(`external:${name}`);
-    }
-    dependencies.push(...(node.item.after ?? []));
-    node.dependencies = [...new Set(dependencies)].sort();
-    node.deps = node.dependencies;
-  }
-
+function orderGraph(nodes, field, label) {
   const visited = new Set();
   const visiting = new Set();
   const ordered = [];
   function visit(id) {
-    assert(nodes.has(id), `Missing graph node ${id}.`);
+    assert(nodes.has(id), label === 'Dependency' ? `Missing graph node ${id}.` : `Missing ${label.toLowerCase()} resource ${id}.`);
     if (visited.has(id)) return;
-    assert(!visiting.has(id), `Dependency cycle at ${id}.`);
+    assert(!visiting.has(id), `${label} cycle at ${id}.`);
     visiting.add(id);
-    for (const dependency of nodes.get(id).dependencies) visit(dependency);
+    for (const dependency of nodes.get(id)[field]) visit(dependency);
     visiting.delete(id);
     visited.add(id);
     ordered.push(nodes.get(id));
   }
   for (const id of nodes.keys()) visit(id);
   return ordered;
+}
+
+function addEdge(edges, dependency, reason) {
+  if (!edges.has(dependency)) edges.set(dependency, new Set());
+  edges.get(dependency).add(reason);
+}
+
+function edgeList(edges) {
+  return [...edges].sort(([left], [right]) => left.localeCompare(right))
+    .map(([id, reasons]) => ({ id, reasons: [...reasons].sort() }));
+}
+
+export function graph(spec) {
+  const mode = dependencyMode(spec);
+  const nodes = new Map();
+  for (const [name, item] of Object.entries(spec.externals)) nodes.set(`external:${name}`, { id: `external:${name}`, kind: 'external', type: 'external', item });
+  for (const item of spec.contracts) nodes.set(`contract:${item.id}`, { id: `contract:${item.id}`, kind: 'contract', type: 'contract', item });
+  for (const item of spec.calls) nodes.set(`call:${item.id}`, { id: `call:${item.id}`, kind: 'call', type: 'call', item });
+
+  for (const node of nodes.values()) {
+    const resolution = new Map();
+    const execution = new Map();
+    const fields = node.kind === 'contract'
+      ? [['address', node.item.address], ['args', node.item.args], ['libraries', node.item.libraries], ['checks', node.item.checks]]
+      : node.kind === 'external' ? [['checks', node.item.checks]]
+        : [['args', node.item.args], ['check', node.item.check], ['before', node.item.before]];
+    for (const [field, value] of fields) {
+      for (const { reference, requiresLive, location } of referenceDetails(value, field)) {
+        const [root, name] = reference.split('.');
+        if (root === 'values') continue;
+        const dependency = `${root === 'contracts' ? 'contract' : 'external'}:${name}`;
+        addEdge(resolution, dependency, `${location} needs ${reference}`);
+        if (mode === 'compatibility') addEdge(execution, dependency, `compatibility reference ${reference}`);
+        else if (requiresLive) addEdge(execution, dependency, `requiresLive ${reference}`);
+        else if (root === 'externals' && node.kind !== 'external') addEdge(execution, dependency, `external verification ${reference}`);
+      }
+    }
+    if (node.kind === 'call') {
+      const target = `contract:${node.item.target}`;
+      addEdge(resolution, target, 'call target address');
+      addEdge(execution, target, 'live call target');
+    }
+    for (const dependency of node.item.after ?? []) addEdge(execution, dependency, 'explicit after');
+    if (node.kind === 'call' && (node.item.transfersOwnership || node.item.method === 'transferOwnership')) {
+      for (const other of spec.calls) {
+        if (other.id !== node.item.id && other.target === node.item.target && other.ownerOnly) {
+          addEdge(execution, `call:${other.id}`, 'owner-only configuration before ownership transfer');
+        }
+      }
+    }
+    node.resolutionEdges = edgeList(resolution);
+    node.executionEdges = edgeList(execution);
+    node.resolutionDependencies = node.resolutionEdges.map(edge => edge.id);
+    node.executionDependencies = node.executionEdges.map(edge => edge.id);
+    node.dependencies = node.executionDependencies;
+    node.deps = node.dependencies;
+  }
+
+  const label = mode === 'compatibility' && spec.schema === 1 ? 'Dependency' : 'Resolution dependency';
+  const resolutionOrder = orderGraph(nodes, 'resolutionDependencies', label);
+  const executionSorted = orderGraph(nodes, 'executionDependencies', label === 'Dependency' ? label : 'Execution dependency');
+  return mode === 'compatibility' ? executionSorted : resolutionOrder;
+}
+
+export function dependencyGraphs(ordered) {
+  return {
+    resolution: ordered.map(node => ({ id: node.id, needs: node.resolutionEdges })),
+    execution: ordered.map(node => ({ id: node.id, after: node.executionEdges })),
+  };
+}
+
+export function executionOrder(ordered) {
+  return orderGraph(new Map(ordered.map(node => [node.id, node])), 'executionDependencies', 'Execution dependency');
+}
+
+export function dependencyWarnings(spec, ordered) {
+  if (dependencyMode(spec) !== 'split') return [];
+  const assumptions = spec.executionAssumptions ?? [];
+  const warnings = [];
+  for (const node of ordered) {
+    if (node.kind !== 'contract') continue;
+    const constructorReferences = referenceDetails(node.item.args, 'args').filter(({ reference }) => reference.startsWith('contracts.'));
+    for (const { reference } of constructorReferences) {
+      const dependency = `contract:${reference.split('.')[1]}`;
+      if (!node.executionDependencies.includes(dependency) && !assumptions.some(text => text.includes(`contracts.${reference.split('.')[1]}`))) {
+        warnings.push(`${node.id} constructor references ${reference} without an execution dependency; confirm it does not call the referenced contract.`);
+      }
+    }
+  }
+  return [...new Set(warnings)].sort();
 }
 
 export function impact(spec, ordered, reference) {
@@ -254,7 +350,7 @@ export function impact(spec, ordered, reference) {
     const inputs = node.kind === 'contract'
       ? [node.item.address, node.item.args, node.item.libraries, node.item.checks]
       : node.kind === 'external' ? [node.item.checks] : [node.item.args, node.item.check, node.item.before];
-    if (references(inputs).has(reference) || node.dependencies.some(dependency => affected.has(dependency))) affected.add(node.id);
+    if (references(inputs).has(reference) || node.resolutionDependencies.some(dependency => affected.has(dependency))) affected.add(node.id);
   }
   return ordered.filter(node => affected.has(node.id)).map(node => node.id);
 }
@@ -263,7 +359,8 @@ export function resolve(value, spec, addresses) {
   if (Array.isArray(value)) return value.map(item => resolve(item, spec, addresses));
   if (isObject(value)) {
     if (Object.hasOwn(value, 'ref')) {
-      assert(Object.keys(value).length === 1 && typeof value.ref === 'string', 'A reference object can contain only ref.');
+      assert(typeof value.ref === 'string' && Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
+        (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'), 'A reference object needs ref and optional boolean requiresLive.');
       const [root, name, field] = value.ref.split('.');
       if (root === 'values' && field === undefined) {
         assert(Object.hasOwn(spec.values, name), `Missing value ${name}.`);
