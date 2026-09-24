@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "chainId": 31337,
+  "values": {
+    "beneficiary": "0x0000000000000000000000000000000000000001",
+    "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "zeroAddress": "0x0000000000000000000000000000000000000000",
+    "desiredBinding": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+  },
+  "contracts": [
+    {
+      "id": "stateFixture",
+      "source": "test/fixtures/StateFixture.sol",
+      "name": "StateFixture",
+      "artifact": "StateFixture.json",
+      "salt": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "args": [
+        {
+          "ref": "values.beneficiary"
+        },
+        {
+          "ref": "values.owner"
+        }
+      ],
+      "checks": {
+        "BENEFICIARY": {
+          "ref": "values.beneficiary"
+        },
+        "owner": {
+          "ref": "values.owner"
+        }
+      },
+      "senderIndependent": true
+    }
+  ],
+  "calls": [
+    {
+      "id": "bind",
+      "target": "stateFixture",
+      "method": "setBinding",
+      "args": [
+        {
+          "ref": "values.desiredBinding"
+        }
+      ],
+      "check": {
+        "function": "binding",
+        "equals": {
+          "ref": "values.desiredBinding"
+        }
+      },
+      "before": {
+        "equals": {
+          "ref": "values.zeroAddress"
+        }
+      },
+      "signerRole": "owner"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "abi": [],
+  "bytecode": {
+    "object": "0x6002600c60003960026000f36000",
+    "linkReferences": {}
+  },
+  "deployedBytecode": {
+    "object": "0x6000",
+    "linkReferences": {},
+    "immutableReferences": {}
+  },
+  "metadata": "{\"compiler\":{\"version\":\"0.8.30\"},\"language\":\"Solidity\",\"settings\":{},\"sources\":{\"Minimal.sol\":{\"keccak256\":\"0x2222222222222222222222222222222222222222222222222222222222222222\"}}}"
+}

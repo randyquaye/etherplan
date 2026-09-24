@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "chainId": 31337,
+  "externals": {
+    "required": {
+      "address": "0x000000000000000000000000000000000000dEaD",
+      "codeHash": "0x1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "contracts": [
+    {
+      "id": "minimal",
+      "source": "Minimal.sol",
+      "name": "Minimal",
+      "artifact": "Minimal.json",
+      "salt": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "args": [],
+      "after": ["external:required"],
+      "senderIndependent": true
+    }
+  ]
+}

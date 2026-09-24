@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "chainId": 31337,
+  "contracts": [
+    {
+      "id": "first",
+      "artifact": "First.json",
+      "salt": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "args": [
+        {
+          "ref": "contracts.second.address"
+        }
+      ]
+    },
+    {
+      "id": "second",
+      "artifact": "Second.json",
+      "salt": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "args": [
+        {
+          "ref": "contracts.first.address"
+        }
+      ]
+    }
+  ]
+}
