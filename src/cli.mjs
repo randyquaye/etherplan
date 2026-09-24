@@ -12,7 +12,7 @@ import { graph, impact, parseSpec } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> --spec <file.json> [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
@@ -32,7 +32,6 @@ function parseOptions(args) {
     if (Object.hasOwn(options, name)) throw new Error(`Duplicate option ${flag}.`);
     options[name] = value;
   }
-  if (!options.spec) throw new Error(`A spec file is required.\n${USAGE}`);
   return options;
 }
 
@@ -123,7 +122,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
 }
 
 async function run(command, options) {
-  const specFile = path.resolve(options.spec);
+  const specFile = path.resolve(options.spec ?? 'spec.json');
   const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const ordered = graph(spec);
   if (command === 'graph') {
@@ -157,8 +156,7 @@ async function run(command, options) {
     return;
   }
   if (command === 'apply') {
-    if (!options.plan) throw new Error('apply needs --plan <saved-plan.json>.');
-    const plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
     print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false }));
     return;

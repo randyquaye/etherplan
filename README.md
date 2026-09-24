@@ -32,6 +32,8 @@ node src/cli.mjs impact --spec path/to/spec.json --value owner
 node src/cli.mjs validate --spec path/to/spec.json
 ```
 
+When the working directory contains `spec.json`, you can omit `--spec` for any command. For example, run `etherplan validate` from that directory. An explicit `--spec` path takes precedence.
+
 `validate` checks the complete spec, dependency graph, artifacts, declared source and contract names, ABI getters and expected values, constructor arguments, linked libraries, and every call method and argument. Declared `source` and `name` must exactly match identities present in the artifact; missing identities are errors. An external with checks must provide an ABI. Validation checks all declarations even when the desired chain state might already be satisfied.
 
 Set `ETH_RPC_URL` to the target RPC endpoint for a live plan. Plan reads the chain and writes no transactions:
@@ -56,6 +58,8 @@ For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of k
 node src/cli.mjs apply --spec path/to/spec.json --plan plan.json
 node src/cli.mjs verify --spec path/to/spec.json
 ```
+
+`apply` also reads `plan.json` from the working directory when `--plan` is omitted. With both files there, `etherplan apply` needs neither path. Use `--plan` to select a different saved plan.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 

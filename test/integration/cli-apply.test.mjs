@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -9,6 +9,7 @@ import { startAnvil, stopAnvil } from './anvil.mjs';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
 const specFile = path.join(projectDirectory, 'test/fixtures/state-fixture.json');
+const artifactFile = path.join(projectDirectory, 'test/fixtures/StateFixture.json');
 const ownerKey = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const owner = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
 let anvil;
@@ -18,8 +19,8 @@ let stateFile;
 let journalFile;
 
 function runCli(arguments_, signed = false) {
-  return spawnSync(process.execPath, ['src/cli.mjs', ...arguments_], {
-    cwd: projectDirectory,
+  return spawnSync(process.execPath, [path.join(projectDirectory, 'src/cli.mjs'), ...arguments_], {
+    cwd: directory,
     encoding: 'utf8',
     env: {
       ...process.env,
@@ -35,6 +36,8 @@ before(async () => {
   planFile = path.join(directory, 'plan.json');
   stateFile = path.join(directory, 'state.json');
   journalFile = path.join(directory, 'journal.jsonl');
+  await copyFile(specFile, path.join(directory, 'spec.json'));
+  await copyFile(artifactFile, path.join(directory, 'StateFixture.json'));
 });
 
 after(async () => {
@@ -44,7 +47,7 @@ after(async () => {
 
 test('apply deploys and binds once, writes durable state, and reruns without a transaction', async () => {
   const planned = runCli([
-    'plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+    'plan', '--out', planFile, '--state', stateFile,
   ]);
   assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
   const plan = JSON.parse(planned.stdout);
@@ -52,7 +55,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
 
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
   const applied = runCli([
-    'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+    'apply', '--state', stateFile, '--journal', journalFile,
   ], true);
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
   const first = JSON.parse(applied.stdout);
@@ -83,7 +86,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
   const rerun = runCli([
-    'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+    'apply', '--state', stateFile, '--journal', journalFile,
   ], true);
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
   const second = JSON.parse(rerun.stdout);
@@ -91,7 +94,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(second.transactions.length, 0);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceAfter);
 
-  const verified = runCli(['verify', '--spec', specFile, '--state', stateFile]);
+  const verified = runCli(['verify', '--state', stateFile]);
   assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
   assert.equal(JSON.parse(verified.stdout).status, 'verified');
 });

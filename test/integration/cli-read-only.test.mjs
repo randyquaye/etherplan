@@ -1,16 +1,23 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { copyFile, mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
 
-function runCli(...arguments_) {
-  return spawnSync(process.execPath, ['src/cli.mjs', ...arguments_], {
-    cwd: projectDirectory,
+function runCliFrom(directory, ...arguments_) {
+  return spawnSync(process.execPath, [path.join(projectDirectory, 'src/cli.mjs'), ...arguments_], {
+    cwd: directory,
     encoding: 'utf8',
     env: { ...process.env, ETH_RPC_URL: '' },
   });
+}
+
+function runCli(...arguments_) {
+  return runCliFrom(projectDirectory, ...arguments_);
 }
 
 function parseSuccess(result) {
@@ -26,6 +33,26 @@ test('graph reports the deployment and binding order', () => {
     { id: 'contract:stateFixture', deps: [] },
     { id: 'call:bind', deps: ['contract:stateFixture'] },
   ]);
+});
+
+test('commands use spec.json in the working directory unless --spec is supplied', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-cli-spec-'));
+  try {
+    const missing = runCliFrom(directory, 'graph');
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /spec\.json/);
+
+    await copyFile(path.join(projectDirectory, 'test/fixtures/state-fixture.json'), path.join(directory, 'spec.json'));
+    assert.deepEqual(parseSuccess(runCliFrom(directory, 'graph')), [
+      { id: 'contract:stateFixture', deps: [] },
+      { id: 'call:bind', deps: ['contract:stateFixture'] },
+    ]);
+
+    const alternate = path.join(projectDirectory, 'test/fixtures/parallel-lab.json');
+    assert.deepEqual(parseSuccess(runCliFrom(directory, 'impact', '--value', 'upstream', '--spec', alternate)), ['contract:alpha', 'contract:gamma']);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('impact reports constructor-value replacements in dependency order', () => {
