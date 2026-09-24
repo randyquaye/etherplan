@@ -57,6 +57,12 @@ export function normalizeAbiValue(parameter, value, label = parameter?.name || '
   if (type === 'tuple') {
     const components = parameter.components ?? [];
     const named = components.length > 0 && components.every(component => component.name);
+    if (Array.isArray(value)) {
+      if (value.length !== components.length) return fail(label, value, type);
+    } else if (!named || !value || typeof value !== 'object' ||
+      Object.keys(value).length !== components.length || components.some(component => !Object.hasOwn(value, component.name))) {
+      return fail(label, value, type);
+    }
     const items = components.map((component, index) => {
       const item = Array.isArray(value) ? value[index] : value?.[component.name];
       if (item === undefined) return fail(`${label}.${component.name || index}`, item, component.type);
@@ -71,7 +77,7 @@ function abiArgument(parameter, value, label) {
   const type = parameter?.type;
   const array = typeof type === 'string' ? arrayType(type) : null;
   if (array) {
-    if (!Array.isArray(value)) return fail(label, value, type);
+    if (!Array.isArray(value) || (array.length !== null && value.length !== array.length)) return fail(label, value, type);
     return value.map((item, index) => abiArgument({ ...parameter, type: array.inner }, item, `${label}[${index}]`));
   }
   if (/^u?int(\d+)?$/.test(type ?? '')) return BigInt(integer(value, label, type));

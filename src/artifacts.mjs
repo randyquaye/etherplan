@@ -55,6 +55,54 @@ function sameReferences(left, right) {
   return hashJson(left) === hashJson(right);
 }
 
+function sameAbi(left, right) {
+  const normalize = abi => abi.map(item => item.type === 'function' ? { ...item, outputs: item.outputs ?? [] } : item);
+  return hashJson(normalize(left)) === hashJson(normalize(right));
+}
+
+function assertAbiParameter(parameter, label) {
+  assert(plainObject(parameter) && typeof parameter.type === 'string', `${label} needs an ABI type.`);
+  const type = parameter.type;
+  const base = type.replace(/(\[[0-9]*\])*$/, '');
+  assert(!/[\[\]]/.test(base), `${label} has invalid ABI type ${type}.`);
+  for (const [, length] of type.matchAll(/\[([0-9]*)\]/g)) {
+    assert(length === '' || (Number.isSafeInteger(Number(length)) && Number(length) > 0), `${label} has invalid ABI array length in ${type}.`);
+  }
+  const integer = /^(u?int)([0-9]*)$/.exec(base);
+  const fixedBytes = /^bytes([0-9]+)$/.exec(base);
+  const fixed = /^(u?fixed)([0-9]+)x([0-9]+)$/.exec(base);
+  const valid = ['address', 'bool', 'string', 'bytes', 'function', 'tuple'].includes(base)
+    || (integer && (integer[2] === '' || (Number(integer[2]) >= 8 && Number(integer[2]) <= 256 && Number(integer[2]) % 8 === 0)))
+    || (fixedBytes && Number(fixedBytes[1]) >= 1 && Number(fixedBytes[1]) <= 32)
+    || (fixed && Number(fixed[2]) >= 8 && Number(fixed[2]) <= 256 && Number(fixed[2]) % 8 === 0 && Number(fixed[3]) >= 1 && Number(fixed[3]) <= 80);
+  assert(valid, `${label} has invalid ABI type ${type}.`);
+  if (base === 'tuple') {
+    assert(Array.isArray(parameter.components), `${label} tuple needs components.`);
+    parameter.components.forEach((component, index) => assertAbiParameter(component, `${label} component ${index}`));
+  }
+}
+
+export function assertAbi(abi, label) {
+  assert(Array.isArray(abi), `${label} has an incomplete artifact: it has no ABI.`);
+  const kinds = new Set(['function', 'constructor', 'event', 'error', 'fallback', 'receive']);
+  for (const [index, item] of abi.entries()) {
+    const location = `${label} ABI item ${index}`;
+    assert(plainObject(item) && kinds.has(item.type), `${location} has an invalid kind.`);
+    if (['function', 'event', 'error'].includes(item.type)) {
+      assert(typeof item.name === 'string' && item.name.length > 0, `${location} needs a name.`);
+    }
+    if (['function', 'constructor', 'event', 'error'].includes(item.type)) {
+      assert(Array.isArray(item.inputs), `${location} needs inputs.`);
+      item.inputs.forEach((input, position) => assertAbiParameter(input, `${location} input ${position}`));
+    }
+    if (item.outputs !== undefined) {
+      assert(Array.isArray(item.outputs), `${location} outputs must be an array.`);
+      item.outputs.forEach((output, position) => assertAbiParameter(output, `${location} output ${position}`));
+    }
+  }
+  assert(abi.filter(item => item.type === 'constructor').length <= 1, `${label} ABI has more than one constructor.`);
+}
+
 function bytecodeParts(raw, format, compilerOutput, label) {
   const outputDeployed = compilerOutput?.evm?.deployedBytecode;
   let creation;
@@ -214,11 +262,19 @@ function namedImmutables(immutableReferences, units, abi, label) {
   });
 }
 
-function namesOf(raw, parsed, options) {
-  const [target] = Object.entries(parsed?.settings?.compilationTarget ?? {});
+function namesOf(raw, parsed, options, label) {
+  const targets = Object.entries(parsed?.settings?.compilationTarget ?? {});
+  assert(targets.length <= 1, `${label} metadata has more than one compilation target.`);
+  const [target] = targets;
+  function one(field, candidates) {
+    const present = candidates.filter(value => value !== undefined);
+    for (const value of present) assert(typeof value === 'string' && value.length > 0, `${label} has an invalid ${field}.`);
+    assert(new Set(present).size <= 1, `${label} has conflicting ${field} declarations: ${present.join(', ')}.`);
+    return present[0];
+  }
   return {
-    contractName: raw.contractName ?? options.contractName ?? target?.[1],
-    sourceName: raw.sourceName ?? raw.inputSourceName ?? options.sourceName ?? target?.[0],
+    contractName: one('contract name', [raw.contractName, options.contractName, target?.[1]]),
+    sourceName: one('source name', [raw.sourceName, raw.inputSourceName, options.sourceName, target?.[0]]),
   };
 }
 
@@ -234,7 +290,10 @@ export function normalizeArtifact(raw, id, options = {}) {
   const compilerOutput = options.compilerOutput ?? null;
   const format = formatOf(raw);
   const abi = raw.abi ?? compilerOutput?.abi;
-  assert(Array.isArray(abi), `${label} has an incomplete artifact: it has no ABI.`);
+  assertAbi(abi, label);
+  if (raw.abi !== undefined && compilerOutput?.abi !== undefined) {
+    assert(sameAbi(raw.abi, compilerOutput.abi), `${label} ABI differs from its build-info compiler output.`);
+  }
   const { creation, deployed, immutableReferences } = bytecodeParts(raw, format, compilerOutput, label);
   const creationLinks = cleanLinkReferences(creation.linkReferences, `${label} creation bytecode`);
   const deployedLinks = cleanLinkReferences(deployed.linkReferences, `${label} runtime bytecode`);
@@ -246,10 +305,13 @@ export function normalizeArtifact(raw, id, options = {}) {
   };
   checkImmutableRanges(deployedBytecode.object, deployedBytecode.immutableReferences, deployedLinks, label);
   const metadata = metadataOf(raw, compilerOutput, label);
+  if (metadata.parsed?.output?.abi !== undefined) {
+    assert(Array.isArray(metadata.parsed.output.abi) && sameAbi(abi, metadata.parsed.output.abi), `${label} ABI differs from its compiler metadata.`);
+  }
   const buildIdentity = buildIdentityOf(metadata, deployedBytecode.object, label);
   const units = sourceUnits(options.sources);
   if (plainObject(raw.ast) && raw.ast.nodeType === 'SourceUnit') units.push(raw.ast);
-  const { contractName, sourceName } = namesOf(raw, metadata.parsed, options);
+  const { contractName, sourceName } = namesOf(raw, metadata.parsed, options, label);
   const normalized = {
     ...(contractName ? { contractName } : {}),
     ...(sourceName ? { sourceName } : {}),
@@ -363,16 +425,25 @@ export async function loadArtifacts(spec, specFile) {
   const cache = new Map();
   for (const item of spec.contracts) {
     const file = path.resolve(path.dirname(specFile), item.artifact);
-    if (!normalized.has(file)) {
-      const raw = await readJson(file, cache);
-      const context = await findBuildContext(file, raw, cache);
-      normalized.set(file, normalizeArtifact(raw, `${item.id} at ${file}`, context ?? {}));
+    try {
+      if (!normalized.has(file)) {
+        const raw = await readJson(file, cache);
+        const context = await findBuildContext(file, raw, cache);
+        normalized.set(file, normalizeArtifact(raw, `contract:${item.id} at ${file}`, context ?? {}));
+      }
+      const artifact = normalized.get(file);
+      if (item.name !== undefined) {
+        assert(artifact.contractName !== undefined, `Declared name ${item.name} cannot be checked: the artifact has no contract name.`);
+        assert(item.name === artifact.contractName, `Artifact expects ${item.name}, but it holds ${artifact.contractName}.`);
+      }
+      if (item.source !== undefined) {
+        assert(artifact.sourceName !== undefined, `Declared source ${item.source} cannot be checked: the artifact has no source name.`);
+        assert(item.source === artifact.sourceName, `Declared source ${item.source} differs from artifact source name ${artifact.sourceName}.`);
+      }
+      artifacts.set(item.id, artifact);
+    } catch (error) {
+      throw new Error(`contract:${item.id} artifact ${file}: ${error.message}`, { cause: error });
     }
-    const artifact = normalized.get(file);
-    if (item.name !== undefined && artifact.contractName !== undefined) {
-      assert(item.name === artifact.contractName, `contract:${item.id} expects ${item.name}, but ${file} holds ${artifact.contractName}.`);
-    }
-    artifacts.set(item.id, artifact);
   }
   return artifacts;
 }

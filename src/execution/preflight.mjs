@@ -1,5 +1,6 @@
-import { concatHex, encodeFunctionData, keccak256 } from 'viem';
+import { concatHex, keccak256 } from 'viem';
 import { canonicalJson, hashJson } from '../identity.mjs';
+import { encodeMethod } from '../validation/index.mjs';
 import { ApplyError } from './errors.mjs';
 
 const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
@@ -30,7 +31,7 @@ export function deployTransaction(resource) {
 
 export function callTransaction(resource) {
   const abi = resource.abi ?? resource.targetArtifact?.abi;
-  return { to: resource.address, data: encodeFunctionData({ abi, functionName: resource.method, args: resource.args }), value: '0' };
+  return { to: resource.address, data: encodeMethod(abi, resource.method, resource.args, resource.id), value: '0' };
 }
 
 function checkDeployPayload(planned, fresh) {

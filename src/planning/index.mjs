@@ -1,32 +1,12 @@
-import { concatHex, encodeDeployData, encodeFunctionData, isAddress, keccak256 } from 'viem';
+import { concatHex, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
 import { graph, parseSpec, resolve } from '../spec/index.mjs';
+import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.mjs';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
-}
-
-function linkBytecode(bytecode, linkReferences = {}, libraries = {}) {
-  let body = bytecode.startsWith('0x') ? bytecode.slice(2) : bytecode;
-  const used = new Set();
-  for (const [file, names] of Object.entries(linkReferences)) {
-    for (const [name, positions] of Object.entries(names)) {
-      const key = `${file}:${name}`;
-      const address = libraries[key];
-      assert(isAddress(address), `Missing linked library ${key}.`);
-      used.add(key);
-      for (const { start, length } of positions) {
-        assert(Number.isSafeInteger(start) && start >= 0 && length === 20, `Invalid link range for ${key}.`);
-        assert((start + length) * 2 <= body.length, `Link range for ${key} exceeds bytecode.`);
-        body = `${body.slice(0, start * 2)}${address.slice(2).toLowerCase()}${body.slice((start + length) * 2)}`;
-      }
-    }
-  }
-  for (const key of Object.keys(libraries)) assert(used.has(key), `Unknown linked library ${key}.`);
-  assert(/^[0-9a-fA-F]*$/.test(body) && body.length % 2 === 0, 'Linked bytecode must be complete hex.');
-  return `0x${body}`;
 }
 
 function create2Address(factory, salt, initcode) {
@@ -78,8 +58,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
       if (imported) {
         address = resolve(item.address, spec, addresses);
       } else {
-        const bytecode = linkBytecode(artifact.bytecode.object, artifact.bytecode.linkReferences, libraries);
-        initcode = encodeDeployData({ abi: artifact.abi, bytecode, args: inputs });
+        initcode = encodeConstructor(artifact, inputs, libraries, node.id);
         address = create2Address(spec.factory.address, item.salt, initcode);
       }
       assert(isAddress(address), `contract:${item.id} has an invalid resolved address.`);
@@ -144,6 +123,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
     });
   }
 
+  validateResources(resources);
   return { resources, addresses };
 }
 
@@ -156,7 +136,7 @@ export function transactionFor(resource) {
     return { to: resource.factory.address, data: concatHex([resource.salt, resource.initcode]), value: '0' };
   }
   if (resource.kind === 'call' && resource.abi && resource.method && Array.isArray(resource.args)) {
-    return { to: resource.address, data: encodeFunctionData({ abi: resource.abi, functionName: resource.method, args: resource.args }), value: '0' };
+    return { to: resource.address, data: encodeMethod(resource.abi, resource.method, resource.args, resource.id), value: '0' };
   }
   throw new Error(`${resource.id ?? 'Resource'} has no transaction payload.`);
 }

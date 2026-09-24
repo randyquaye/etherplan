@@ -1,4 +1,6 @@
 {
+  "contractName": "Minimal",
+  "sourceName": "Minimal.sol",
   "abi": [],
   "bytecode": {
     "object": "0x6002600c60003960026000f36000",

@@ -2,6 +2,7 @@ import { concatHex, encodeAbiParameters, encodeDeployData, keccak256 } from 'vie
 import { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, immutableEntries, linkBytecode, linkedLibraries } from './bytecode.mjs';
 import { simulateCreate, simulateCreate2 } from './simulate.mjs';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.mjs';
+import { abiFunction } from '../validation/index.mjs';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.mjs';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.mjs';
@@ -49,13 +50,6 @@ function newResult(resource) {
 function finish(result) {
   result.status = result.reasons.length > 0 ? 'conflict' : result.missingProofs.length > 0 ? 'unverified' : 'verified';
   return result;
-}
-
-function abiFunction(abi, name, argumentCount, label) {
-  assert(Array.isArray(abi), `${label} needs an ABI to read ${name}.`);
-  const matches = abi.filter(item => item.type === 'function' && item.name === name && (item.inputs ?? []).length === argumentCount);
-  assert(matches.length === 1, `${label} has ${matches.length === 0 ? 'no' : 'more than one'} ABI function ${name} with ${argumentCount} argument(s).`);
-  return matches[0];
 }
 
 async function readFunction(client, { address, fn, args, blockNumber }) {

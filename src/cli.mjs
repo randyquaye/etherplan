@@ -12,7 +12,7 @@ import { graph, impact, parseSpec } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|plan|schedule|verify|import|apply> --spec <file.json> [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> --spec <file.json> [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
@@ -137,7 +137,13 @@ async function run(command, options) {
   }
 
   const artifacts = await loadArtifacts(spec, specFile);
+  if (command === 'validate') {
+    const { resources } = prepareResources(spec, ordered, artifacts);
+    print({ status: 'valid', resources: resources.map(resource => resource.id) });
+    return;
+  }
   if (command === 'adapters') {
+    prepareResources(spec, ordered, artifacts);
     const output = path.resolve(options.out ?? 'generated');
     await generateAdapters(artifacts, output);
     print({ artifacts: [...artifacts.keys()], adapters: output });
@@ -187,7 +193,7 @@ async function run(command, options) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-if (!['adapters', 'graph', 'impact', 'plan', 'schedule', 'verify', 'import', 'apply'].includes(command)) {
+if (!['adapters', 'graph', 'impact', 'validate', 'plan', 'schedule', 'verify', 'import', 'apply'].includes(command)) {
   console.error(USAGE);
   process.exitCode = 2;
 } else {

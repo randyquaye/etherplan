@@ -152,7 +152,7 @@ test('prepared calls lock resolved before and after predicates with the owner ro
   const callableRouterArtifact = artifact([
     ...routerArtifact.abi,
     { type: 'function', name: 'setVault', stateMutability: 'nonpayable', inputs: [{ name: 'vault', type: 'address' }], outputs: [] },
-    { type: 'function', name: 'vault', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+    { type: 'function', name: 'vault', stateMutability: 'view', inputs: [{ name: 'account', type: 'address' }], outputs: [{ type: 'address' }] },
   ]);
   const spec = parseSpec(raw);
   const prepared = prepareResources(spec, graph(spec), new Map([['vault', vaultArtifact], ['router', callableRouterArtifact]]));

@@ -70,12 +70,12 @@
     }
   ],
   "bytecode": {
-    "object": "0x60a0604052348015600e575f5ffd5b50604051610214380380610214833981016040819052602b91606c565b6001600160a01b03918216608052600180546001600160a01b031916919092161790556098565b80516001600160a01b03811681146067575f5ffd5b919050565b5f5f60408385031215607c575f5ffd5b6083836052565b9150608f602084016052565b90509250929050565b6080516101656100af5f395f605301526101655ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80632f99c6cc1461004e578063480a51a614610091578063785f05ef146100a35780638da5cb5b146100b8575b5f5ffd5b6100757f000000000000000000000000000000000000000000000000000000000000000081565b6040516001600160a01b03909116815260200160405180910390f35b5f54610075906001600160a01b031681565b6100b66100b1366004610102565b6100cb565b005b600154610075906001600160a01b031681565b6001546001600160a01b031633146100e1575f5ffd5b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b5f60208284031215610112575f5ffd5b81356001600160a01b0381168114610128575f5ffd5b939250505056fea26469706673582212202057a69e60779dd76da72d5a95da91d0f92c0b4d29e3bd4722868f279f87b95964736f6c634300081e0033",
+    "object": "0x60a0604052348015600e575f5ffd5b50604051610214380380610214833981016040819052602b91606c565b6001600160a01b03918216608052600180546001600160a01b031916919092161790556098565b80516001600160a01b03811681146067575f5ffd5b919050565b5f5f60408385031215607c575f5ffd5b6083836052565b9150608f602084016052565b90509250929050565b6080516101656100af5f395f605301526101655ff3fe608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80632f99c6cc1461004e578063480a51a614610091578063785f05ef146100a35780638da5cb5b146100b8575b5f5ffd5b6100757f000000000000000000000000000000000000000000000000000000000000000081565b6040516001600160a01b03909116815260200160405180910390f35b5f54610075906001600160a01b031681565b6100b66100b1366004610102565b6100cb565b005b600154610075906001600160a01b031681565b6001546001600160a01b031633146100e1575f5ffd5b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b5f60208284031215610112575f5ffd5b81356001600160a01b0381168114610128575f5ffd5b939250505056fea2646970667358221220e4369a56d0cc379515b2bf6be4f8e41bf1ff5982bbbaf23e6fa6fc316252314164736f6c634300081e0033",
     "sourceMap": "64:332:0:-:0;;;181:105;;;;;;;;;;;;;;;;;;;;;;;;;;;;:::i;:::-;-1:-1:-1;;;;;236:25:0;;;;;267:5;:14;;-1:-1:-1;;;;;;267:14:0;;;;;;;;64:332;;14:177:1;93:13;;-1:-1:-1;;;;;135:31:1;;125:42;;115:70;;181:1;178;171:12;115:70;14:177;;;:::o;196:293::-;275:6;283;336:2;324:9;315:7;311:23;307:32;304:52;;;352:1;349;342:12;304:52;375:40;405:9;375:40;:::i;:::-;365:50;;434:49;479:2;468:9;464:18;434:49;:::i;:::-;424:59;;196:293;;;;;:::o;:::-;64:332:0;;;;;;;;;;;;",
     "linkReferences": {}
   },
   "deployedBytecode": {
-    "object": "0x608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80632f99c6cc1461004e578063480a51a614610091578063785f05ef146100a35780638da5cb5b146100b8575b5f5ffd5b6100757f000000000000000000000000000000000000000000000000000000000000000081565b6040516001600160a01b03909116815260200160405180910390f35b5f54610075906001600160a01b031681565b6100b66100b1366004610102565b6100cb565b005b600154610075906001600160a01b031681565b6001546001600160a01b031633146100e1575f5ffd5b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b5f60208284031215610112575f5ffd5b81356001600160a01b0381168114610128575f5ffd5b939250505056fea26469706673582212202057a69e60779dd76da72d5a95da91d0f92c0b4d29e3bd4722868f279f87b95964736f6c634300081e0033",
+    "object": "0x608060405234801561000f575f5ffd5b506004361061004a575f3560e01c80632f99c6cc1461004e578063480a51a614610091578063785f05ef146100a35780638da5cb5b146100b8575b5f5ffd5b6100757f000000000000000000000000000000000000000000000000000000000000000081565b6040516001600160a01b03909116815260200160405180910390f35b5f54610075906001600160a01b031681565b6100b66100b1366004610102565b6100cb565b005b600154610075906001600160a01b031681565b6001546001600160a01b031633146100e1575f5ffd5b5f80546001600160a01b0319166001600160a01b0392909216919091179055565b5f60208284031215610112575f5ffd5b81356001600160a01b0381168114610128575f5ffd5b939250505056fea2646970667358221220e4369a56d0cc379515b2bf6be4f8e41bf1ff5982bbbaf23e6fa6fc316252314164736f6c634300081e0033",
     "sourceMap": "64:332:0:-:0;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;90:36;;;;;;;;-1:-1:-1;;;;;178:32:1;;;160:51;;148:2;133:18;90:36:0;;;;;;;130:22;;;;;-1:-1:-1;;;;;130:22:0;;;290:104;;;;;;:::i;:::-;;:::i;:::-;;156:20;;;;;-1:-1:-1;;;;;156:20:0;;;290:104;362:5;;-1:-1:-1;;;;;362:5:0;348:10;:19;340:28;;;;;;374:7;:15;;-1:-1:-1;;;;;;374:15:0;-1:-1:-1;;;;;374:15:0;;;;;;;;;;290:104::o;222:286:1:-;281:6;334:2;322:9;313:7;309:23;305:32;302:52;;;350:1;347;340:12;302:52;376:23;;-1:-1:-1;;;;;428:31:1;;418:42;;408:70;;474:1;471;464:12;408:70;497:5;222:286;-1:-1:-1;;;222:286:1:o",
     "linkReferences": {},
     "immutableReferences": {
@@ -87,9 +87,128 @@
       ]
     }
   },
-  "rawMetadata": "{\"compiler\":{\"version\":\"0.8.30+commit.73712a01\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"beneficiary\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner_\",\"type\":\"address\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[],\"name\":\"BENEFICIARY\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"binding\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"value\",\"type\":\"address\"}],\"name\":\"setBinding\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\".context/state-fixture-build.f60tQ3/src/StateFixture.sol\":\"StateFixture\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":1},\"remappings\":[]},\"sources\":{\".context/state-fixture-build.f60tQ3/src/StateFixture.sol\":{\"keccak256\":\"0x6e4723d3f51ac52b606922db7579679dde22b53e8ad7db8c2d35233ab3ffc622\",\"license\":\"Apache-2.0\",\"urls\":[\"bzz-raw://64f9826d2986f681326f9c538eb3c85b614d0dd8ba7eb9c54e0ada598a29ebf9\",\"dweb:/ipfs/QmaFYwvf1tL2dStc7Rifo3ctjywRJJyRB6bfmTUCHj3NwU\"]}},\"version\":1}",
+  "methodIdentifiers": {
+    "BENEFICIARY()": "2f99c6cc",
+    "binding()": "480a51a6",
+    "owner()": "8da5cb5b",
+    "setBinding(address)": "785f05ef"
+  },
+  "rawMetadata": "{\"compiler\":{\"version\":\"0.8.30+commit.73712a01\"},\"language\":\"Solidity\",\"output\":{\"abi\":[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"beneficiary\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"owner_\",\"type\":\"address\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[],\"name\":\"BENEFICIARY\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"binding\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"owner\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"address\",\"name\":\"value\",\"type\":\"address\"}],\"name\":\"setBinding\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}],\"devdoc\":{\"kind\":\"dev\",\"methods\":{},\"version\":1},\"userdoc\":{\"kind\":\"user\",\"methods\":{},\"version\":1}},\"settings\":{\"compilationTarget\":{\"test/fixtures/StateFixture.sol\":\"StateFixture\"},\"evmVersion\":\"osaka\",\"libraries\":{},\"metadata\":{\"bytecodeHash\":\"ipfs\"},\"optimizer\":{\"enabled\":true,\"runs\":1},\"remappings\":[]},\"sources\":{\"test/fixtures/StateFixture.sol\":{\"keccak256\":\"0x6e4723d3f51ac52b606922db7579679dde22b53e8ad7db8c2d35233ab3ffc622\",\"license\":\"Apache-2.0\",\"urls\":[\"bzz-raw://64f9826d2986f681326f9c538eb3c85b614d0dd8ba7eb9c54e0ada598a29ebf9\",\"dweb:/ipfs/QmaFYwvf1tL2dStc7Rifo3ctjywRJJyRB6bfmTUCHj3NwU\"]}},\"version\":1}",
+  "metadata": {
+    "compiler": {
+      "version": "0.8.30+commit.73712a01"
+    },
+    "language": "Solidity",
+    "output": {
+      "abi": [
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "beneficiary",
+              "type": "address"
+            },
+            {
+              "internalType": "address",
+              "name": "owner_",
+              "type": "address"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "constructor"
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "BENEFICIARY",
+          "outputs": [
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "binding",
+          "outputs": [
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            }
+          ]
+        },
+        {
+          "inputs": [],
+          "stateMutability": "view",
+          "type": "function",
+          "name": "owner",
+          "outputs": [
+            {
+              "internalType": "address",
+              "name": "",
+              "type": "address"
+            }
+          ]
+        },
+        {
+          "inputs": [
+            {
+              "internalType": "address",
+              "name": "value",
+              "type": "address"
+            }
+          ],
+          "stateMutability": "nonpayable",
+          "type": "function",
+          "name": "setBinding"
+        }
+      ],
+      "devdoc": {
+        "kind": "dev",
+        "methods": {},
+        "version": 1
+      },
+      "userdoc": {
+        "kind": "user",
+        "methods": {},
+        "version": 1
+      }
+    },
+    "settings": {
+      "remappings": [],
+      "optimizer": {
+        "enabled": true,
+        "runs": 1
+      },
+      "metadata": {
+        "bytecodeHash": "ipfs"
+      },
+      "compilationTarget": {
+        "test/fixtures/StateFixture.sol": "StateFixture"
+      },
+      "evmVersion": "osaka",
+      "libraries": {}
+    },
+    "sources": {
+      "test/fixtures/StateFixture.sol": {
+        "keccak256": "0x6e4723d3f51ac52b606922db7579679dde22b53e8ad7db8c2d35233ab3ffc622",
+        "urls": [
+          "bzz-raw://64f9826d2986f681326f9c538eb3c85b614d0dd8ba7eb9c54e0ada598a29ebf9",
+          "dweb:/ipfs/QmaFYwvf1tL2dStc7Rifo3ctjywRJJyRB6bfmTUCHj3NwU"
+        ],
+        "license": "Apache-2.0"
+      }
+    },
+    "version": 1
+  },
   "ast": {
-    "absolutePath": ".context/state-fixture-build.f60tQ3/src/StateFixture.sol",
+    "absolutePath": "test/fixtures/StateFixture.sol",
     "id": 42,
     "exportedSymbols": {
       "StateFixture": [
@@ -612,5 +731,6 @@
       }
     ],
     "license": "Apache-2.0"
-  }
+  },
+  "id": 0
 }
