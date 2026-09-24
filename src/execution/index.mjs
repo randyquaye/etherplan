@@ -218,14 +218,13 @@ async function decide(ctx, item) {
   return item;
 }
 
-async function runBatch(ctx, wave, batch) {
-  if (new Set(batch.map(entry => entry.signer)).size !== batch.length) throw new ApplyError('schedule', `Wave ${wave} has a batch with two actions for one signer.`);
+async function prepareBatch(ctx, batch) {
   const work = [];
   for (const entry of batch) {
     const item = ctx.prepared.get(entry.id);
     if (await decide(ctx, item)) work.push({ item, entry, signer: ctx.lanes.byAddress.get(entry.signer) });
   }
-  if (work.length === 0) return;
+  if (work.length === 0) return work;
 
   const fees = await feesFor(ctx.client, ctx.config.fees);
   for (const job of work) {
@@ -239,7 +238,11 @@ async function runBatch(ctx, wave, batch) {
     job.envelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(tx.value), gas, ...fees };
     job.cost = maximumCost(job.envelope);
   }
+  return work;
+}
 
+// Check the whole batch before signing any transaction in it.
+async function checkBatchFunding(ctx, work) {
   const shortfalls = [];
   for (const job of work) {
     const lane = job.signer.address.toLowerCase();
@@ -256,7 +259,10 @@ async function runBatch(ctx, wave, batch) {
     const [first] = shortfalls;
     throw new ApplyError(first.code, `${first.reason} No transaction in this batch was signed.`, { actionId: first.job.item.planned.id, retryable: true, evidence: shortfalls.map(({ job, code, reason }) => ({ id: job.item.planned.id, code, reason })) });
   }
+}
 
+async function signBatch(ctx, wave, work) {
+  // Read every signer's nonce and reject pending transactions before recording any intent.
   for (const job of work) {
     const [latest, pending] = await Promise.all([
       ctx.client.getTransactionCount({ address: job.signer.address, blockTag: 'latest' }),
@@ -282,7 +288,10 @@ async function runBatch(ctx, wave, batch) {
     ctx.spent.set(lane, (ctx.spent.get(lane) ?? 0n) + job.cost);
     ctx.sent.push({ actionId: item.planned.id, wave, signer: job.signer.address.toLowerCase(), nonce: String(envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() });
   }
+}
 
+async function settleBatch(ctx, work) {
+  // Every signed job gets a chance to settle before a batch error is reported.
   const settled = await Promise.allSettled(work.map(async job => {
     const receipt = await send(ctx, job.item, job.signed);
     await recordReceipt(ctx, job.item, job.signed, receipt);
@@ -290,6 +299,15 @@ async function runBatch(ctx, wave, batch) {
   }));
   const rejected = settled.find(result => result.status === 'rejected');
   if (rejected) throw rejected.reason;
+}
+
+async function runBatch(ctx, wave, batch) {
+  if (new Set(batch.map(entry => entry.signer)).size !== batch.length) throw new ApplyError('schedule', `Wave ${wave} has a batch with two actions for one signer.`);
+  const work = await prepareBatch(ctx, batch);
+  if (work.length === 0) return;
+  await checkBatchFunding(ctx, work);
+  await signBatch(ctx, wave, work);
+  await settleBatch(ctx, work);
 }
 
 async function persist(ctx) {

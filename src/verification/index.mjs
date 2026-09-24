@@ -175,6 +175,11 @@ async function simulationEvidence(result, resource, client, options, code, compa
   return null;
 }
 
+/**
+ * Collects runtime, immutable, creation, simulation, and getter evidence for a contract.
+ * `finish` turns mismatches into conflict, missing proof into unverified, and complete
+ * matching evidence into verified.
+ */
 async function verifyContract(resource, client, options) {
   const result = newResult(resource);
   const artifact = resource.artifact;
