@@ -272,7 +272,7 @@ test('another label cannot spend a signer nonce while its saved signature is unr
       const input = fixture({ withCall: false });
       input.spec.contracts = input.spec.contracts.filter(contract => contract.id === name);
       input.artifacts = new Map([[name, input.artifacts.get(name)]]);
-      const plan = await createPlan({ ...input, client: localChain.client });
+      const plan = await createPlan({ ...input, client: localChain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
       return { ...input, plan, client: localChain.client, ...backend,
         scope: deploymentScope({ project: 'test', environment: 'dev', label }, plan.chain),
         signers: { deployer: [deployerA] }, confirmations: 1, pollIntervalMs: 10 };

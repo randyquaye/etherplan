@@ -5,11 +5,11 @@ import { validateState } from '../state/index.mjs';
 import { createSchedule } from '../scheduling/index.mjs';
 import { loadDependencies } from './dependencies.mjs';
 import { ApplyError } from './errors.mjs';
-import { LIVE_PHASES, intentForSigned, latestRecord, liveTransactions, openJournal } from './journal.mjs';
+import { LIVE_PHASES, intentForSigned, latestRecord, liveTransactions, openJournal, signedVariants } from './journal.mjs';
 import { acquireLock } from './lock.mjs';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.mjs';
 import { checkFactory, jsonSafe, preflight } from './preflight.mjs';
-import { broadcast, estimateGasLimit, feesFor, findReceipt, maximumCost, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt } from './transactions.mjs';
+import { broadcast, estimateGasLimit, feesFor, findKnownReceipt, findReceipt, maximumCost, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt } from './transactions.mjs';
 
 export { ApplyError } from './errors.mjs';
 export { acquireLock, LockError } from './lock.mjs';
@@ -185,20 +185,20 @@ async function finish(ctx, item, signed, receipt) {
   await markVerified(ctx, item, verification, { outcome: 'applied', transactionHash, blockNumber: receipt.blockNumber });
 }
 
-async function awaitReceipt(ctx, item, signed) {
+async function awaitReceipt(ctx, item, signed, variants = [signed]) {
   const started = Date.now();
-  const waited = await waitForReceipt(ctx.client, { hash: signed.transactionHash, signer: signed.signer, nonce: signed.nonce, pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: ctx.config.receiptTimeoutMs });
+  const waited = await waitForReceipt(ctx.client, { signedVariants: variants, signer: signed.signer, nonce: signed.nonce, pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: ctx.config.receiptTimeoutMs });
   if (waited.dead) {
     await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
   }
   if (waited.timeout) {
-    throw new ApplyError('receipt-timeout', `No receipt for ${signed.transactionHash} after ${ctx.config.receiptTimeoutMs} ms. Rerun to resume; the same signed transaction is reused.`, { actionId: item.planned.id, retryable: true });
+    throw new ApplyError('receipt-timeout', `No receipt for ${signed.transactionHash} after ${ctx.config.receiptTimeoutMs} ms. Rerun to resume or provide reviewed replacement fees.`, { actionId: item.planned.id, retryable: true });
   }
-  await report(ctx, 'receipt-observed', { actionId: item.planned.id, transactionHash: signed.transactionHash, receiptLatencyMs: Date.now() - started });
+  await report(ctx, 'receipt-observed', { actionId: item.planned.id, transactionHash: waited.receipt.transactionHash, receiptLatencyMs: Date.now() - started });
   return waited.receipt;
 }
 
-async function send(ctx, item, signed, { rebroadcast = false } = {}) {
+async function send(ctx, item, signed, { rebroadcast = false, variants = [signed] } = {}) {
   await ctx.lock.assertHeld?.();
   await append(ctx, item.planned.id, { phase: 'broadcast-attempt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast });
   await ctx.lock.assertHeld?.();
@@ -207,24 +207,89 @@ async function send(ctx, item, signed, { rebroadcast = false } = {}) {
   await report(ctx, 'broadcast-result', { actionId: item.planned.id, transactionHash: signed.transactionHash, rebroadcast, accepted: sent.accepted, broadcastLatencyMs: Date.now() - started });
   if (!sent.accepted) {
     if (sent.nonceTooLow) {
-      const receipt = await findReceipt(ctx.client, signed.transactionHash);
+      const receipt = await findKnownReceipt(ctx.client, variants);
       if (receipt) return receipt;
       await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
     }
-    const code = sent.replacementUnderpriced ? 'nonce-race' : 'broadcast-failed';
+    const code = sent.replacementUnderpriced ? 'replacement-underpriced' : 'broadcast-failed';
     throw new ApplyError(code, `Broadcast of ${signed.transactionHash} failed: ${sent.error}. Rerun to resend the same signed transaction.`, { actionId: item.planned.id, retryable: true });
   }
   await append(ctx, item.planned.id, { phase: 'broadcast', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast, ...(sent.known ? { known: true } : {}) });
   if (rebroadcast) ctx.rebroadcasts.push({ actionId: item.planned.id, transactionHash: signed.transactionHash });
-  return awaitReceipt(ctx, item, signed);
+  return awaitReceipt(ctx, item, signed, variants);
 }
 
-// Resolves a transaction that an earlier run signed: use its receipt, detect that its nonce is gone, or resend the same bytes.
+function matchingVariant(variants, receipt) {
+  const signed = variants.find(entry => entry.transactionHash.toLowerCase() === receipt.transactionHash.toLowerCase());
+  if (!signed) throw new Error('Receipt is not for a journaled transaction.');
+  return signed;
+}
+
+async function replaceSigned(ctx, item, signed, variants) {
+  const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
+  const pending = records.at(-1);
+  const orphan = pending?.phase === 'intent' && pending.replacement && pending.replacesTransactionHash?.toLowerCase() === signed.transactionHash.toLowerCase();
+  const requested = ctx.config.replacementFees;
+  if (!orphan && !requested) return signed;
+  const oldIntent = intentForSigned(ctx.journal.records, signed);
+  if (orphan && (pending.signer?.toLowerCase() !== signed.signer.toLowerCase() || pending.nonce !== signed.nonce ||
+    pending.to?.toLowerCase() !== item.planned.tx.to.toLowerCase() || String(pending.value) !== String(item.planned.tx.value) ||
+    pending.dataHash?.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase() ||
+    String(pending.gas) !== String(oldIntent.gas) || pending.reservationId !== oldIntent.reservationId)) {
+    throw new ApplyError('journal', 'Saved replacement intent differs from the reserved transaction.', { actionId: item.planned.id });
+  }
+  const fees = orphan ? { maxFeePerGas: BigInt(pending.maxFeePerGas), maxPriorityFeePerGas: BigInt(pending.maxPriorityFeePerGas) }
+    : await feesFor(ctx.client, requested);
+  if (!orphan && signed.replacement && fees.maxFeePerGas === BigInt(oldIntent.maxFeePerGas) &&
+    fees.maxPriorityFeePerGas === BigInt(oldIntent.maxPriorityFeePerGas)) return signed;
+  const minimum = value => (BigInt(value) * 110n + 99n) / 100n || 1n;
+  if (fees.maxFeePerGas < minimum(oldIntent.maxFeePerGas) || fees.maxPriorityFeePerGas < minimum(oldIntent.maxPriorityFeePerGas) ||
+    fees.maxPriorityFeePerGas > fees.maxFeePerGas) throw new ApplyError('replacement-fees', 'Replacement fees must raise both caps by at least 10% and keep priority fee within the maximum fee.', { actionId: item.planned.id });
+  const envelope = { type: 'eip1559', chainId: ctx.plan.chain.id, nonce: Number(signed.nonce), to: item.planned.tx.to,
+    data: item.planned.tx.data, value: BigInt(item.planned.tx.value), gas: BigInt(oldIntent.gas), ...fees };
+  const ceiling = BigInt(orphan ? pending.maxCostWei : requested.maxCostWei);
+  const cost = maximumCost(envelope);
+  if (cost > ceiling) throw new ApplyError('replacement-budget', `Replacement can cost ${cost} wei, above the reviewed ${ceiling} wei ceiling.`, { actionId: item.planned.id });
+  const signer = ctx.lanes.byAddress.get(signed.signer.toLowerCase());
+  if (!signer) throw new ApplyError('signer', `Signer ${signed.signer} for the replacement is unavailable.`, { actionId: item.planned.id });
+  const balance = await ctx.client.getBalance({ address: signed.signer });
+  if (balance < cost) throw new ApplyError('insufficient-funds', `Signer ${signed.signer} has ${balance} wei; replacement can cost ${cost} wei.`, { actionId: item.planned.id, retryable: true });
+  const budget = ctx.config.budgets[signed.signer.toLowerCase()];
+  if (budget !== undefined) {
+    const ledger = await commitments(ctx);
+    ledger.get(signed.signer.toLowerCase())?.delete(String(signed.nonce));
+    if (signedSpend(ledger, signed.signer.toLowerCase()) + cost > BigInt(budget)) {
+      throw new ApplyError('budget-exceeded', `Replacement would exceed signer ${signed.signer}'s ${budget} wei budget.`, { actionId: item.planned.id, retryable: true });
+    }
+  }
+  let intent = pending;
+  if (!orphan) {
+    intent = await append(ctx, item.planned.id, { phase: 'intent', replacement: true, replacesTransactionHash: signed.transactionHash,
+      maxCostWei: String(ceiling), signer: signed.signer, nonce: signed.nonce, to: envelope.to,
+      value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas),
+      maxFeePerGas: String(fees.maxFeePerGas), maxPriorityFeePerGas: String(fees.maxPriorityFeePerGas),
+      ...Object.fromEntries(['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId']
+        .filter(field => oldIntent[field] !== undefined).map(field => [field, oldIntent[field]])) });
+  }
+  let bytes;
+  try { bytes = await signWithLease(ctx, item.planned.id, signer, envelope); }
+  catch (error) { throw new ApplyError('signer', error.message, { actionId: item.planned.id, retryable: true }); }
+  const { formatVersion, planHash, chain, actionId, sequence, at, ...intentFields } = intent;
+  const replacement = await append(ctx, item.planned.id, { ...intentFields, phase: 'signed', ...bytes });
+  await validateSignedTransaction(replacement, intent, item.planned, ctx.plan.chain.id);
+  variants.push(replacement);
+  ctx.sent.push({ actionId: item.planned.id, wave: intent.wave, signer: signed.signer.toLowerCase(), nonce: signed.nonce,
+    transactionHash: replacement.transactionHash.toLowerCase() });
+  return replacement;
+}
+
+// Resolves every signed variant at a reserved nonce before resending or replacing it.
 async function settle(ctx, item, signed) {
   await report(ctx, 'recovery', { actionId: item.planned.id, transactionHash: signed.transactionHash });
-  let receipt = await findReceipt(ctx.client, signed.transactionHash);
+  const variants = signedVariants(ctx.journal.forAction(ctx.plan.planHash, item.planned.id), signed);
+  let receipt = await findKnownReceipt(ctx.client, variants);
   if (!receipt && await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-    receipt = await findReceipt(ctx.client, signed.transactionHash);
+    receipt = await findKnownReceipt(ctx.client, variants);
     if (!receipt) {
       await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
     }
@@ -233,25 +298,31 @@ async function settle(ctx, item, signed) {
     const observed = await precondition(ctx, item);
     if (observed.satisfied) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
     await checkExecutionDependencies(ctx, [{ item }], false);
-    receipt = await send(ctx, item, signed, { rebroadcast: true });
+    signed = await replaceSigned(ctx, item, signed, variants);
+    receipt = await findKnownReceipt(ctx.client, variants);
+    if (!receipt) receipt = await send(ctx, item, signed, { rebroadcast: true, variants });
   }
-  await recordReceipt(ctx, item, signed, receipt);
-  await finish(ctx, item, signed, receipt);
+  const mined = matchingVariant(variants, receipt);
+  await recordReceipt(ctx, item, mined, receipt);
+  await finish(ctx, item, mined, receipt);
 }
 
 // Another plan's transaction can hold a signer's next nonce. Record its fate, or stop if it may still be sent.
 async function settleForeign(ctx, signed) {
   const identity = { planHash: signed.planHash, chain: signed.chain };
-  const fields = { signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash };
-  let receipt = await findReceipt(ctx.client, signed.transactionHash);
+  const variants = signedVariants(ctx.journal.forAction(signed.planHash, signed.actionId), signed);
+  let receipt = await findKnownReceipt(ctx.client, variants);
   if (!receipt) {
     if (!await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
       throw new ApplyError('foreign-outstanding', `Plan ${signed.planHash} has signed transaction ${signed.transactionHash} (signer ${signed.signer}, nonce ${signed.nonce}) that is not on chain. Resume that plan, or wait until the nonce is used, before you apply another plan.`, { actionId: signed.actionId, retryable: true });
     }
-    receipt = await findReceipt(ctx.client, signed.transactionHash);
-    if (!receipt) return append(ctx, signed.actionId, { phase: 'failed', code: 'nonce-consumed', reason: 'Another transaction used this nonce.', retryable: true, ...fields }, identity);
+    receipt = await findKnownReceipt(ctx.client, variants);
+    if (!receipt) return append(ctx, signed.actionId, { phase: 'failed', code: 'nonce-consumed', reason: 'Another transaction used this nonce.', retryable: true,
+      signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash }, identity);
   }
-  return append(ctx, signed.actionId, { phase: 'receipt', ...fields, receipt: receiptJson(receipt) }, identity);
+  const mined = matchingVariant(variants, receipt);
+  return append(ctx, signed.actionId, { phase: 'receipt', signer: mined.signer, nonce: mined.nonce,
+    transactionHash: mined.transactionHash, receipt: receiptJson(receipt) }, identity);
 }
 
 async function settleJournal(ctx) {
@@ -263,9 +334,22 @@ async function settleJournal(ctx) {
       const item = ctx.prepared.get(latest.actionId);
       if (!item) throw new ApplyError('journal', 'Journal has a transaction for an action that is not in this plan.', { actionId: latest.actionId });
       try {
-        if (latest.transactionHash?.toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Latest transaction phase has a different hash from its signature.');
-        const intent = intentForSigned(records, signed);
-        await validateSignedTransaction(signed, intent, item.planned, id);
+        const variants = signedVariants(records, signed);
+        if (latest.phase === 'intent' && (!latest.replacement || latest.replacesTransactionHash?.toLowerCase() !== signed.transactionHash.toLowerCase())) {
+          throw new Error('Latest replacement intent does not name the current signature.');
+        }
+        if (latest.phase !== 'intent' && !variants.some(entry => entry.transactionHash?.toLowerCase() === latest.transactionHash?.toLowerCase())) {
+          throw new Error('Latest transaction phase has a hash outside the signed variants.');
+        }
+        for (const [index, variant] of variants.entries()) {
+          const intent = intentForSigned(records, variant);
+          await validateSignedTransaction(variant, intent, item.planned, id);
+          if (index && (intent.replacesTransactionHash?.toLowerCase() !== variants[index - 1].transactionHash.toLowerCase() ||
+            BigInt(intent.maxFeePerGas) <= BigInt(intentForSigned(records, variants[index - 1]).maxFeePerGas) ||
+            BigInt(intent.maxPriorityFeePerGas) <= BigInt(intentForSigned(records, variants[index - 1]).maxPriorityFeePerGas))) {
+            throw new Error('Signed replacement does not raise fees for its predecessor.');
+          }
+        }
       } catch (error) {
         throw new ApplyError('journal', `${latest.actionId}: ${error.message}`, { actionId: latest.actionId });
       }
@@ -288,7 +372,7 @@ async function settleJournal(ctx) {
 function pipelineAttempt(ctx, wave) {
   const actions = new Set(wave.batches.flat().map(entry => entry.id));
   const records = ctx.journal.records.filter(record => record.planHash === ctx.plan.planHash && actions.has(record.actionId) &&
-    record.reservationId && ['intent', 'signed'].includes(record.phase));
+    record.reservationId && !record.replacement && ['intent', 'signed'].includes(record.phase));
   const signatures = records.filter(record => record.phase === 'signed');
   if (!signatures.length) return null;
   if (records.some(record => record.wave !== wave.wave || record.chain.id !== ctx.plan.chain.id ||
@@ -337,18 +421,21 @@ async function resumePipelineWave(ctx, wave) {
       throw new ApplyError('journal', `Wave ${wave.wave} has inconsistent nonces or reservations for ${entry.signer}.`);
     }
     const actionRecords = ctx.journal.forAction(ctx.plan.planHash, entry.id);
-    const nextIntent = actionRecords.find(record => record.phase === 'intent' && record.sequence > intent.sequence);
+    const nextIntent = actionRecords.find(record => record.phase === 'intent' && !record.replacement && record.sequence > intent.sequence);
     const history = actionRecords.filter(record => record.sequence >= intent.sequence && (!nextIntent || record.sequence < nextIntent.sequence));
-    const signatures = history.filter(record => record.phase === 'signed');
+    const signatures = history.filter(record => record.phase === 'signed' && !record.replacement);
     if (signatures.length > 1 || signatures.some(record => record.reservationId !== intent.reservationId || (record.waveAttemptId ?? null) !== attemptId)) {
       throw new ApplyError('journal', `Wave ${wave.wave} has duplicate or mismatched signatures for ${entry.id}.`, { actionId: entry.id });
     }
-    const signed = signatures[0];
+    const original = signatures[0];
+    const signed = original ? history.filter(record => record.phase === 'signed').at(-1) : null;
+    const variants = signed ? signedVariants(history, signed) : [];
+    const signedIntent = signed ? intentForSigned(ctx.journal.records, signed) : null;
     if (signed) {
-      try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
+      try { await validateSignedTransaction(signed, signedIntent, item.planned, ctx.plan.chain.id); }
       catch (error) { throw new ApplyError('journal', error.message, { actionId: entry.id }); }
     }
-    const job = { item, entry, signer, intent, signed, records: history };
+    const job = { item, entry, signer, intent, signed, signedIntent, variants, records: history };
     group.push(job);
     groups.set(entry.signer, group);
     jobs.push(job);
@@ -364,7 +451,7 @@ async function resumePipelineWave(ctx, wave) {
   if (conflict) throw new ApplyError(conflict.records.at(-1).code, conflict.records.at(-1).reason, { actionId: conflict.item.planned.id });
 
   // Check every signer and precondition before adding any signature or broadcast.
-  for (const job of jobs) job.receipt = job.signed ? await findReceipt(ctx.client, job.signed.transactionHash) : null;
+  for (const job of jobs) job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
   for (const job of jobs.filter(entry => entry.records.at(-1)?.phase === 'verified')) await decide(ctx, job.item);
   const outstanding = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
   await checkExecutionDependencies(ctx, outstanding, false);
@@ -389,8 +476,10 @@ async function resumePipelineWave(ctx, wave) {
       const job = group.find(entry => BigInt(entry.intent.nonce) === nonce);
       if (!job?.signed) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: group[0].item.planned.id });
       let known = false;
-      try { known = Boolean(await ctx.client.getTransaction({ hash: job.signed.transactionHash })); }
-      catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+      for (const variant of job.variants) {
+        try { known ||= Boolean(await ctx.client.getTransaction({ hash: variant.transactionHash })); }
+        catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+      }
       if (!known) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: job.item.planned.id });
     }
     const unmined = group.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
@@ -406,8 +495,9 @@ async function resumePipelineWave(ctx, wave) {
     }
   }
   for (const job of jobs.filter(entry => entry.receipt && entry.records.at(-1)?.phase !== 'verified')) {
-    await recordReceipt(ctx, job.item, job.signed, job.receipt);
-    await finish(ctx, job.item, job.signed, job.receipt);
+    const mined = matchingVariant(job.variants, job.receipt);
+    await recordReceipt(ctx, job.item, mined, job.receipt);
+    await finish(ctx, job.item, mined, job.receipt);
     await decide(ctx, job.item);
     job.completed = true;
   }
@@ -420,9 +510,15 @@ async function resumePipelineWave(ctx, wave) {
     try { signed = await signWithLease(ctx, item.planned.id, signer, envelope); }
     catch (error) { throw new ApplyError('signer', error.message, { actionId: item.planned.id, retryable: true }); }
     job.signed = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId, attemptId), phase: 'signed', ...signed });
+    job.signedIntent = intent;
+    job.variants = [job.signed];
     ctx.sent.push({ actionId: item.planned.id, wave: wave.wave, signer: job.entry.signer, nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() });
   }
   const active = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.completed);
+  for (const job of active) {
+    job.signed = await replaceSigned(ctx, job.item, job.signed, job.variants);
+    job.signedIntent = intentForSigned(ctx.journal.records, job.signed);
+  }
   for (const job of active) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: job.intent.reservationId });
   if (active.length) await settlePipelineBatch(ctx, active, { rebroadcast: true });
   for (const job of jobs) await decide(ctx, job.item);
@@ -688,6 +784,8 @@ async function signPipelineBatch(ctx, wave, work) {
     try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, job.envelope); }
     catch (error) { throw new ApplyError('signer', error.message, { actionId: job.item.planned.id, retryable: true }); }
     job.signed = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, job.intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
+    job.signedIntent = job.intent;
+    job.variants = [job.signed];
     const signer = job.signer.address.toLowerCase();
     ctx.sent.push({ actionId: job.item.planned.id, wave, signer, nonce: String(job.envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() });
   }
@@ -712,21 +810,23 @@ async function pipelineConflict(ctx, job) {
 
 async function preparePipelineBroadcast(ctx, job) {
   const { signed } = job;
-  let receipt = await findReceipt(ctx.client, signed.transactionHash);
+  let receipt = await findKnownReceipt(ctx.client, job.variants);
   if (receipt) return { receipt };
   if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-    receipt = await findReceipt(ctx.client, signed.transactionHash);
+    receipt = await findKnownReceipt(ctx.client, job.variants);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
   const pending = await ctx.client.getTransactionCount({ address: signed.signer, blockTag: 'pending' });
   if (BigInt(pending) > BigInt(signed.nonce)) {
     const knownBroadcast = ctx.journal.forAction(ctx.plan.planHash, job.item.planned.id)
-      .some(record => record.phase === 'broadcast' && record.transactionHash === signed.transactionHash);
+      .some(record => record.phase === 'broadcast' && job.variants.some(variant => variant.transactionHash === record.transactionHash));
     if (!knownBroadcast) {
       let knownTransaction = false;
-      try { knownTransaction = Boolean(await ctx.client.getTransaction({ hash: signed.transactionHash })); }
-      catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+      for (const variant of job.variants) {
+        try { knownTransaction ||= Boolean(await ctx.client.getTransaction({ hash: variant.transactionHash })); }
+        catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+      }
       if (!knownTransaction) await pipelineConflict(ctx, job);
     }
   }
@@ -743,7 +843,7 @@ async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
       nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast, ...(sent.known ? { known: true } : {}) });
     if (rebroadcast) ctx.rebroadcasts.push({ actionId: job.item.planned.id, transactionHash: signed.transactionHash });
   } else if (sent.nonceTooLow) {
-    const receipt = await findReceipt(ctx.client, signed.transactionHash);
+    const receipt = await findKnownReceipt(ctx.client, job.variants);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
@@ -767,7 +867,7 @@ async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
 
 async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
   for (const job of work) {
-    try { await validateSignedTransaction(job.signed, job.intent, job.item.planned, ctx.plan.chain.id); }
+    try { await validateSignedTransaction(job.signed, job.signedIntent ?? job.intent, job.item.planned, ctx.plan.chain.id); }
     catch (error) { throw new ApplyError('journal', `${job.item.planned.id}: ${error.message}`, { actionId: job.item.planned.id }); }
   }
   const submitStart = Date.now();
@@ -799,16 +899,17 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
     const receiptStart = Date.now();
     let receipt = attempt.receipt;
     if (!receipt) {
-      const waited = await waitForReceipt(ctx.client, { hash: job.signed.transactionHash, signer: job.signed.signer, nonce: job.signed.nonce,
+      const waited = await waitForReceipt(ctx.client, { signedVariants: job.variants ?? [job.signed], signer: job.signed.signer, nonce: job.signed.nonce,
         pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: Math.max(0, deadline - Date.now()) });
       if (waited.dead) await pipelineConflict(ctx, job);
       if (waited.timeout) throw new ApplyError('receipt-timeout', `No receipt for ${job.signed.transactionHash}. Rerun to resume the same transaction.`, { actionId: job.item.planned.id, retryable: true });
       receipt = waited.receipt;
-      await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
+      await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: receipt.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
     }
     ctx.timings.receiptMs += Date.now() - receiptStart;
-    await recordReceipt(ctx, job.item, job.signed, receipt);
-    await finish(ctx, job.item, job.signed, receipt);
+    const mined = matchingVariant(job.variants ?? [job.signed], receipt);
+    await recordReceipt(ctx, job.item, mined, receipt);
+    await finish(ctx, job.item, mined, receipt);
   }));
   const rejected = settled.find(result => result.status === 'rejected');
   if (rejected) throw rejected.reason;
@@ -937,6 +1038,10 @@ async function run(ctx) {
 // Applies a pinned plan under one writer lock, with a durable journal record before every broadcast.
 export async function applyPlan({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }) {
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
+  if (options.replacementFees !== undefined && (!options.replacementFees ||
+    ['maxFeePerGas', 'maxPriorityFeePerGas', 'maxCostWei'].some(field => !/^[0-9]+$/.test(String(options.replacementFees[field] ?? ''))))) {
+    throw new ApplyError('config', 'replacementFees needs maxFeePerGas, maxPriorityFeePerGas, and maxCostWei as non-negative wei integers.');
+  }
   const config = { ...DEFAULTS, ...options, hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
   const remote = Boolean(stateStore || journalStore || lockProvider || journalCipher || scopeInput);
   if (remote && (!stateStore || !journalStore || !lockProvider || !journalCipher || !scopeInput)) throw new ApplyError('config', 'Production apply needs stateStore, journalStore, lockProvider, journalCipher, and scope together.');

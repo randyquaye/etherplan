@@ -119,8 +119,9 @@ describe('apply on a private automining chain', () => {
     older.artifacts = new Map([['alpha', older.artifacts.get('alpha')]]);
     const newer = structuredClone(older.spec);
     newer.contracts[0].salt = `0x${'e'.repeat(64)}`;
-    const oldPlan = await createPlan({ ...older, client: chain.client });
-    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client });
+    const policy = { signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' };
+    const oldPlan = await createPlan({ ...older, client: chain.client, ...policy });
+    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client, ...policy });
     const ws = await workspace();
     await apply({ ...older, spec: newer, plan: newPlan }, ws);
     const saved = await readFile(ws.stateFile, 'utf8');
@@ -136,7 +137,7 @@ describe('apply on a private automining chain', () => {
     const input = fixture({ withCall: false });
     input.spec.contracts = input.spec.contracts.slice(0, 1);
     input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
-    input.plan = await createPlan({ ...input, client: chain.client });
+    input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
     const ws = await workspace();
     const changed = { formatVersion: 1, chain: input.plan.chain, resources: {} };
     await rejectsWith(apply(input, ws, { hooks: { async afterRecord(record) {
@@ -269,6 +270,92 @@ describe('apply on a private automining chain', () => {
     await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
     assert.equal((await apply(input, ws)).status, 'applied');
     assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
+  });
+
+  async function stuckDeployment() {
+    const input = await planFor({ withCall: false });
+    const ws = await workspace();
+    await chain.rpc('anvil_setAutomine', [false]);
+    const fees = { maxFeePerGas: 10_000_000_000n, maxPriorityFeePerGas: 2_000_000_000n };
+    await rejectsWith(apply(input, ws, { fees, receiptTimeoutMs: 60 }), 'receipt-timeout', 'contract:alpha');
+    const first = (await journalOf(ws.journalFile)).find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+    const intent = (await journalOf(ws.journalFile)).find(record => record.phase === 'intent' && record.actionId === 'contract:alpha');
+    const replacementFees = { maxFeePerGas: '20000000000', maxPriorityFeePerGas: '4000000000',
+      maxCostWei: String(BigInt(intent.gas) * 20_000_000_000n + BigInt(intent.value)) };
+    return { input, ws, first, replacementFees };
+  }
+
+  test('a stuck signed transaction is replaced at the same nonce within its reviewed ceiling', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      await rejectsWith(apply(input, ws, { replacementFees: { ...replacementFees, maxCostWei: '1' } }), 'replacement-budget', 'contract:alpha');
+      await rejectsWith(apply(input, ws, { replacementFees: { ...replacementFees, maxFeePerGas: '10000000000', maxPriorityFeePerGas: '2000000000' } }), 'replacement-fees', 'contract:alpha');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'broadcast' && record.actionId === 'contract:alpha' && record.transactionHash !== first.transactionHash) {
+          await chain.rpc('anvil_setAutomine', [true]);
+        }
+      } } });
+      assert.equal(result.status, 'applied');
+      const records = await journalOf(ws.journalFile);
+      const variants = records.filter(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      assert.equal(variants.length, 2);
+      assert.equal(variants[1].replacesTransactionHash, first.transactionHash);
+      assert.equal(variants[1].nonce, first.nonce);
+      assert.ok(variants[1].sequence < records.find(record => record.phase === 'broadcast' && record.transactionHash === variants[1].transactionHash).sequence);
+      assert.equal(records.find(record => record.phase === 'verified' && record.actionId === 'contract:alpha').transactionHash, variants[1].transactionHash);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('restart after replacement signing resends its durable bytes', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      await assert.rejects(apply(input, ws, { replacementFees, hooks: { afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) throw new Error('stop after durable replacement');
+      } } }), /stop after durable replacement/);
+      const signed = (await journalOf(ws.journalFile)).filter(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      assert.equal(signed.length, 2);
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'broadcast' && record.transactionHash === signed[1].transactionHash) await chain.rpc('anvil_setAutomine', [true]);
+      } } });
+      assert.equal(result.status, 'applied');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 2);
+      assert.equal(first.nonce, signed[1].nonce);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('an original receipt wins after replacement is signed but before broadcast', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) {
+          await chain.rpc('evm_mine');
+          await chain.rpc('anvil_setAutomine', [true]);
+        }
+      } } });
+      assert.equal(result.status, 'applied');
+      const records = await journalOf(ws.journalFile);
+      assert.equal(records.find(record => record.phase === 'verified' && record.actionId === 'contract:alpha').transactionHash, first.transactionHash);
+      const replacement = records.find(record => record.phase === 'signed' && record.replacesTransactionHash);
+      assert.ok(!records.some(record => record.phase === 'broadcast' && record.transactionHash === replacement.transactionHash));
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('replacement refuses a nonce consumed by an unknown transaction', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      const outside = await deployerA.signTransaction({ type: 'eip1559', chainId: input.plan.chain.id,
+        nonce: Number(first.nonce), to: deployerA.address, data: '0x', value: 0n, gas: 21_000n,
+        maxFeePerGas: 40_000_000_000n, maxPriorityFeePerGas: 8_000_000_000n });
+      await rejectsWith(apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) {
+          await chain.rpc('eth_sendRawTransaction', [outside]);
+          await chain.rpc('evm_mine');
+        }
+      } } }), 'nonce-race', 'contract:alpha');
+      await rejectsWith(apply(input, ws, { replacementFees }), 'nonce-race', 'contract:alpha');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 2);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
   });
 
   test('a SIGKILL inside a parallel batch resumes both signed transactions with their original signers', async () => {

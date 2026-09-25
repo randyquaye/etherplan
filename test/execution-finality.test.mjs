@@ -11,7 +11,7 @@ async function setup(chain) {
   const input = fixture({ withCall: false });
   input.spec.contracts = input.spec.contracts.filter(contract => ['alpha', 'gamma'].includes(contract.id));
   input.artifacts = new Map([...input.artifacts].filter(([name]) => ['alpha', 'gamma'].includes(name)));
-  const plan = await createPlan({ ...input, client: chain.client });
+  const plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
   const dir = await mkdtemp(path.join(os.tmpdir(), 'etherplan-finality-'));
   const journalFile = path.join(dir, 'journal.jsonl');
   return { ...input, plan, client: chain.client, signers: { deployer: [deployerA] },

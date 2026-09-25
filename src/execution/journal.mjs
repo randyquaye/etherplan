@@ -119,6 +119,26 @@ export function currentTransaction(records) {
   return { signed, phase: later.at(-1)?.phase ?? 'signed', receipt: later.filter(record => record.phase === 'receipt').at(-1) ?? null };
 }
 
+// Follow durable replacement links back to the original signature for this nonce.
+export function signedVariants(records, signed) {
+  const variants = [signed];
+  const seen = new Set([signed.transactionHash?.toLowerCase()]);
+  while (variants[0].replacesTransactionHash) {
+    const current = variants[0];
+    const previous = records.find(record => record.phase === 'signed' && record.sequence < current.sequence &&
+      record.transactionHash?.toLowerCase() === current.replacesTransactionHash.toLowerCase() &&
+      record.planHash === current.planHash && record.actionId === current.actionId);
+    if (!current.replacement || !previous || seen.has(previous.transactionHash?.toLowerCase()) || previous.signer?.toLowerCase() !== current.signer?.toLowerCase() ||
+      previous.nonce !== current.nonce || previous.chain.id !== current.chain.id ||
+      previous.chain.genesisHash.toLowerCase() !== current.chain.genesisHash.toLowerCase()) {
+      throw new Error('Signed replacement has an invalid predecessor.');
+    }
+    seen.add(previous.transactionHash.toLowerCase());
+    variants.unshift(previous);
+  }
+  return variants;
+}
+
 // A retry starts a new attempt after a signed or terminal record. An unsigned
 // attempt may have failed, but two intents in one attempt are ambiguous.
 export function intentForSigned(records, signed) {
@@ -131,7 +151,7 @@ export function intentForSigned(records, signed) {
   return intents[0];
 }
 
-// Groups records by plan and action, and returns each action whose newest record is a live transaction phase.
+// Groups records by plan and action, including unresolved replacement attempts after a nonce race.
 export function liveTransactions(records) {
   const groups = new Map();
   for (const record of records) {
@@ -143,7 +163,8 @@ export function liveTransactions(records) {
   for (const list of groups.values()) {
     const latest = latestRecord(list);
     const tx = currentTransaction(list);
-    if (LIVE_PHASES.has(latest.phase) && tx) live.push({ latest, signed: tx.signed });
+    if ((LIVE_PHASES.has(latest.phase) || (latest.phase === 'intent' && latest.replacement) ||
+      (latest.phase === 'failed' && latest.code === 'nonce-race' && tx?.signed.replacement)) && tx) live.push({ latest, signed: tx.signed });
   }
   return live;
 }
