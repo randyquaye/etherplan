@@ -1,8 +1,8 @@
-export { DEFAULT_FACTORY, parseSpec, graph, impact, resolve } from './spec/index.mjs';
+export { DEFAULT_FACTORY, parseSpec, graph, dependencyGraphs, dependencyMode, dependencyWarnings, impact, resolve, usesDependencyPlan } from './spec/index.mjs';
 export { prepareResources, transactionFor, createPlan } from './planning/index.mjs';
 export { validateResources } from './validation/index.mjs';
 export { create2Address, linkBytecode, compareRuntime, verifyResource, verifyCreation } from './verification/index.mjs';
-export { createSchedule } from './scheduling/index.mjs';
+export { createSchedule, executionWaves } from './scheduling/index.mjs';
 export { readState, writeStateAtomic, importResource, recordResource, validateState } from './state/index.mjs';
 export { applyPlan, acquireLock, openJournal } from './execution/index.mjs';
 export { acquireLeases, deploymentScope, encryptionContext, inspectDeployment, lockScopes, openStoredJournal, scopeKey, validateJournal } from './execution/backends.mjs';

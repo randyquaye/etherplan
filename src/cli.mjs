@@ -12,20 +12,21 @@ import { deploymentScope, inspectDeployment } from './execution/backends.mjs';
 import { hashJson } from './identity.mjs';
 import { createPlan, prepareResources } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
-import { graph, impact, parseSpec } from './spec/index.mjs';
+import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (flag === '--parallel') {
-      if (options.parallel) throw new Error('Duplicate option --parallel.');
-      options.parallel = true;
+    if (flag === '--parallel' || flag === '--pipeline') {
+      const name = flag.slice(2);
+      if (options[name]) throw new Error(`Duplicate option ${flag}.`);
+      options[name] = true;
       continue;
     }
     const value = args[++index];
@@ -154,7 +155,9 @@ async function run(command, options) {
   const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const ordered = graph(spec);
   if (command === 'graph') {
-    print(ordered.map(node => ({ id: node.id, deps: node.dependencies })));
+    print(usesDependencyPlan(spec)
+      ? { ...dependencyGraphs(ordered), warnings: dependencyWarnings(spec, ordered) }
+      : ordered.map(node => ({ id: node.id, deps: node.dependencies })));
     return;
   }
   if (command === 'impact') {
@@ -166,7 +169,7 @@ async function run(command, options) {
   const artifacts = await loadArtifacts(spec, specFile);
   if (command === 'validate') {
     const { resources } = prepareResources(spec, ordered, artifacts);
-    print({ status: 'valid', resources: resources.map(resource => resource.id) });
+    print({ status: 'valid', resources: resources.map(resource => resource.id), ...(usesDependencyPlan(spec) ? { warnings: dependencyWarnings(spec, ordered) } : {}) });
     return;
   }
   if (command === 'adapters') {
@@ -190,11 +193,11 @@ async function run(command, options) {
       if (!options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
       const backend = await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false }));
+      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
       return;
     }
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
-    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false }));
+    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
     return;
   }
   let state;
@@ -205,7 +208,16 @@ async function run(command, options) {
     backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
     state = (await backend.stateStore.read(backend.scope))?.value ?? null;
   } else state = await readState(stateFile);
-  const plan = await createPlan({ spec, artifacts, client, state });
+  const pipeline = options.pipeline ? {
+    deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
+  } : null;
+  const plan = command === 'schedule' && options.plan
+    ? JSON.parse(await readFile(path.resolve(options.plan), 'utf8'))
+    : await createPlan({ spec, artifacts, client, state, pipeline });
+  if (command === 'schedule' && options.plan) {
+    const { planHash, ...fields } = plan;
+    if (hashJson(fields) !== planHash) throw new Error('Saved plan content does not match its planHash.');
+  }
   if (command === 'plan') {
     if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
     if (options.out) await writeJsonAtomic(path.resolve(options.out), plan);
@@ -221,9 +233,10 @@ async function run(command, options) {
     if (status !== 'verified') process.exitCode = 1;
     return;
   }
-  if (!options.deployers) throw new Error('schedule needs --deployers <address,address>.');
-  const deployers = options.deployers.split(',');
-  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? null });
+  const deployers = options.deployers?.split(',') ?? plan.pipeline?.deployers;
+  if (!deployers) throw new Error('schedule needs --deployers <address,address>.');
+  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? plan.pipeline?.owner ?? null, parallel: options.parallel ?? plan.pipeline?.parallel ?? true, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
+  if (plan.pipeline && hashJson(schedule.waves) !== hashJson(plan.pipeline.waves)) throw new Error('The requested schedule differs from the saved pipeline plan.');
   const funding = await Promise.all(deployers.map(async address => ({ address, balanceWei: (await client.getBalance({ address })).toString() })));
   if (funding.some(account => account.balanceWei === '0')) throw new Error('Every supplied deployer must have a nonzero native-token balance.');
   const requested = new Map(deployers.map(address => [address.toLowerCase(), address]));

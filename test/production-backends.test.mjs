@@ -6,7 +6,7 @@ import { acquireLeases, deploymentScope, encryptionContext, openStoredJournal, s
 import { applyPlan } from '../src/execution/index.mjs';
 import { signEnvelope } from '../src/execution/transactions.mjs';
 import { createPlan } from '../src/planning/index.mjs';
-import { deployerA, deployerB, fixture, startAnvil } from './execution/chain.mjs';
+import { deployerA, deployerB, fixture, fixtureMany, startAnvil } from './execution/chain.mjs';
 
 const chainIdentity = { id: 31337, genesisHash: `0x${'aa'.repeat(32)}` };
 const scope = deploymentScope({ project: 'test', environment: 'dev', label: 'one' }, chainIdentity);
@@ -243,6 +243,70 @@ test('an external signer cannot change the destination before journal persistenc
     await assert.rejects(applyPlan({ plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider }), error => error.code === 'signer');
     assert.equal(backend.records.filter(record => record.phase === 'signed').length, 0);
     assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 0);
+  } finally {
+    await localChain.stop();
+  }
+});
+
+async function pipelineRun(localChain, label) {
+  const input = fixtureMany(3);
+  const plan = await createPlan({ ...input, client: localChain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+  const genesisHash = (await localChain.client.getBlock({ blockNumber: 0n })).hash;
+  const deployment = deploymentScope({ project: 'test', environment: 'dev', label }, { id: 31337, genesisHash });
+  const backend = memoryBackend();
+  const signer = { signatures: 0 };
+  const signerProvider = {
+    async address() { return deployerA.address; },
+    async signTransaction(_role, transaction) { signer.signatures++; return deployerA.signTransaction(transaction); },
+  };
+  const options = { plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider, pipeline: true, pollIntervalMs: 10 };
+  return { plan, backend, signer, options };
+}
+
+test('a new runner resumes an encrypted pipeline reservation without a second signature', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { plan, backend, signer, options } = await pipelineRun(localChain, 'pipeline-recover');
+    const lastId = plan.resources.at(-1).id;
+    await assert.rejects(applyPlan({ ...options, hooks: { afterRecord(record) {
+      if (record.phase === 'signed' && record.actionId === lastId) throw new Error('simulate runner loss');
+    } } }), /simulate runner loss/);
+    const saved = backend.records.filter(record => record.phase === 'signed');
+    assert.equal(signer.signatures, 3);
+    assert.equal(new Set(saved.map(record => record.reservationId)).size, 1);
+    assert.ok(saved.every(record => record.encryptedRawTransaction && !Object.hasOwn(record, 'rawTransaction')));
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address, blockTag: 'pending' }), 0);
+
+    const events = [];
+    const result = await applyPlan({ ...options, reporter: event => events.push(event) });
+    assert.equal(result.status, 'applied');
+    assert.equal(signer.signatures, 3);
+    assert.deepEqual(result.rebroadcasts.map(entry => entry.transactionHash).sort(), saved.map(record => record.transactionHash).sort());
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 3);
+    assert.equal(Object.keys((await backend.stateStore.read()).value.resources).length, 3);
+    for (const type of ['recovery', 'broadcast-result', 'receipt-observed']) assert.equal(events.filter(event => event.type === type).length, 3, type);
+    assert.ok(events.every(event => !JSON.stringify(event).includes('rawTransaction')));
+  } finally {
+    await localChain.stop();
+  }
+});
+
+test('a lost lease stops a pipelined group before its first broadcast', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { plan, backend, signer, options } = await pipelineRun(localChain, 'pipeline-lease');
+    let lost = false;
+    const lockProvider = { async acquire(...args) {
+      const lease = await backend.lockProvider.acquire(...args);
+      return { ...lease, async assertHeld() { if (lost) throw new Error('Writer lease is lost.'); return lease.assertHeld(); } };
+    } };
+    const lastId = plan.resources.at(-1).id;
+    await assert.rejects(applyPlan({ ...options, lockProvider, hooks: { afterRecord(record) {
+      if (record.phase === 'signed' && record.actionId === lastId) lost = true;
+    } } }), /Writer lease is lost/);
+    assert.equal(signer.signatures, 3);
+    assert.equal(backend.records.filter(record => record.phase === 'broadcast-attempt').length, 0);
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address, blockTag: 'pending' }), 0);
   } finally {
     await localChain.stop();
   }
