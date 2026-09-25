@@ -6,15 +6,17 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install and test
 
-Use Node.js 20 or newer. The test suite also needs Foundry's `anvil` on `PATH`.
+Use Node.js 20 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.1-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
 
 ```sh
 npm ci
+npm install --global .
+etherplan --version
 npm run check
 npm test
 ```
 
-The package uses `viem` and the AWS SDK packages for its production backend. It is private and is not published to npm.
+The package uses `viem` and the AWS SDK packages for its production backend. Run `npm pack --dry-run` to inspect the release contents. `etherplan --help` lists commands, and `etherplan <command> --help` lists each command's options.
 
 ## Describe desired state
 
@@ -26,16 +28,16 @@ Mark owner-only configuration calls with `"ownerOnly": true`. A call with method
 
 `schema: 1` keeps the earlier behavior where references also create execution barriers. A schema 2 spec can select it with `"dependencyMode": "compatibility"`; a schema 1 spec can opt into the new behavior with `"dependencyMode": "split"`. Plans for specs that select a dependency mode, use schema 2, or declare assumptions include both graphs, edge reasons, graph-level execution waves, warnings, and assumptions in the plan hash. `graph` and `schedule` show the graphs. Apply recalculates resolved payloads and graphs before signing, then checks completed execution dependencies on chain before each dependent batch is signed.
 
-See [the neutral state fixture](test/fixtures/state-fixture.json) for the schema and [the parallel fixture](test/fixtures/parallel-lab.json) for dependent CREATE2 contracts. These are local test inputs, not network deployment recommendations. Keep signer secrets out of the specification.
+See [the neutral state fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/state-fixture.json) for the schema and [the parallel fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/parallel-lab.json) for dependent CREATE2 contracts. These are local test inputs, not network deployment recommendations. Keep signer secrets out of the specification.
 
 ## Validate, plan, apply, and verify
 
 Run offline validation in CI without an RPC URL or signer keys:
 
 ```sh
-node src/cli.mjs graph --spec path/to/spec.json
-node src/cli.mjs impact --spec path/to/spec.json --value owner
-node src/cli.mjs validate --spec path/to/spec.json
+etherplan graph --spec path/to/spec.json
+etherplan impact --spec path/to/spec.json --value owner
+etherplan validate --spec path/to/spec.json
 ```
 
 When the working directory contains `spec.json`, you can omit `--spec` for any command. For example, run `etherplan validate` from that directory. An explicit `--spec` path takes precedence.
@@ -45,8 +47,10 @@ When the working directory contains `spec.json`, you can omit `--spec` for any c
 Set `ETH_RPC_URL` to the target RPC endpoint for a live plan. Plan reads the chain and writes no transactions:
 
 ```sh
-node src/cli.mjs plan --spec path/to/spec.json --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
+etherplan plan --spec path/to/spec.json --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
 ```
+
+`plan` saves `plan.json` in the working directory by default and also prints it as JSON. Use `--out path/to/plan.json` to choose a file, or `--out -` to print without saving.
 
 | Command | Structural checks | Artifact and ABI checks | Live-chain checks |
 | --- | --- | --- | --- |
@@ -61,9 +65,9 @@ Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `c
 For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of keys in the process environment. Set `OWNER_PRIVATE_KEY` if the plan has owner calls. A single key can also be supplied as `DEPLOYER_PRIVATE_KEY`.
 
 ```sh
-node src/cli.mjs apply --spec path/to/spec.json --max-spend-wei 100000000000000000
-node src/cli.mjs apply --spec path/to/spec.json --plan plan.json
-node src/cli.mjs verify --spec path/to/spec.json
+etherplan apply --spec path/to/spec.json --max-spend-wei 100000000000000000
+etherplan apply --spec path/to/spec.json --plan plan.json
+etherplan verify --spec path/to/spec.json
 ```
 
 Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. Pipeline applies still require an explicit saved pipeline plan.
@@ -83,9 +87,9 @@ Schedule and apply both use the primary deployer serially by default. Add `--par
 Create a pipeline plan with the signer address, then apply that saved plan with `--pipeline`:
 
 ```sh
-node src/cli.mjs plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
-node src/cli.mjs schedule --spec path/to/spec.json --plan plan.json --pipeline
-node src/cli.mjs apply --spec path/to/spec.json --plan plan.json --pipeline
+etherplan plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
+etherplan schedule --spec path/to/spec.json --plan plan.json --pipeline
+etherplan apply --spec path/to/spec.json --plan plan.json --pipeline
 ```
 
 Set `DEPLOYER_PRIVATE_KEY` or `DEPLOYER_PRIVATE_KEYS` for apply as usual. Add `--owner 0xYourOwner` at plan time if the plan contains owner calls; the apply signer must match it. A pipeline plan pins signer assignments, dependency waves, and each action's nonce offset in plan order. Absolute nonces are read under the writer lock at apply time. Each ready wave is a receipt barrier: Etherplan reserves consecutive nonces per signer, checks the whole signer group's maximum cost, syncs all signed transactions to the journal, then broadcasts in nonce order and waits for receipts concurrently. For a `schema: 2` spec, the waves follow the execution graph, so contracts that only store a predicted address share a wave. Apply rechecks completed execution dependencies on chain before it reserves nonces for a wave, and before it signs or resends an unmined transaction on resume. The final report includes `timings.submitMs`, `timings.receiptMs`, and `timings.verificationMs`.

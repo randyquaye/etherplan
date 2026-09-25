@@ -833,6 +833,14 @@ async function preparePipelineBroadcast(ctx, job) {
   return {};
 }
 
+async function transactionKnown(client, hash) {
+  try { return Boolean(await client.getTransaction({ hash })); }
+  catch (error) {
+    if (error.name === 'TransactionNotFoundError') return false;
+    throw error;
+  }
+}
+
 async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
   const { signed } = job;
   await append(ctx, job.item.planned.id, { phase: 'broadcast-attempt', reservationId: signed.reservationId, signer: signed.signer,
@@ -886,26 +894,44 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
     let attempt = firstAttempts[index];
     if (attempt.error) throw attempt.error;
     const deadline = Date.now() + ctx.config.receiptTimeoutMs;
-    if (!attempt.accepted && !attempt.receipt) {
-      const retryStart = Date.now();
-      try {
-        while (!attempt.accepted && !attempt.receipt) {
-          if (Date.now() >= deadline) throw new ApplyError('broadcast-failed', `Broadcast of ${job.signed.transactionHash} did not succeed before timeout. Rerun to retry the same bytes.`, { actionId: job.item.planned.id, retryable: true });
-          await pause(ctx.config.pollIntervalMs);
-          attempt = await attemptPipelineBroadcast(ctx, job, true);
-        }
-      } finally { ctx.timings.submitMs += Date.now() - retryStart; }
-    }
+    let knownRetryAt = Date.now() + 1_000;
     const receiptStart = Date.now();
     let receipt = attempt.receipt;
-    if (!receipt) {
+    while (!receipt) {
+      if (!attempt.accepted) {
+        const retryStart = Date.now();
+        try {
+          while (!attempt.accepted && !attempt.receipt) {
+            if (Date.now() >= deadline) throw new ApplyError('broadcast-failed', `Broadcast of ${job.signed.transactionHash} did not succeed before timeout. Rerun to retry the same bytes.`, { actionId: job.item.planned.id, retryable: true });
+            await pause(ctx.config.pollIntervalMs);
+            attempt = await attemptPipelineBroadcast(ctx, job, true);
+          }
+        } finally { ctx.timings.submitMs += Date.now() - retryStart; }
+        if (attempt.receipt) {
+          receipt = attempt.receipt;
+          break;
+        }
+      }
       const waited = await waitForReceipt(ctx.client, { signedVariants: job.variants ?? [job.signed], signer: job.signed.signer, nonce: job.signed.nonce,
-        pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: Math.max(0, deadline - Date.now()) });
+        pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: Math.min(1_000, Math.max(0, deadline - Date.now())) });
       if (waited.dead) await pipelineConflict(ctx, job);
-      if (waited.timeout) throw new ApplyError('receipt-timeout', `No receipt for ${job.signed.transactionHash}. Rerun to resume the same transaction.`, { actionId: job.item.planned.id, retryable: true });
-      receipt = waited.receipt;
-      await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: receipt.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
+      if (waited.receipt) {
+        receipt = waited.receipt;
+        break;
+      }
+      if (Date.now() >= deadline) throw new ApplyError('receipt-timeout', `No receipt for ${job.signed.transactionHash}. Rerun to resume the same transaction.`, { actionId: job.item.planned.id, retryable: true });
+      // A node can acknowledge a higher nonce and leave it queued after lower
+      // nonces settle. Retry the same durable bytes if it disappears or stalls.
+      const known = await transactionKnown(ctx.client, job.signed.transactionHash);
+      if (!known || Date.now() >= knownRetryAt) {
+        const retryStart = Date.now();
+        try { attempt = await attemptPipelineBroadcast(ctx, job, true); }
+        finally { ctx.timings.submitMs += Date.now() - retryStart; }
+        knownRetryAt = Date.now() + 10_000;
+        receipt = attempt.receipt;
+      }
     }
+    if (!firstAttempts[index].receipt) await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: receipt.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
     ctx.timings.receiptMs += Date.now() - receiptStart;
     const mined = matchingVariant(job.variants ?? [job.signed], receipt);
     await recordReceipt(ctx, job.item, mined, receipt);

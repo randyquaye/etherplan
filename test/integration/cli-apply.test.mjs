@@ -47,10 +47,16 @@ after(async () => {
 });
 
 test('apply deploys and binds once, writes durable state, and reruns without a transaction', async () => {
+  const preview = runCli(['plan', '--out', '-', '--state', stateFile, '--deployers', owner,
+    '--owner', owner, '--max-spend-wei', '100000000000000000000']);
+  assert.equal(preview.status, 0, `${preview.stderr}\n${preview.stdout}`);
+  await assert.rejects(access(planFile), { code: 'ENOENT' });
+
   const planned = runCli([
     'plan', '--out', planFile, '--state', stateFile, '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000',
   ]);
   assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+  assert.deepEqual(JSON.parse(await readFile(planFile, 'utf8')), JSON.parse(planned.stdout));
   const plan = JSON.parse(planned.stdout);
   assert.deepEqual(plan.resources.map(resource => resource.action), ['deploy', 'call']);
   const recoveryPlanFile = path.join(directory, 'plans', `${plan.planHash}.json`);

@@ -82,6 +82,43 @@ async function rejectHigherNonceProxy(upstream) {
     close: () => new Promise(resolve => server.close(resolve)) };
 }
 
+async function dropAcknowledgedHigherNonceProxy(upstream, { reportKnown = false } = {}) {
+  const sends = [];
+  let dropped = false;
+  const server = createServer(async (req, res) => {
+    try {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      const rpc = JSON.parse(body);
+      if (rpc.method === 'eth_sendRawTransaction') {
+        const raw = rpc.params[0];
+        const nonce = parseTransaction(raw).nonce;
+        if (nonce === 3) {
+          sends.push(raw);
+          if (!dropped) {
+            dropped = true;
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: keccak256(raw) }));
+            return;
+          }
+        }
+      }
+      const forwarded = await fetch(upstream, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      res.writeHead(forwarded.status, { 'content-type': 'application/json' });
+      res.end(await forwarded.text());
+    } catch (error) {
+      res.writeHead(500);
+      res.end(error.message);
+    }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const client = createPublicClient({ transport: http(`http://127.0.0.1:${server.address().port}`) });
+  const reportedClient = reportKnown ? { ...client, getTransaction: async args =>
+    sends.length === 1 && args.hash === keccak256(sends[0]) ? { hash: args.hash } : client.getTransaction(args) } : client;
+  return { client: reportedClient, sends,
+    close: () => new Promise(resolve => server.close(resolve)) };
+}
+
 async function workspace() {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'etherplan-pipeline-'));
   return { dir, stateFile: path.join(dir, 'state.json'), journalFile: path.join(dir, 'journal.jsonl'), planFile: path.join(dir, 'plan.json') };
@@ -477,6 +514,46 @@ test('P-40: a temporarily rejected higher nonce is retried with identical signed
     assert.equal(records.filter(record => record.phase === 'signed').length, 4);
     assert.deepEqual(records.filter(record => record.phase === 'broadcast-attempt' && record.actionId === 'contract:holder01')
       .map(record => record.accepted), [false, false, true]);
+    assert.equal(records.filter(record => record.phase === 'verified').length, 4);
+  } finally {
+    await proxy.close();
+    await chain.stop();
+  }
+});
+
+test('an acknowledged higher nonce that disappears is rebroadcast with the same signed bytes', async () => {
+  const chain = await startAnvil();
+  const proxy = await dropAcknowledgedHigherNonceProxy(chain.url);
+  try {
+    const input = await inputFor(chain, 4);
+    const ws = await workspace();
+    const result = await apply(chain, input, ws, { client: proxy.client, receiptTimeoutMs: 5_000 });
+    assert.equal(result.status, 'applied');
+    assert.equal(proxy.sends.length, 2);
+    assert.equal(proxy.sends[0], proxy.sends[1]);
+    const records = await recordsOf(ws.journalFile);
+    assert.deepEqual(records.filter(record => record.phase === 'broadcast-attempt' && record.actionId === 'contract:holder03')
+      .map(record => record.accepted), [true, true]);
+    assert.equal(records.filter(record => record.phase === 'signed').length, 4);
+    assert.equal(records.filter(record => record.phase === 'verified').length, 4);
+  } finally {
+    await proxy.close();
+    await chain.stop();
+  }
+});
+
+test('an acknowledged higher nonce still reported as pending is retried with the same signed bytes', async () => {
+  const chain = await startAnvil();
+  const proxy = await dropAcknowledgedHigherNonceProxy(chain.url, { reportKnown: true });
+  try {
+    const input = await inputFor(chain, 4);
+    const ws = await workspace();
+    const result = await apply(chain, input, ws, { client: proxy.client, receiptTimeoutMs: 5_000 });
+    assert.equal(result.status, 'applied');
+    assert.equal(proxy.sends.length, 2);
+    assert.equal(proxy.sends[0], proxy.sends[1]);
+    const records = await recordsOf(ws.journalFile);
+    assert.equal(records.filter(record => record.phase === 'signed').length, 4);
     assert.equal(records.filter(record => record.phase === 'verified').length, 4);
   } finally {
     await proxy.close();
