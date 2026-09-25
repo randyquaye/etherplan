@@ -226,6 +226,34 @@ test('a partial reservation charges its whole group once on recovery', async () 
   }
 });
 
+test('pipeline recovery replaces a stuck reserved nonce and recognizes the mined variant', async () => {
+  const chain = await startAnvil(['--no-mining']);
+  try {
+    const input = await inputFor(chain, 1);
+    const ws = await workspace();
+    await rejectsCode(apply(chain, input, ws, { fees: { maxFeePerGas: 10_000_000_000n,
+      maxPriorityFeePerGas: 2_000_000_000n }, receiptTimeoutMs: 60 }), 'receipt-timeout');
+    const before = await recordsOf(ws.journalFile);
+    const first = before.find(record => record.phase === 'signed');
+    const intent = before.find(record => record.phase === 'intent');
+    const replacementFees = { maxFeePerGas: '20000000000', maxPriorityFeePerGas: '4000000000',
+      maxCostWei: String(BigInt(intent.gas) * 20_000_000_000n) };
+    await assert.rejects(apply(chain, input, ws, { replacementFees, hooks: { afterRecord(record) {
+      if (record.phase === 'signed' && record.replacesTransactionHash) throw new Error('stop before replacement broadcast');
+    } } }), /stop before replacement broadcast/);
+    const result = await apply(chain, input, ws, { replacementFees, hooks: { async afterRecord(record) {
+      if (record.phase === 'broadcast' && record.transactionHash !== first.transactionHash) await chain.rpc('evm_mine');
+    } } });
+    assert.equal(result.status, 'applied');
+    const records = await recordsOf(ws.journalFile);
+    const signed = records.filter(record => record.phase === 'signed');
+    assert.equal(signed.length, 2);
+    assert.equal(signed[1].nonce, first.nonce);
+    assert.equal(signed[1].replacesTransactionHash, first.transactionHash);
+    assert.equal(records.find(record => record.phase === 'verified').transactionHash, signed[1].transactionHash);
+  } finally { await chain.stop(); }
+});
+
 test('P-60/P-62–P-67: interrupted reservations resume without duplicate signatures or changed nonces', async () => {
   for (const crash of [
     { phase: 'intent', occurrence: 2 }, { phase: 'signed', occurrence: 2 }, { phase: 'signed', occurrence: 4 },

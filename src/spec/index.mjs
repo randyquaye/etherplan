@@ -138,6 +138,30 @@ function validateReferences(spec) {
   }
 }
 
+function creationReferences(item) {
+  return [
+    ...referenceDetails(item.args, 'args').map(detail => ({ ...detail, text: 'constructor references' })),
+    ...referenceDetails(item.libraries, 'libraries').map(detail => ({ ...detail, text: 'links library' })),
+  ].filter(({ reference }) => reference.startsWith('contracts.'));
+}
+
+function validateAssumptions(spec) {
+  const contracts = new Map(spec.contracts.map(item => [`contract:${item.id}`, item]));
+  const seen = new Set();
+  for (const assumption of spec.executionAssumptions ?? []) {
+    assert(isObject(assumption), 'Spec executionAssumptions must contain objects.');
+    assertKeys(assumption, new Set(['consumer', 'location', 'reference', 'reason']), 'Execution assumption');
+    assert(typeof assumption.consumer === 'string' && contracts.has(assumption.consumer), `Execution assumption has unknown consumer ${String(assumption.consumer)}.`);
+    assert(typeof assumption.location === 'string' && typeof assumption.reference === 'string' &&
+      creationReferences(contracts.get(assumption.consumer)).some(detail => detail.location === assumption.location && detail.reference === assumption.reference),
+    `Execution assumption for ${assumption.consumer} must identify a real constructor or library reference and location.`);
+    assert(typeof assumption.reason === 'string' && assumption.reason.trim().length > 0, 'Execution assumption needs a nonempty reason.');
+    const key = `${assumption.consumer}\u0000${assumption.location}\u0000${assumption.reference}`;
+    assert(!seen.has(key), `Duplicate execution assumption for ${assumption.consumer} ${assumption.location}.`);
+    seen.add(key);
+  }
+}
+
 export function parseSpec(raw) {
   const spec = cloneJson(raw);
   assert(isObject(spec), 'Spec must be an object.');
@@ -146,7 +170,7 @@ export function parseSpec(raw) {
   assert(spec.schema === 1 || spec.schema === 2, 'Spec must have schema: 1 or 2.');
   assert(spec.dependencyMode === undefined || ['split', 'compatibility'].includes(spec.dependencyMode), 'Spec dependencyMode must be split or compatibility.');
   if (spec.executionAssumptions !== undefined) {
-    assert(Array.isArray(spec.executionAssumptions) && spec.executionAssumptions.every(value => typeof value === 'string' && value.trim().length > 0), 'Spec executionAssumptions must be nonempty strings.');
+    assert(Array.isArray(spec.executionAssumptions), 'Spec executionAssumptions must be an array.');
   }
   assert(Number.isSafeInteger(spec.chainId) && spec.chainId > 0, 'Spec needs a positive numeric chainId.');
   assert(Array.isArray(spec.contracts) && spec.contracts.length > 0, 'Spec needs a nonempty contracts array.');
@@ -227,6 +251,7 @@ export function parseSpec(raw) {
   }
 
   validateReferences(spec);
+  validateAssumptions(spec);
   return spec;
 }
 
@@ -325,12 +350,6 @@ export function executionOrder(ordered) {
   return orderGraph(new Map(ordered.map(node => [node.id, node])), 'executionDependencies', 'Execution dependency');
 }
 
-// An assumption covers a contract only when it names the whole ID, so contracts.portalV2 does not cover contracts.portal.
-function assumed(assumptions, name) {
-  const pattern = new RegExp(`(^|[^A-Za-z0-9_.])contracts\\.${name}(?![A-Za-z0-9_])`);
-  return assumptions.some(text => pattern.test(text));
-}
-
 export function dependencyWarnings(spec, ordered) {
   if (dependencyMode(spec) !== 'split') return [];
   const assumptions = spec.executionAssumptions ?? [];
@@ -338,13 +357,10 @@ export function dependencyWarnings(spec, ordered) {
   for (const node of ordered) {
     if (node.kind !== 'contract') continue;
     // Creation code can call a constructor argument or a linked library, so both need an edge or an assumption.
-    const creationReferences = [
-      ...referenceDetails(node.item.args, 'args').map(detail => ({ ...detail, text: 'constructor references' })),
-      ...referenceDetails(node.item.libraries, 'libraries').map(detail => ({ ...detail, text: 'links library' })),
-    ].filter(({ reference }) => reference.startsWith('contracts.'));
-    for (const { reference, text } of creationReferences) {
+    for (const { reference, location, text } of creationReferences(node.item)) {
       const name = reference.split('.')[1];
-      if (!node.executionDependencies.includes(`contract:${name}`) && !assumed(assumptions, name)) {
+      if (!node.executionDependencies.includes(`contract:${name}`) &&
+        !assumptions.some(entry => entry.consumer === node.id && entry.location === location && entry.reference === reference)) {
         warnings.push(`${node.id} ${text} ${reference} without an execution dependency; confirm its constructor does not call the referenced contract.`);
       }
     }
