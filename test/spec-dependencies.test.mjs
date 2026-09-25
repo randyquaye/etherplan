@@ -129,7 +129,7 @@ test('resolution and execution cycles fail with different errors, and opposite o
   assert.deepEqual(executionWaves(planned), { waves: [['contract:a'], ['contract:b']], deferred: [] });
 });
 
-test('creation warnings clear only for an execution edge or an assumption that names the exact contract', () => {
+test('creation warnings clear only for the assumed consumer and reference location', () => {
   const warningsFor = fields => {
     const parsed = parseSpec(spec({
       contracts: [
@@ -149,10 +149,34 @@ test('creation warnings clear only for an execution edge or an assumption that n
   const library = 'contract:linked links library contracts.doubler.address without an execution dependency; confirm its constructor does not call the referenced contract.';
 
   assert.deepEqual(warningsFor({}), [library, portal, registry]);
-  assert.deepEqual(warningsFor({ executionAssumptions: ['constructor does not call contracts.portal'] }), [library, registry]);
-  assert.deepEqual(warningsFor({ executionAssumptions: ['constructor does not call contracts.portal.address', 'Doubler is pure: contracts.doubler'] }), [registry]);
-  assert.deepEqual(warningsFor({ executionAssumptions: ['constructor does not call contracts.portalV2', 'constructor does not call xcontracts.registry'] }), [library, portal, registry]);
+  const portalAssumption = { consumer: 'contract:usesPortal', location: 'args[0]', reference: 'contracts.portal.address', reason: 'Constructor only stores the predicted address.' };
+  const libraryAssumption = { consumer: 'contract:linked', location: `libraries.${DOUBLER}`, reference: 'contracts.doubler.address', reason: 'Constructor does not call the library.' };
+  assert.deepEqual(warningsFor({ executionAssumptions: [portalAssumption] }), [library, registry]);
+  assert.deepEqual(warningsFor({ executionAssumptions: [portalAssumption, libraryAssumption] }), [registry]);
   assert.deepEqual(warningsFor({ dependencyMode: 'compatibility' }), []);
+});
+
+test('an assumption for one of two consumers leaves the other warning visible', () => {
+  const parsed = parseSpec(spec({ contracts: [
+    holder('registry', '1', { ref: 'values.one' }),
+    holder('first', '2', { ref: 'contracts.registry.address' }),
+    holder('second', '3', { ref: 'contracts.registry.address' }),
+  ], executionAssumptions: [{ consumer: 'contract:first', location: 'args[0]', reference: 'contracts.registry.address', reason: 'Only stores the address.' }] }));
+  assert.deepEqual(dependencyWarnings(parsed, graph(parsed)), [
+    'contract:second constructor references contracts.registry.address without an execution dependency; confirm its constructor does not call the referenced contract.',
+  ]);
+});
+
+test('an assumption for one argument leaves a second use of the same reference visible', () => {
+  const raw = spec({ contracts: [
+    holder('registry', '1', { ref: 'values.one' }),
+    { id: 'consumer', artifact: 'Holder.json', salt: salt('2'), args: [
+      { ref: 'contracts.registry.address' }, { ref: 'contracts.registry.address' },
+    ] },
+  ], executionAssumptions: [{ consumer: 'contract:consumer', location: 'args[0]',
+    reference: 'contracts.registry.address', reason: 'First argument is stored.' }] });
+  const parsed = parseSpec(raw);
+  assert.equal(dependencyWarnings(parsed, graph(parsed)).length, 1);
 });
 
 test('an execution edge from after or requiresLive clears the creation warning', () => {
@@ -174,8 +198,14 @@ test('the spec rejects invalid dependency fields and undeclared outputs', () => 
   rejects(raw => { raw.schema = 3; }, /schema: 1 or 2/);
   rejects(raw => { raw.dependencyMode = 'loose'; }, /dependencyMode must be split or compatibility/);
   for (const assumptions of [[''], ['   '], 'constructor does not call contracts.a', [1]]) {
-    rejects(raw => { raw.executionAssumptions = assumptions; }, /executionAssumptions must be nonempty strings/);
+    rejects(raw => { raw.executionAssumptions = assumptions; }, /executionAssumptions/);
   }
+  const assumption = { consumer: 'contract:b', location: 'args[0]', reference: 'contracts.a.address', reason: 'Only stores the address.' };
+  rejects(raw => { raw.executionAssumptions = [{ ...assumption, consumer: 'contract:missing' }]; }, /unknown consumer/);
+  rejects(raw => { raw.executionAssumptions = [{ ...assumption, location: 'checks.UPSTREAM' }]; }, /real constructor or library reference/);
+  rejects(raw => { raw.executionAssumptions = [{ ...assumption, reference: 'contracts.missing.address' }]; }, /real constructor or library reference/);
+  rejects(raw => { raw.executionAssumptions = [{ ...assumption, reason: ' ' }]; }, /nonempty reason/);
+  rejects(raw => { raw.executionAssumptions = [assumption, assumption]; }, /Duplicate execution assumption/);
   rejects(raw => { raw.contracts[1].args = [{ ref: 'contracts.a.address', requiresLive: 'true' }]; }, /optional boolean requiresLive/);
   rejects(raw => { raw.contracts[1].args = [{ ref: 'contracts.a.address', live: true }]; }, /optional boolean requiresLive/);
   rejects(raw => { raw.contracts[0].args = [{ ref: 'values.one', requiresLive: true }]; }, /cannot use requiresLive on value values\.one/);

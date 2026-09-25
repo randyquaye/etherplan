@@ -18,8 +18,8 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline] [--rebaseline]\nSchedule and apply are serial by default; use --parallel for eligible concurrent deployments.';
-const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline] [--rebaseline] [--replace-max-fee-per-gas wei --replace-priority-fee-per-gas wei --replace-max-cost-wei wei]\nSchedule and apply are serial by default; use --parallel for eligible concurrent deployments.';
+const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei']);
 
 function parseOptions(args) {
   const options = {};
@@ -214,6 +214,11 @@ async function run(command, options) {
     return;
   }
   if (command === 'apply') {
+    const replacementFlags = ['replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'];
+    const replacementFees = replacementFlags.some(flag => options[flag] !== undefined) ? {
+      maxFeePerGas: options['replace-max-fee-per-gas'], maxPriorityFeePerGas: options['replace-priority-fee-per-gas'],
+      maxCostWei: options['replace-max-cost-wei'],
+    } : undefined;
     if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
     if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
     let plan;
@@ -241,11 +246,11 @@ async function run(command, options) {
     if (options.backend) {
       const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
+      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
       return;
     }
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
-    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
+    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
     return;
   }
   let plan;

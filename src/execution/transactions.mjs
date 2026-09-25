@@ -57,7 +57,7 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
   if (!isAddress(intent.signer ?? '') || !isAddress(signed.signer ?? '') ||
     !isAddressEqual(intent.signer, signed.signer)) throw new Error('Signed signer differs from the durable intent.');
   // Pipeline records copy the full intent; serial records copy only signer and nonce.
-  const duplicateFields = ['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas'];
+  const duplicateFields = ['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas', 'replacement', 'replacesTransactionHash', 'maxCostWei'];
   for (const field of duplicateFields) {
     if ((intent.reservationId || field === 'nonce' || field in signed) &&
       String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) throw new Error(`Signed ${field} differs from the durable intent.`);
@@ -88,6 +88,7 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
     (parsed.value ?? 0n) !== expected.value || parsed.gas !== expected.gas ||
     parsed.maxFeePerGas !== expected.maxFeePerGas || (parsed.maxPriorityFeePerGas ?? 0n) !== expected.maxPriorityFeePerGas ||
     !isAddressEqual(sender, intent.signer)) throw new Error('Saved signed transaction differs from its plan or intent.');
+  if (intent.replacement && maximumCost(expected) > toBigInt(intent.maxCostWei, 'Replacement maxCostWei')) throw new Error('Signed replacement exceeds its reviewed spend ceiling.');
   return maximumCost(expected);
 }
 
@@ -119,19 +120,28 @@ export async function findReceipt(client, hash) {
   }
 }
 
+export async function findKnownReceipt(client, signedVariants) {
+  for (const signed of signedVariants) {
+    const receipt = await findReceipt(client, signed.transactionHash);
+    if (receipt) return receipt;
+  }
+  return null;
+}
+
 export async function nonceConsumed(client, signer, nonce) {
   const latest = await client.getTransactionCount({ address: signer, blockTag: 'latest' });
   return BigInt(latest) > BigInt(nonce);
 }
 
 // Waits until the transaction has a receipt, another transaction uses its nonce, or the timeout passes.
-export async function waitForReceipt(client, { hash, signer, nonce, pollIntervalMs, timeoutMs }) {
+export async function waitForReceipt(client, { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }) {
   const deadline = Date.now() + timeoutMs;
+  const variants = signedVariants ?? [{ transactionHash: hash }];
   for (;;) {
-    const receipt = await findReceipt(client, hash);
+    const receipt = await findKnownReceipt(client, variants);
     if (receipt) return { receipt };
     if (await nonceConsumed(client, signer, nonce)) {
-      const late = await findReceipt(client, hash);
+      const late = await findKnownReceipt(client, variants);
       return late ? { receipt: late } : { dead: true };
     }
     if (Date.now() >= deadline) return { timeout: true };

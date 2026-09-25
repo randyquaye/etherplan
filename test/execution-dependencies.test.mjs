@@ -51,7 +51,7 @@ function storedAddress(extra = {}) {
       { id: 'target', artifact: 'Holder.json', salt: salt('a'), args: [{ ref: 'values.upstream' }], checks: { UPSTREAM: { ref: 'values.upstream' } }, senderIndependent: true },
       { id: 'stored', artifact: 'Holder.json', salt: salt('b'), args: [{ ref: 'contracts.target.address' }], checks: { UPSTREAM: { ref: 'contracts.target.address' } }, senderIndependent: true },
     ],
-    executionAssumptions: ['constructor does not call contracts.target'],
+    executionAssumptions: [{ consumer: 'contract:stored', location: 'args[0]', reference: 'contracts.target.address', reason: 'Constructor only stores the address.' }],
     ...extra,
   };
   return { spec, artifacts: new Map([['target', holderArtifact], ['stored', holderArtifact]]) };
@@ -220,7 +220,7 @@ describe('split execution dependencies on a private chain', () => {
     const { plan } = base;
     assert.equal(plan.formatVersion, 2);
     assert.equal(plan.dependencyMode, 'split');
-    assert.deepEqual(plan.executionAssumptions, ['constructor does not call contracts.target']);
+    assert.deepEqual(plan.executionAssumptions, storedAddress().spec.executionAssumptions);
     assert.deepEqual(plan.graphs.resolution.find(node => node.id === 'contract:stored').needs, [
       { id: 'contract:target', reasons: ['args[0] needs contracts.target.address', 'checks.UPSTREAM needs contracts.target.address'] },
     ]);
@@ -230,7 +230,7 @@ describe('split execution dependencies on a private chain', () => {
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reordered(item)])) : value;
     const hashOf = async spec => (await createPlan({ ...storedAddress(), spec, client: chain.client })).planHash;
     assert.equal(await hashOf(reordered(storedAddress().spec)), plan.planHash);
-    assert.notEqual(await hashOf(storedAddress({ executionAssumptions: ['constructor does not call contracts.target (reviewed)'] }).spec), plan.planHash);
+    assert.notEqual(await hashOf(storedAddress({ executionAssumptions: [{ ...storedAddress().spec.executionAssumptions[0], reason: 'Reviewed constructor; only stores the address.' }] }).spec), plan.planHash);
 
     const edited = structuredClone(plan);
     edited.graphs.execution.find(node => node.id === 'contract:stored').after = [{ id: 'contract:target', reasons: ['explicit after'] }];
