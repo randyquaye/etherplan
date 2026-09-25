@@ -5,7 +5,7 @@ import { validateState } from '../state/index.mjs';
 import { createSchedule } from '../scheduling/index.mjs';
 import { loadDependencies } from './dependencies.mjs';
 import { ApplyError } from './errors.mjs';
-import { LIVE_PHASES, latestRecord, liveTransactions, openJournal } from './journal.mjs';
+import { LIVE_PHASES, intentForSigned, latestRecord, liveTransactions, openJournal } from './journal.mjs';
 import { acquireLock } from './lock.mjs';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.mjs';
 import { checkFactory, jsonSafe, preflight } from './preflight.mjs';
@@ -224,10 +224,14 @@ async function settleJournal(ctx) {
     if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Resume that plan first.`, { actionId: latest.actionId });
     if (latest.planHash === ctx.plan.planHash) {
       const item = ctx.prepared.get(latest.actionId);
-      const intent = ctx.journal.forAction(ctx.plan.planHash, latest.actionId).filter(record => record.phase === 'intent' && record.sequence < signed.sequence).at(-1);
-      if (!item || !intent) throw new ApplyError('journal', 'Signed journal transaction has no matching action or intent.', { actionId: latest.actionId });
-      try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
-      catch (error) { throw new ApplyError('journal', `Saved signed transaction is invalid: ${error.message}`, { actionId: latest.actionId }); }
+      if (!item) throw new ApplyError('journal', 'Journal has a transaction for an action that is not in this plan.', { actionId: latest.actionId });
+      try {
+        if (latest.transactionHash?.toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Latest transaction phase has a different hash from its signature.');
+        const intent = intentForSigned(records, signed);
+        await validateSignedTransaction(signed, intent, item.planned, id);
+      } catch (error) {
+        throw new ApplyError('journal', `${latest.actionId}: ${error.message}`, { actionId: latest.actionId });
+      }
     }
   }
   for (const { latest, signed } of liveTransactions(records)) {
