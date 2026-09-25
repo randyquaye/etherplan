@@ -113,6 +113,18 @@ export function currentTransaction(records) {
   return { signed, phase: later.at(-1)?.phase ?? 'signed', receipt: later.filter(record => record.phase === 'receipt').at(-1) ?? null };
 }
 
+// A retry starts a new attempt after a signed or terminal record. An unsigned
+// attempt may have failed, but two intents in one attempt are ambiguous.
+export function intentForSigned(records, signed) {
+  const sameAction = records.filter(record => record.planHash === signed.planHash && record.actionId === signed.actionId &&
+    record.chain.id === signed.chain.id && record.chain.genesisHash.toLowerCase() === signed.chain.genesisHash.toLowerCase() &&
+    record.sequence < signed.sequence);
+  const boundary = sameAction.filter(record => ['signed', 'failed', 'verified'].includes(record.phase)).at(-1)?.sequence ?? 0;
+  const intents = sameAction.filter(record => record.phase === 'intent' && record.sequence > boundary);
+  if (intents.length !== 1) throw new Error(`Signed transaction needs one preceding intent in its attempt; found ${intents.length}.`);
+  return intents[0];
+}
+
 // Groups records by plan and action, and returns each action whose newest record is a live transaction phase.
 export function liveTransactions(records) {
   const groups = new Map();
