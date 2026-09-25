@@ -1,8 +1,9 @@
 import { concatHex, encodeAbiParameters, encodeDeployData, keccak256 } from 'viem';
 import { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, immutableEntries, linkBytecode, linkedLibraries } from './bytecode.mjs';
-import { simulateCreate, simulateCreate2 } from './simulate.mjs';
+import { simulateCreate2 } from './simulate.mjs';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.mjs';
 import { abiFunction } from '../validation/index.mjs';
+import { validateCreationProof } from './creation-proof.mjs';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.mjs';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.mjs';
@@ -49,6 +50,7 @@ function newResult(resource) {
 
 function finish(result) {
   result.status = result.reasons.length > 0 ? 'conflict' : result.missingProofs.length > 0 ? 'unverified' : 'verified';
+  if (result.status !== 'verified') delete result.creationProof;
   return result;
 }
 
@@ -130,11 +132,13 @@ function immutableLabel(info, id) {
   return info?.name ? `${info.name} (AST ${id})` : `AST ${id}`;
 }
 
-async function creationEvidence(result, resource, client, transactionHash, blockNumber, code) {
-  const creation = await verifyCreation(client, resource, transactionHash, { blockNumber, liveCode: code });
-  const method = creation.kind === 'create2' ? 'create2-transaction' : 'create-replay';
+async function creationEvidence(result, resource, client, transactionHash, options, code) {
+  const creation = await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
+  const method = creation.kind === 'create2' ? 'create2-transaction' : 'create-transaction';
   result.proofs.push({ name: 'creation', method, expected: creation.initcodeHash ?? null, actual: transactionHash, matched: creation.status === 'verified' });
-  result.evidence.creation = creation;
+  const { proof, ...evidence } = creation;
+  result.evidence.creation = evidence;
+  if (creation.status === 'verified') result.creationProof = creation.proof;
   if (creation.status === 'conflict') result.reasons.push(...creation.reasons);
   return creation.status === 'verified' ? method : null;
 }
@@ -233,7 +237,11 @@ async function verifyContract(resource, client, options) {
     else exact ??= 'expected-code-hash';
   }
 
-  if (!exact && options.transactionHash) exact = await creationEvidence(result, resource, client, options.transactionHash, blockNumber, code);
+  const transactionHash = options.transactionHash ?? options.creationProof?.transactionHash;
+  if (transactionHash) {
+    const creationMethod = await creationEvidence(result, resource, client, transactionHash, { ...options, blockNumber }, code);
+    exact ??= creationMethod;
+  }
 
   const covered = new Map();
   const deployable = Boolean(resource.salt && resource.factory && resource.initcode);
@@ -347,14 +355,14 @@ export async function verifyResource(resource, client, options = {}) {
   throw new Error(`${resource.id} has unknown kind ${resource.kind}.`);
 }
 
-/**
- * Checks that `transactionHash` created the resource from its expected initcode and replays the creation at the parent
- * block. A direct CREATE must have created this address from the same initcode; a CREATE2 transaction must send
- * `salt || initcode` to the resource factory. Evidence that concerns another address or payload is `unverified`, not
- * proof. A direct CREATE of this address from different initcode is a `conflict`.
- */
+/** Check creation identity and the canonical receipt block; capture or revalidate an exact runtime anchor. */
 export async function verifyCreation(client, resource, transactionHash, options = {}) {
   const result = { kind: null, transactionHash, address: resource.address, status: 'unverified', matched: false, exactRuntime: false, codeHash: null, initcodeHash: null, blockNumber: null, reasons: [] };
+  const saved = options.creationProof ? validateCreationProof(options.creationProof) : null;
+  if (saved && lower(saved.transactionHash) !== lower(transactionHash)) {
+    result.reasons.push('Saved creation proof names a different transaction.');
+    return result;
+  }
   let transaction;
   let receipt;
   try {
@@ -364,9 +372,37 @@ export async function verifyCreation(client, resource, transactionHash, options 
     result.reasons.push(`Creation transaction is not available: ${safeError(error)}`);
     return result;
   }
+  if (!transaction || !receipt) {
+    result.reasons.push('Creation transaction or receipt is not available.');
+    return result;
+  }
+  if ((transaction.hash && lower(transaction.hash) !== lower(transactionHash)) ||
+    (receipt.transactionHash && lower(receipt.transactionHash) !== lower(transactionHash))) {
+    result.reasons.push('Creation transaction and receipt have different transaction identities.');
+    return result;
+  }
   result.blockNumber = receipt.blockNumber.toString();
   if (receipt.status !== 'success') {
     result.reasons.push('Creation transaction failed.');
+    return result;
+  }
+  let chain;
+  let block;
+  try {
+    chain = { id: await client.getChainId(), genesisHash: (await client.getBlock({ blockNumber: 0n })).hash };
+    block = await client.getBlock({ blockNumber: receipt.blockNumber });
+  } catch (error) {
+    result.reasons.push(`Creation block is not available: ${safeError(error)}`);
+    return result;
+  }
+  if (options.chain && (options.chain.id !== chain.id || lower(options.chain.genesisHash) !== lower(chain.genesisHash))) {
+    result.reasons.push('Creation proof chain differs from the connected chain.');
+    return result;
+  }
+  if (!block?.hash || !receipt.blockHash || lower(block.hash) !== lower(receipt.blockHash) ||
+    (transaction.blockHash && lower(transaction.blockHash) !== lower(receipt.blockHash)) ||
+    (transaction.blockNumber !== undefined && transaction.blockNumber !== null && BigInt(transaction.blockNumber) !== BigInt(receipt.blockNumber))) {
+    result.reasons.push('Creation receipt block is no longer canonical or disagrees with the transaction.');
     return result;
   }
   const initcode = initcodeFor(resource);
@@ -375,7 +411,12 @@ export async function verifyCreation(client, resource, transactionHash, options 
     return result;
   }
   result.initcodeHash = keccak256(initcode);
-  const live = options.liveCode ?? await client.getCode({ address: resource.address, ...at(blockOf(options.blockNumber)) });
+  let live;
+  try { live = options.liveCode ?? await client.getCode({ address: resource.address, ...at(blockOf(options.blockNumber)) }); }
+  catch (error) {
+    result.reasons.push(`Current runtime is not available: ${safeError(error)}`);
+    return result;
+  }
   if (!hasCode(live)) {
     result.status = 'conflict';
     result.reasons.push('No code at the address.');
@@ -383,10 +424,9 @@ export async function verifyCreation(client, resource, transactionHash, options 
   }
   result.codeHash = keccak256(live);
   const input = lower(transaction.input);
-  const parent = receipt.blockNumber > 0n ? receipt.blockNumber - 1n : undefined;
-  let replay;
+  let kind;
   if (transaction.to === null || transaction.to === undefined) {
-    result.kind = 'create';
+    kind = result.kind = 'create';
     if (lower(receipt.contractAddress) !== lower(resource.address)) {
       result.reasons.push(`The transaction created ${receipt.contractAddress}, not this address.`);
       return result;
@@ -397,9 +437,8 @@ export async function verifyCreation(client, resource, transactionHash, options 
       return result;
     }
     result.matched = true;
-    replay = () => simulateCreate(client, { from: transaction.from, initcode: transaction.input, blockNumber: parent });
   } else if (resource.factory && lower(transaction.to) === lower(resource.factory.address)) {
-    result.kind = 'create2';
+    kind = result.kind = 'create2';
     if (input !== lower(concatHex([resource.salt, initcode]))) {
       result.reasons.push('The factory transaction sent a different salt or initcode.');
       return result;
@@ -409,23 +448,73 @@ export async function verifyCreation(client, resource, transactionHash, options 
       return result;
     }
     result.matched = true;
-    replay = () => simulateCreate2(client, { factory: resource.factory.address, salt: resource.salt, initcode, address: resource.address, blockNumber: parent, account: transaction.from });
   } else {
     result.reasons.push('The transaction is neither a direct CREATE nor a call to the resource CREATE2 factory.');
     return result;
   }
-  if (parent === undefined) {
-    result.reasons.push('Cannot replay a creation from the genesis block.');
+  const proof = {
+    chain: { id: chain.id, genesisHash: lower(chain.genesisHash) }, transactionHash: lower(transactionHash),
+    blockNumber: result.blockNumber, blockHash: lower(receipt.blockHash), address: lower(resource.address),
+    kind, initcodeHash: result.initcodeHash, codeHash: result.codeHash,
+    ...(kind === 'create2' ? { factory: { address: lower(resource.factory.address), codeHash: lower(resource.factory.codeHash) }, salt: lower(resource.salt) } : {}),
+  };
+  if (kind === 'create2') {
+    let currentFactory;
+    let receiptFactory;
+    try {
+      currentFactory = await client.getCode({ address: resource.factory.address, ...at(blockOf(options.blockNumber)) });
+      if (!saved) receiptFactory = await client.getCode({ address: resource.factory.address, blockNumber: receipt.blockNumber });
+    } catch (error) {
+      result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
+      return result;
+    }
+    if (!hasCode(currentFactory) || keccak256(currentFactory) !== proof.factory.codeHash ||
+      (!saved && (!hasCode(receiptFactory) || keccak256(receiptFactory) !== proof.factory.codeHash))) {
+      result.reasons.push('CREATE2 factory code differs from its declared hash.');
+      return result;
+    }
+  }
+  if (saved) {
+    const same = (left, right) => lower(left) === lower(right);
+    if (saved.chain.id !== proof.chain.id || !same(saved.chain.genesisHash, proof.chain.genesisHash) ||
+      saved.blockNumber !== proof.blockNumber || !same(saved.blockHash, proof.blockHash) ||
+      !same(saved.address, proof.address) || saved.kind !== proof.kind ||
+      !same(saved.initcodeHash, proof.initcodeHash) || !same(saved.codeHash, proof.codeHash) ||
+      (kind === 'create2' && (!same(saved.factory.address, proof.factory.address) || !same(saved.factory.codeHash, proof.factory.codeHash) || !same(saved.salt, proof.salt)))) {
+      result.reasons.push('Saved creation proof differs from canonical deployment identity or current runtime.');
+      return result;
+    }
+    result.exactRuntime = true;
+    result.status = 'verified';
+    result.proof = proof;
+    return result;
+  }
+  let receiptCode;
+  try { receiptCode = await client.getCode({ address: resource.address, blockNumber: receipt.blockNumber }); }
+  catch (error) {
+    result.reasons.push(`Runtime at the creation block is not available: ${safeError(error)}`);
+    return result;
+  }
+  if (!hasCode(receiptCode) || keccak256(receiptCode) !== result.codeHash) {
+    result.reasons.push('Runtime at the creation block differs from the current runtime.');
+    return result;
+  }
+  if (kind === 'create') {
+    result.exactRuntime = true;
+    result.status = 'verified';
+    result.proof = proof;
     return result;
   }
   try {
-    const runtime = await replay();
-    result.exactRuntime = lower(runtime) === lower(live);
+    const runtime = await simulateCreate2(client, { factory: resource.factory.address, salt: resource.salt, initcode, address: resource.address, blockNumber: receipt.blockNumber, account: transaction.from });
+    result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
-    result.reasons.push(`Creation replay failed: ${safeError(error)}`);
+    result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)}`);
     return result;
   }
-  if (result.exactRuntime) result.status = 'verified';
-  else result.reasons.push('Replay of the creation at the parent block returned different runtime code.');
+  if (result.exactRuntime) {
+    result.status = 'verified';
+    result.proof = proof;
+  } else result.reasons.push('Creation simulation at the receipt block returned different runtime code.');
   return result;
 }

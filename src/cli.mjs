@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -16,14 +17,14 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline] [--rebaseline]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (flag === '--parallel' || flag === '--pipeline') {
+    if (flag === '--parallel' || flag === '--pipeline' || flag === '--rebaseline') {
       const name = flag.slice(2);
       if (options[name]) throw new Error(`Duplicate option ${flag}.`);
       options[name] = true;
@@ -42,6 +43,22 @@ function parseOptions(args) {
 
 function print(value) {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function approvePlan(plan) {
+  process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
+  const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
+  if (blocked.length) throw new Error(`Plan cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`);
+  process.stderr.write("Apply this plan? Only 'yes' will be accepted: ");
+  const answer = await new Promise(resolve => {
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    input.once('line', line => {
+      resolve(line);
+      input.close();
+    });
+    input.once('close', () => resolve(null));
+  });
+  if (answer !== 'yes') throw new Error('Apply cancelled; no transactions were signed.');
 }
 
 async function writeJsonAtomic(file, value) {
@@ -112,6 +129,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     const genesis = await client.getBlock({ blockNumber: 0n });
     const observed = await client.getBlock({ blockTag: 'latest' });
     const chain = { id: chainId, genesisHash: genesis.hash };
+    const current = await readState(stateFile);
     const checked = new Map();
     async function verifyDependency(id) {
       if (checked.has(id)) return checked.get(id);
@@ -120,7 +138,10 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
       for (const dependency of resource.dependencies) await verifyDependency(dependency);
       const verification = await verifyResource(resource, client, {
         blockNumber: observed.number,
-        ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } : {}),
+        chain,
+        ...(current?.resources?.[id]?.creationProof ? { creationProof: current.resources[id].creationProof } : {}),
+        ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } :
+          current?.resources?.[id]?.provenance?.creationTransactionHash ? { transactionHash: current.resources[id].provenance.creationTransactionHash } : {}),
       });
       if (verification.status !== 'verified') throw new Error(`Cannot import ${options.id}: ${id} is ${verification.status}. ${[...verification.reasons ?? [], ...verification.missingProofs ?? []].join(' ')}`);
       checked.set(id, verification);
@@ -132,16 +153,20 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     }
     const anchor = await client.getBlock({ blockNumber: observed.number });
     if (anchor.hash !== observed.hash) throw new Error('The verification block changed before import. Retry on the current chain.');
-    const current = await readState(stateFile);
-    const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null });
+    const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null, rebaseline: options.rebaseline ?? false });
     await writeStateAtomic(stateFile, state);
-    print({ status: 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: state.resources[selected.id].proofHash, stateFile });
+    const record = state.resources[selected.id];
+    print({
+      status: options.rebaseline ? 'rebaselined' : 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: record.proofHash,
+      ...(options.rebaseline ? { artifactHash: record.artifactHash, previousArtifactHash: record.artifactRevisions.at(-1).artifactHash } : {}), stateFile,
+    });
   } finally {
     await lock.release();
   }
 }
 
 async function run(command, options) {
+  if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
   if (command === 'status') {
     if (!options.backend) throw new Error('status needs --backend file.json.');
     const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
@@ -188,10 +213,32 @@ async function run(command, options) {
     return;
   }
   if (command === 'apply') {
-    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
+    if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
+    if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
+    let plan;
+    let planningBackend;
+    if (options.plan) {
+      plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    } else {
+      let state;
+      if (options.backend) {
+        const chainId = await client.getChainId();
+        const genesis = await client.getBlock({ blockNumber: 0n });
+        planningBackend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: true });
+        state = (await planningBackend.stateStore.read(planningBackend.scope))?.value ?? null;
+      } else state = await readState(stateFile);
+      plan = await createPlan({ spec, artifacts, client, state });
+      await approvePlan(plan);
+      if (planningBackend?.planStore) {
+        await planningBackend.planStore.put(planningBackend.scope, plan);
+      } else {
+        const recoveryPlanFile = path.join(path.dirname(stateFile), 'plans', `${plan.planHash}.json`);
+        await writeJsonAtomic(recoveryPlanFile, plan);
+        process.stderr.write(`Approved plan saved for recovery: ${recoveryPlanFile}\n`);
+      }
+    }
     if (options.backend) {
-      if (!options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
-      const backend = await backendFromFile(options.backend, plan.chain, { requireBucket: true });
+      const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
       print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
       return;

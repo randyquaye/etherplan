@@ -5,7 +5,7 @@ import { validateState } from '../state/index.mjs';
 import { createSchedule } from '../scheduling/index.mjs';
 import { loadDependencies } from './dependencies.mjs';
 import { ApplyError } from './errors.mjs';
-import { LIVE_PHASES, latestRecord, liveTransactions, openJournal } from './journal.mjs';
+import { LIVE_PHASES, intentForSigned, latestRecord, liveTransactions, openJournal } from './journal.mjs';
 import { acquireLock } from './lock.mjs';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.mjs';
 import { checkFactory, jsonSafe, preflight } from './preflight.mjs';
@@ -83,13 +83,16 @@ async function fail(ctx, item, code, reason, { retryable = false, evidence, ...f
 }
 
 async function verify(ctx, item, options = {}) {
-  const transactionHash = options.transactionHash ?? ctx.stateSnapshot?.resources?.[item.planned.id]?.transactions?.at(-1);
-  return ctx.deps.verifyResource(item.resource, ctx.client, transactionHash ? { ...options, transactionHash } : options);
+  const id = item.planned.id;
+  const saved = options.creationProof ?? ctx.outcomes.get(id)?.verification?.creationProof ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
+  const transactionHash = options.transactionHash ?? saved?.transactionHash ?? ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ?? ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
+  const creationProof = saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined;
+  return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
 async function markVerified(ctx, item, verification, fields) {
   const { planned } = item;
-  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...fields });
+  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...(verification.creationProof ? { creationProof: verification.creationProof } : {}), ...fields });
   ctx.outcomes.set(planned.id, { id: planned.id, action: planned.action, outcome: fields.outcome, address: planned.address, transactionHash: fields.transactionHash, verification });
 }
 
@@ -221,10 +224,14 @@ async function settleJournal(ctx) {
     if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Resume that plan first.`, { actionId: latest.actionId });
     if (latest.planHash === ctx.plan.planHash) {
       const item = ctx.prepared.get(latest.actionId);
-      const intent = ctx.journal.forAction(ctx.plan.planHash, latest.actionId).filter(record => record.phase === 'intent' && record.sequence < signed.sequence).at(-1);
-      if (!item || !intent) throw new ApplyError('journal', 'Signed journal transaction has no matching action or intent.', { actionId: latest.actionId });
-      try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
-      catch (error) { throw new ApplyError('journal', `Saved signed transaction is invalid: ${error.message}`, { actionId: latest.actionId }); }
+      if (!item) throw new ApplyError('journal', 'Journal has a transaction for an action that is not in this plan.', { actionId: latest.actionId });
+      try {
+        if (latest.transactionHash?.toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Latest transaction phase has a different hash from its signature.');
+        const intent = intentForSigned(records, signed);
+        await validateSignedTransaction(signed, intent, item.planned, id);
+      } catch (error) {
+        throw new ApplyError('journal', `${latest.actionId}: ${error.message}`, { actionId: latest.actionId });
+      }
     }
   }
   for (const { latest, signed } of liveTransactions(records)) {
@@ -383,6 +390,31 @@ async function resumePipelineWave(ctx, wave) {
   return true;
 }
 
+const lower = value => typeof value === 'string' ? value.toLowerCase() : value ?? null;
+
+// A plan accepts a rebuilt artifact against one saved record. Under the lock, state must still hold that record, or
+// this rebaseline of it, and the live code must still be the code that record describes.
+function checkArtifactDrift(ctx, item, verification) {
+  const drift = item.planned.observation?.stateComparison?.artifactDrift;
+  if (!drift) return null;
+  const { id } = item.planned;
+  if (drift.accepted !== true || lower(drift.artifactHash) !== lower(item.planned.artifactHash)) {
+    throw new ApplyError('plan-not-applicable', `${id} is reused without an accepted artifact drift for its planned artifact.`, { actionId: id });
+  }
+  const record = ctx.stateSnapshot?.resources?.[id];
+  const saved = record ? { address: record.address, initcodeHash: record.initcodeHash ?? null, inputsHash: record.inputsHash, salt: record.salt ?? null, codeHash: record.codeHash ?? null } : null;
+  if (!saved || hashJson(jsonSafe(saved)) !== hashJson(jsonSafe(drift.baseline)) ||
+    ![lower(drift.previousArtifactHash), lower(drift.artifactHash)].includes(lower(record.artifactHash))) {
+    throw new ApplyError('stale-state', `The saved state for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, {
+      actionId: id, evidence: { expected: { ...drift.baseline, artifactHash: drift.previousArtifactHash }, actual: saved && { ...saved, artifactHash: record.artifactHash } },
+    });
+  }
+  if (lower(verification.codeHash) !== lower(drift.baseline.codeHash)) {
+    throw new ApplyError('drift', `The live code for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, { actionId: id, evidence: summarizeVerification(verification) });
+  }
+  return { previousArtifactHash: drift.previousArtifactHash, artifactHash: drift.artifactHash };
+}
+
 async function recheckReused(ctx) {
   for (const item of ctx.prepared.values()) {
     if (item.planned.action !== 'reuse') continue;
@@ -390,7 +422,8 @@ async function recheckReused(ctx) {
     if (verification.status !== 'verified') {
       throw new ApplyError('drift', `A resource that the plan reuses is now ${verification.status}. Create a new plan.`, { actionId: item.planned.id, evidence: summarizeVerification(verification) });
     }
-    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification });
+    const artifactDrift = checkArtifactDrift(ctx, item, verification);
+    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification, ...(artifactDrift ? { artifactDrift } : {}) });
   }
 }
 
@@ -399,7 +432,7 @@ async function decide(ctx, item) {
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const latest = latestRecord(records);
   if (latest?.phase === 'verified') {
-    const verification = await verify(ctx, item, latest.transactionHash ? { transactionHash: latest.transactionHash } : {});
+    const verification = await verify(ctx, item, { ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), ...(latest.creationProof ? { creationProof: latest.creationProof } : {}) });
     if (verification.status !== 'verified') {
       await fail(ctx, item, 'drift', `The action verified earlier but is now ${verification.status}.`, { evidence: summarizeVerification(verification) });
     }

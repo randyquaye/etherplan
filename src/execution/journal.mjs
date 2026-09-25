@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from '../identity.mjs';
+import { validateJournalCreationProof } from '../verification/creation-proof.mjs';
 
 export const JOURNAL_FORMAT_VERSION = 1;
 export const PHASES = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
@@ -26,6 +27,7 @@ function validate(record, line) {
   if (!record.chain || !Number.isSafeInteger(record.chain.id) || typeof record.chain.genesisHash !== 'string') throw new Error(`Journal ${where} needs chain identity.`);
   if (!Number.isSafeInteger(record.sequence) || record.sequence < 1) throw new Error(`Journal ${where} needs a positive sequence.`);
   if (!PHASES.includes(record.phase)) throw new Error(`Journal ${where} has an unknown phase ${record.phase}.`);
+  validateJournalCreationProof(record, `Journal ${where}`);
   assertNoSecrets(record, where);
 }
 
@@ -111,6 +113,18 @@ export function currentTransaction(records) {
   if (!signed) return null;
   const later = records.filter(record => record.sequence > signed.sequence && record.transactionHash === signed.transactionHash);
   return { signed, phase: later.at(-1)?.phase ?? 'signed', receipt: later.filter(record => record.phase === 'receipt').at(-1) ?? null };
+}
+
+// A retry starts a new attempt after a signed or terminal record. An unsigned
+// attempt may have failed, but two intents in one attempt are ambiguous.
+export function intentForSigned(records, signed) {
+  const sameAction = records.filter(record => record.planHash === signed.planHash && record.actionId === signed.actionId &&
+    record.chain.id === signed.chain.id && record.chain.genesisHash.toLowerCase() === signed.chain.genesisHash.toLowerCase() &&
+    record.sequence < signed.sequence);
+  const boundary = sameAction.filter(record => ['signed', 'failed', 'verified'].includes(record.phase)).at(-1)?.sequence ?? 0;
+  const intents = sameAction.filter(record => record.phase === 'intent' && record.sequence > boundary);
+  if (intents.length !== 1) throw new Error(`Signed transaction needs one preceding intent in its attempt; found ${intents.length}.`);
+  return intents[0];
 }
 
 // Groups records by plan and action, and returns each action whose newest record is a live transaction phase.
