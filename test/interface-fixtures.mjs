@@ -61,6 +61,7 @@ const planFields = {
   formatVersion: 1,
   chain: { id: 31337, genesisHash: `0x${'aa'.repeat(32)}` },
   observed: { blockNumber: '1', blockHash: `0x${'bb'.repeat(32)}` },
+  stateHash: hashJson(null),
   specHash: hashJson(exampleSpec),
   artifactHashes: { 'contract:example': normalizedArtifact.artifactHash },
   resources: [{

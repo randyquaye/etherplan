@@ -9,6 +9,7 @@ import { applyPlan } from '../src/execution/index.mjs';
 import { hashJson } from '../src/identity.mjs';
 import { prepareResources } from '../src/planning/index.mjs';
 import { parseSpec } from '../src/spec/index.mjs';
+import { validateResources } from '../src/validation/index.mjs';
 import { exampleSpec, normalizedArtifact, plan as savedPlan } from './interface-fixtures.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +21,33 @@ const ADDRESS = '0x0000000000000000000000000000000000000001';
 function prepared(spec, artifactMap = artifacts) {
   return prepareResources(spec, undefined, artifactMap);
 }
+
+test('checks require view or pure ABI functions in contracts, externals, and calls', () => {
+  for (const stateMutability of ['nonpayable', 'payable']) {
+    const artifact = structuredClone(artifacts.get('stateFixture'));
+    artifact.abi.find(item => item.name === 'BENEFICIARY').stateMutability = stateMutability;
+    assert.throws(() => prepared(base, new Map([['stateFixture', artifact]])), /contract:stateFixture check BENEFICIARY.*view or pure/);
+
+    const external = structuredClone(base);
+    external.externals = { feed: { address: ADDRESS, abi: [{ type: 'function', name: 'answer', inputs: [], outputs: [{ type: 'uint256' }], stateMutability }], checks: { answer: '1' } } };
+    assert.throws(() => prepared(external), /external:feed check answer.*view or pure/);
+
+    const callArtifact = structuredClone(artifacts.get('stateFixture'));
+    callArtifact.abi.find(item => item.name === 'binding').stateMutability = stateMutability;
+    assert.throws(() => prepared(base, new Map([['stateFixture', callArtifact]])), /call:bind check binding after.*view or pure/);
+
+    const resources = prepared(base).resources;
+    const call = resources.find(item => item.kind === 'call');
+    call.abi = structuredClone(call.abi);
+    call.abi.push({ type: 'function', name: 'mutatingCheck', inputs: [], outputs: [{ type: 'address' }], stateMutability });
+    call.before.functionName = 'mutatingCheck';
+    assert.throws(() => validateResources(resources), /call:bind check binding before.*view or pure/);
+  }
+
+  const artifact = structuredClone(artifacts.get('stateFixture'));
+  artifact.abi.find(item => item.name === 'BENEFICIARY').stateMutability = 'pure';
+  assert.doesNotThrow(() => prepared(base, new Map([['stateFixture', artifact]])));
+});
 
 test('offline validation checks getters on absent contracts and externals', () => {
   const wrongName = structuredClone(base);

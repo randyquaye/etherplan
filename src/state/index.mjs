@@ -101,8 +101,9 @@ function validateResource(id, resource, chain) {
 export function validateState(state) {
   assert(isObject(state), 'State must be an object.');
   assertNoSecrets(state);
-  assert(Object.keys(state).every(key => key === 'formatVersion' || key === 'chain' || key === 'resources'), 'State has unknown fields.');
+  assert(Object.keys(state).every(key => key === 'formatVersion' || key === 'chain' || key === 'resources' || key === 'lastPlanHash'), 'State has unknown fields.');
   assert(state.formatVersion === 1, 'State must have formatVersion: 1.');
+  if (state.lastPlanHash !== undefined) assertHash(state.lastPlanHash, 'State lastPlanHash');
   validateChain(state.chain);
   assert(isObject(state.resources), 'State resources must be an object.');
   for (const [id, resource] of Object.entries(state.resources)) validateResource(id, resource, state.chain);
