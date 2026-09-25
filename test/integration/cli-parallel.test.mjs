@@ -37,10 +37,11 @@ async function runScenario(parallel) {
   const stateFile = path.join(directory, 'state.json');
   const journalFile = path.join(directory, 'journal.jsonl');
   try {
-    const planned = runCli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile], anvil.rpcUrl);
+    const planned = runCli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+      '--deployers', [primary, secondary].join(','), '--max-spend-wei', '100000000000000000000', ...(parallel ? ['--parallel'] : [])], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     const scheduled = runCli([
-      'schedule', '--spec', specFile, '--plan', planFile, '--deployers', `${primary},${secondary}`,
+      'schedule', '--spec', specFile, '--plan', planFile, '--deployers', parallel ? [primary, secondary].join(',') : primary,
       ...(parallel ? ['--parallel'] : []),
     ], anvil.rpcUrl);
     assert.equal(scheduled.status, 0, `${scheduled.stderr}\n${scheduled.stdout}`);

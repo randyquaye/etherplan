@@ -13,6 +13,8 @@ import { importResource, readState } from '../src/state/index.mjs';
 import { verifyResource } from '../src/verification/index.mjs';
 import { deployerA, startAnvil } from './execution/chain.mjs';
 
+const planPolicy = { signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' };
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const build = JSON.parse(await readFile(path.join(here, 'verification-fixtures/sample-build.json'), 'utf8'));
 const stamped = normalizeArtifact({ ...build.contracts.Stamped, ast: build.ast }, 'Stamped');
@@ -40,7 +42,7 @@ test('a timestamp immutable remains verified across dependency waves and later p
   const ws = await setup();
   try {
     const input = inputs();
-    input.plan = await createPlan({ ...input, client: ws.chain.client });
+    input.plan = await createPlan({ ...input, client: ws.chain.client, ...planPolicy });
     assert.deepEqual(input.plan.resources.map(item => item.action), ['deploy', 'deploy']);
     const first = await apply(ws, input);
     assert.equal(first.transactionsSigned, 2);
@@ -51,11 +53,11 @@ test('a timestamp immutable remains verified across dependency waves and later p
 
     await ws.chain.rpc('evm_increaseTime', [3600]);
     await ws.chain.rpc('evm_mine', []);
-    const replanned = await createPlan({ ...input, client: ws.chain.client, state });
+    const replanned = await createPlan({ ...input, client: ws.chain.client, state, ...planPolicy });
     assert.deepEqual(replanned.resources.map(item => item.action), ['reuse', 'reuse']);
     const legacy = structuredClone(state);
     for (const record of Object.values(legacy.resources)) delete record.creationProof;
-    const reconstructed = await createPlan({ ...input, client: ws.chain.client, state: legacy });
+    const reconstructed = await createPlan({ ...input, client: ws.chain.client, state: legacy, ...planPolicy });
     assert.deepEqual(reconstructed.resources.map(item => item.action), ['reuse', 'reuse']);
     const reused = await apply(ws, { ...input, plan: replanned });
     assert.equal(reused.transactionsSigned, 0);
@@ -67,7 +69,7 @@ test('a verified journal anchor survives interruption before state persistence',
   const ws = await setup();
   try {
     const input = inputs(false);
-    input.plan = await createPlan({ ...input, client: ws.chain.client });
+    input.plan = await createPlan({ ...input, client: ws.chain.client, ...planPolicy });
     await assert.rejects(apply(ws, input, { hooks: { afterRecord(record) {
       if (record.phase === 'verified') throw new Error('interrupted after durable verification');
     } } }), /interrupted after durable verification/);

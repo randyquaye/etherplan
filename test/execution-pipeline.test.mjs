@@ -100,10 +100,10 @@ async function until(check, description) {
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
-function inputFor(chain, n) {
+function inputFor(chain, n, maxSpendWei = '100000000000000000000') {
   const { spec, artifacts } = fixtureMany(n);
   return createPlan({ spec, artifacts, client: chain.client,
-    pipeline: { deployers: [deployerA.address], parallel: false } }).then(plan => ({ plan, spec, artifacts }));
+    pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei }).then(plan => ({ plan, spec, artifacts }));
 }
 
 function apply(chain, input, ws, options = {}) {
@@ -184,7 +184,7 @@ test('P-06/P-10/P-11/P-12: plan tampering, group funding, budget, and estimation
     assert.equal((await recordsOf(ws.journalFile)).filter(record => ['intent', 'signed'].includes(record.phase)).length, 0);
     await chain.rpc('anvil_setBalance', [deployerA.address, '0x8ac7230489e80000']);
 
-    await rejectsCode(apply(chain, input, await workspace(), { budgets: { [deployerA.address]: '1' } }), 'budget-exceeded');
+    await rejectsCode(apply(chain, await inputFor(chain, 3, '1'), await workspace()), 'budget-exceeded');
 
     let estimates = 0;
     const client = new Proxy(chain.client, { get(target, property) {
@@ -271,7 +271,7 @@ test('B4: a partially signed two-signer wave resumes its original nonces, includ
     try {
       const { spec, artifacts } = fixtureMany(3);
       const plan = await createPlan({ spec, artifacts, client: chain.client,
-        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true } });
+        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true }, maxSpendWei: '100000000000000000000' });
       const input = { plan, spec, artifacts };
       const ws = await workspace();
       await writeFile(ws.planFile, JSON.stringify(plan));
@@ -323,7 +323,7 @@ test('B4: a shortfall, nonce conflict, or corrupt second signer intent stops rec
     try {
       const { spec, artifacts } = fixtureMany(2);
       const plan = await createPlan({ spec, artifacts, client: chain.client,
-        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true } });
+        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true }, maxSpendWei: '100000000000000000000' });
       const input = { plan, spec, artifacts };
       const ws = await workspace();
       await writeFile(ws.planFile, JSON.stringify(plan));

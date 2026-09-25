@@ -75,7 +75,9 @@ describe('split execution dependencies on a private chain', () => {
   let snapshot;
 
   const nonce = account => chain.client.getTransactionCount({ address: account.address });
-  const planFor = input => createPlan({ ...input, client: chain.client }).then(plan => ({ ...input, plan }));
+  const planFor = (input, parallel = false) => createPlan({ ...input, client: chain.client,
+    signers: { deployers: parallel ? [deployerA.address, deployerB.address] : [deployerA.address], owner: owner.address, parallel },
+    maxSpendWei: '100000000000000000000' }).then(plan => ({ ...input, plan }));
   const apply = (input, ws, extra = {}) => applyPlan({
     ...input, client: chain.client, signers: { deployer: [deployerA, deployerB], owner }, stateFile: ws.stateFile, journalFile: ws.journalFile, pollIntervalMs: 20, ...extra,
   });
@@ -89,7 +91,7 @@ describe('split execution dependencies on a private chain', () => {
     const compatibility = await planFor(storedAddress({ dependencyMode: 'compatibility' }));
     assert.deepEqual(compatibility.plan.executionWaves.waves, [['contract:target'], ['contract:stored']]);
 
-    const input = await planFor(storedAddress());
+    const input = await planFor(storedAddress(), true);
     assert.deepEqual(input.plan.executionWaves, { waves: [['contract:target', 'contract:stored']], deferred: [] });
     assert.deepEqual(input.plan.warnings, []);
     const ws = await workspace();
@@ -124,7 +126,7 @@ describe('split execution dependencies on a private chain', () => {
   });
 
   test('a constructor that calls its library fails before signing without an edge and deploys after one', async () => {
-    const unsafe = await planFor(linkedLibrary());
+    const unsafe = await planFor(linkedLibrary(), true);
     assert.deepEqual(unsafe.plan.executionWaves.waves, [['contract:doubler', 'contract:linked']]);
     assert.match(unsafe.plan.warnings[0], /^contract:linked links library contracts\.doubler\.address without an execution dependency/);
     const failed = await workspace();
@@ -134,7 +136,7 @@ describe('split execution dependencies on a private chain', () => {
     assert.equal(failedRecords.filter(record => record.phase === 'verified').length, 0);
     assert.equal(await nonce(deployerA) + await nonce(deployerB), 0);
 
-    const ordered = await planFor(linkedLibrary({ after: ['contract:doubler'] }));
+    const ordered = await planFor(linkedLibrary({ after: ['contract:doubler'] }), true);
     assert.deepEqual(ordered.plan.executionWaves.waves, [['contract:doubler'], ['contract:linked']]);
     assert.deepEqual(ordered.plan.warnings, []);
     const ws = await workspace();
@@ -165,7 +167,7 @@ describe('split execution dependencies on a private chain', () => {
 
   test('a pipeline plan reserves consecutive nonces for contracts that share a split-mode wave', async () => {
     const input = storedAddress();
-    const plan = await createPlan({ ...input, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+    const plan = await createPlan({ ...input, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei: '100000000000000000000' });
     assert.deepEqual(plan.pipeline.waves.map(wave => wave.batches.flat().map(entry => [entry.id, entry.nonceOffset])), [[['contract:target', 0], ['contract:stored', 1]]]);
     const ws = await workspace();
     const result = await apply({ ...input, plan }, ws, { pipeline: true, signers: { deployer: [deployerA] } });
@@ -179,7 +181,7 @@ describe('split execution dependencies on a private chain', () => {
     const ordered = storedAddress();
     delete ordered.spec.executionAssumptions;
     ordered.spec.contracts[1].after = ['contract:target'];
-    const plan = await createPlan({ ...ordered, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+    const plan = await createPlan({ ...ordered, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei: '100000000000000000000' });
     assert.deepEqual(plan.pipeline.waves.map(wave => wave.batches.flat().map(entry => entry.id)), [['contract:target'], ['contract:stored']]);
     const [target] = plan.resources;
     const input = { ...ordered, plan };
@@ -228,7 +230,8 @@ describe('split execution dependencies on a private chain', () => {
 
     const reordered = value => Array.isArray(value) ? value.map(reordered)
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reordered(item)])) : value;
-    const hashOf = async spec => (await createPlan({ ...storedAddress(), spec, client: chain.client })).planHash;
+    const hashOf = async spec => (await createPlan({ ...storedAddress(), spec, client: chain.client,
+      signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' })).planHash;
     assert.equal(await hashOf(reordered(storedAddress().spec)), plan.planHash);
     assert.notEqual(await hashOf(storedAddress({ executionAssumptions: ['constructor does not call contracts.target (reviewed)'] }).spec), plan.planHash);
 

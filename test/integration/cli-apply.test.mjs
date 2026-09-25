@@ -48,7 +48,7 @@ after(async () => {
 
 test('apply deploys and binds once, writes durable state, and reruns without a transaction', async () => {
   const planned = runCli([
-    'plan', '--out', planFile, '--state', stateFile,
+    'plan', '--out', planFile, '--state', stateFile, '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000',
   ]);
   assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
   const plan = JSON.parse(planned.stdout);
@@ -56,7 +56,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   const recoveryPlanFile = path.join(directory, 'plans', `${plan.planHash}.json`);
 
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
-  const declined = runCli(['apply', '--state', stateFile, '--journal', journalFile], true, 'no\n');
+  const declined = runCli(['apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000'], true, 'no\n');
   assert.equal(declined.status, 1);
   assert.match(declined.stderr, /Only 'yes' will be accepted/);
   assert.match(declined.stderr, /Apply cancelled/);
@@ -65,13 +65,13 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   await assert.rejects(access(journalFile), { code: 'ENOENT' });
   await assert.rejects(access(recoveryPlanFile), { code: 'ENOENT' });
 
-  const closedInput = runCli(['apply', '--state', stateFile, '--journal', journalFile], true);
+  const closedInput = runCli(['apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000'], true);
   assert.equal(closedInput.status, 1);
   assert.match(closedInput.stderr, /Apply cancelled/);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
 
   const applied = runCli([
-    'apply', '--state', stateFile, '--journal', journalFile,
+    'apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000',
   ], true, 'yes\n');
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
   assert.match(applied.stderr, new RegExp(plan.planHash));
@@ -124,7 +124,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /stale-spec/);
 
-  const fresh = runCli(['apply', '--state', stateFile, '--journal', journalFile], true, 'yes\n');
+  const fresh = runCli(['apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000'], true, 'yes\n');
   assert.equal(fresh.status, 0, `${fresh.stderr}\n${fresh.stdout}`);
   const freshResult = JSON.parse(fresh.stdout);
   assert.equal(freshResult.transactionsSigned, 1);
@@ -148,7 +148,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
   raw.metadata.settings.remappings = ['forge-std/=lib/forge-std/src/'];
   await writeFile(path.join(directory, 'StateFixture.json'), JSON.stringify(raw));
 
-  const planned = runCli(['plan', '--out', planFile, '--state', stateFile]);
+  const planned = runCli(['plan', '--out', planFile, '--state', stateFile, '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000']);
   assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
   const plan = JSON.parse(planned.stdout);
   assert.ok(plan.resources.every(resource => resource.action === 'reuse'));
@@ -171,7 +171,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
     assert.deepEqual(record[key], prior[key], key);
   }
 
-  const replanned = runCli(['plan', '--out', planFile, '--state', stateFile]);
+  const replanned = runCli(['plan', '--out', planFile, '--state', stateFile, '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000']);
   assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
   assert.ok(JSON.parse(replanned.stdout).resources.every(resource => resource.action === 'reuse' && resource.observation.stateComparison?.artifactDrift === undefined));
 });

@@ -45,7 +45,7 @@ When the working directory contains `spec.json`, you can omit `--spec` for any c
 Set `ETH_RPC_URL` to the target RPC endpoint for a live plan. Plan reads the chain and writes no transactions:
 
 ```sh
-node src/cli.mjs plan --spec path/to/spec.json --out plan.json
+node src/cli.mjs plan --spec path/to/spec.json --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
 ```
 
 | Command | Structural checks | Artifact and ABI checks | Live-chain checks |
@@ -56,17 +56,17 @@ node src/cli.mjs plan --spec path/to/spec.json --out plan.json
 
 `apply` repeats offline validation and checks the plan against current inputs before it signs or sends a transaction. `graph` reports structure and dependencies only; it does not load artifacts.
 
-Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `call`, `conflict`, or `unverified`. The plan includes exact transaction destinations and data for writes, plus spec and artifact hashes, chain identity, and an observed block hash. A plan with a conflict or missing proof cannot be applied.
+Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `call`, `conflict`, or `unverified`. The plan includes exact transaction destinations and data for writes, plus spec and artifact hashes, chain identity, an observed block hash, signer addresses, and `maxSpendWei`. Supply `--owner` when the plan has owner actions. The ceiling is in wei per signer and covers the total maximum cost of its signed transactions across all waves and restarts. Apply checks live fees and gas against it before signing; a later CLI flag cannot raise it. A plan with a conflict or missing proof cannot be applied.
 
 For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of keys in the process environment. Set `OWNER_PRIVATE_KEY` if the plan has owner calls. A single key can also be supplied as `DEPLOYER_PRIVATE_KEY`.
 
 ```sh
-node src/cli.mjs apply --spec path/to/spec.json
+node src/cli.mjs apply --spec path/to/spec.json --max-spend-wei 100000000000000000
 node src/cli.mjs apply --spec path/to/spec.json --plan plan.json
 node src/cli.mjs verify --spec path/to/spec.json
 ```
 
-Without `--plan`, `apply` creates a fresh plan from the current spec, state, and chain, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec or artifact is rejected. Pipeline applies still require an explicit saved pipeline plan.
+Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. Pipeline applies still require an explicit saved pipeline plan.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
@@ -81,7 +81,7 @@ Schedule and apply both use the primary deployer serially by default. Add `--par
 Create a pipeline plan with the signer address, then apply that saved plan with `--pipeline`:
 
 ```sh
-node src/cli.mjs plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --out plan.json
+node src/cli.mjs plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
 node src/cli.mjs schedule --spec path/to/spec.json --plan plan.json --pipeline
 node src/cli.mjs apply --spec path/to/spec.json --plan plan.json --pipeline
 ```
