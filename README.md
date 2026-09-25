@@ -54,18 +54,19 @@ node src/cli.mjs plan --spec path/to/spec.json --out plan.json
 | `validate`, `adapters` | Yes | Yes | No |
 | `plan`, `schedule`, `verify`, `import`, `apply` | Yes | Yes | Yes |
 
-`apply` repeats offline validation and checks the saved plan against current inputs before it signs or sends a transaction. `graph` reports structure and dependencies only; it does not load artifacts.
+`apply` repeats offline validation and checks the plan against current inputs before it signs or sends a transaction. `graph` reports structure and dependencies only; it does not load artifacts.
 
 Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `call`, `conflict`, or `unverified`. The plan includes exact transaction destinations and data for writes, plus spec and artifact hashes, chain identity, and an observed block hash. A plan with a conflict or missing proof cannot be applied.
 
 For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of keys in the process environment. Set `OWNER_PRIVATE_KEY` if the plan has owner calls. A single key can also be supplied as `DEPLOYER_PRIVATE_KEY`.
 
 ```sh
+node src/cli.mjs apply --spec path/to/spec.json
 node src/cli.mjs apply --spec path/to/spec.json --plan plan.json
 node src/cli.mjs verify --spec path/to/spec.json
 ```
 
-`apply` also reads `plan.json` from the working directory when `--plan` is omitted. With both files there, `etherplan apply` needs neither path. Use `--plan` to select a different saved plan.
+Without `--plan`, `apply` creates a fresh plan from the current spec, state, and chain, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec or artifact is rejected. Pipeline applies still require an explicit saved pipeline plan.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
@@ -91,6 +92,18 @@ Use `--parallel` when creating a pipeline plan to distribute eligible deployment
 
 `verify` rereads live code, immutables, declared getter values, external code hashes, and binding state. Matching bytecode outside compiler-marked immutable regions is not enough when an immutable has no value proof. Incomplete proof is `unverified`; a mismatch is `conflict`.
 
+For a deployment with creation transaction evidence, Etherplan records a `creationProof` in the verified journal entry and state. It binds the transaction, canonical receipt block, initcode, address, and exact runtime hash; CREATE2 also binds the factory and salt. Later plan, verify, and apply recheck that identity, the current code and artifact runtime, and all declared getters. This keeps immutables derived from the deployment block verified after time or block number changes. An old state file without this field remains readable. If its creation transaction and receipt-block data are still available, Etherplan can reconstruct the proof; otherwise declare an expected code hash or getter checks for the missing immutable values. A legacy `proofHash` alone does not prove them.
+
 Use `import --spec path/to/spec.json --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
+
+## Rebuilt artifacts
+
+State separates a contract's deployment identity (address, initcode hash, and constructor inputs) from its artifact provenance (artifact and source hashes). A rebuild can change the artifact hash without changing the bytecode, for example when build metadata or settings change.
+
+For a CREATE2 contract, the plan reuses the existing deployment and reports `observation.stateComparison.artifactDrift` with the old and new artifact hashes. This requires that the address, initcode, inputs, and salt match state, that the live code hash equals the saved code hash, and that the new artifact verifies the live contract. Otherwise the contract is a `conflict`, and `artifactDrift.reasons` says why. A deployment change is not drift: when the address and the initcode or inputs both change, it is a replacement; when only one changes, it is a `conflict`. For example, a salt change with the same initcode and inputs is a `conflict`, even after a rebuild. To deploy the same contract at a new address on purpose, remove its state record first. The plan still pins the new artifact hash. Apply signs no transaction for the drift. Under its lock, apply rechecks the saved record and the live code hash, and stops with `stale-state` or `drift` if either changed. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to the record's `artifactRevisions`. Provenance, transactions, and prior-deployment fields are unchanged. A replacement starts a new revision list.
+
+An imported contract is not rebaselined automatically. After rebuilding its artifact, run `import --spec path/to/spec.json --id contract:name --rebaseline`. The existing import record must have the same address, inputs, and code hash, and the new artifact must verify the live contract. The recorded creation transaction is reused as proof unless `--creation-tx` is given. The import provenance is kept and an artifact revision is appended. Without `--rebaseline`, import still rejects a changed artifact.
+
+An artifact revision records provenance only. It does not show that mutable storage matches the constructor inputs; declare getter checks for values that must hold.
 
 `adapters --spec path/to/spec.json --out generated` optionally writes TypeScript wrappers. Planning and deployment do not need generated wrappers.

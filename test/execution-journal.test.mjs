@@ -62,6 +62,7 @@ test('a corrupt complete line, a sequence regression, or a secret-like field fai
   const journal = await openJournal(path.join(dir, 'secret.jsonl'));
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', evidence: { privateKey: '0x01' } }), /forbidden key privateKey/);
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'unknown' }), /unknown phase/);
+  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'verified', creationProof: { kind: 'create' } }), /creationProof.*invalid fields/);
   assert.equal(journal.records.length, 0);
   await journal.close();
 });
