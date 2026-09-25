@@ -18,28 +18,97 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--max-spend-wei amount] [--parallel] [--pipeline] [--rebaseline] [--replace-max-fee-per-gas wei --replace-priority-fee-per-gas wei --replace-max-cost-wei wei]\nSchedule and apply are serial by default; use --parallel for eligible concurrent deployments.';
-const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei']);
+const COMMANDS = {
+  validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec'] },
+  graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec'] },
+  impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value'] },
+  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'backend', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'] },
+  verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend'] },
+  schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline'] },
+  import: { description: 'Record a verified existing contract in local state.', options: ['spec', 'state', 'id', 'creation-tx', 'rebaseline'] },
+  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['spec', 'out'] },
+  status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
+};
+const OPTION_HELP = {
+  spec: 'Specification file (default: ./spec.json)',
+  value: 'Value name for impact',
+  out: 'Output path',
+  plan: 'Saved plan file',
+  state: 'State file (default: .etherplan/state.json beside the spec)',
+  journal: 'Journal file (default: journal.jsonl beside the state file)',
+  backend: 'Production backend config file',
+  'signer-module': 'External signer module for production apply',
+  id: 'Contract resource ID, for example contract:registry',
+  'creation-tx': 'Creation transaction hash used as import proof',
+  rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
+  deployers: 'Comma-separated deployer addresses',
+  owner: 'Owner signer address for planning or scheduling',
+  'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
+  'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
+  'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
+  'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
+  parallel: 'Use eligible deployers concurrently (default: serial)',
+  pipeline: 'Use a nonce-pinned pipeline plan',
+};
+const VALUE_OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei']);
+const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline']);
+
+class UsageError extends Error {}
+
+function usage(command) {
+  if (!command) {
+    return `Usage: etherplan <command> [options]\n\nCommands:\n${Object.entries(COMMANDS).map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`).join('\n')}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
+  }
+  const details = COMMANDS[command];
+  const describe = name => name === 'out' && command === 'plan' ? 'Local plan file (default: ./plan.json; - skips the local file)'
+    : name === 'out' ? 'Adapter directory (default: ./generated)'
+      : name === 'plan' && command === 'apply' ? 'Saved plan file; omit to create and approve a fresh plan'
+        : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
+          : OPTION_HELP[name];
+  const environment = ['plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
+    ? '\n\nRequires ETH_RPC_URL.' : '';
+  const signers = command === 'apply'
+    ? ' Apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
+  return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
+}
 
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (flag === '--parallel' || flag === '--pipeline' || flag === '--rebaseline') {
-      const name = flag.slice(2);
-      if (options[name]) throw new Error(`Duplicate option ${flag}.`);
+    if (!flag.startsWith('--')) throw new UsageError(`Invalid option ${flag}.`);
+    const name = flag.slice(2);
+    if (Object.hasOwn(options, name)) throw new UsageError(`Duplicate option ${flag}.`);
+    if (BOOLEAN_OPTIONS.has(name)) {
       options[name] = true;
       continue;
     }
+    if (!VALUE_OPTIONS.has(name)) throw new UsageError(`Unknown option ${flag}.`);
     const value = args[++index];
-    if (!flag?.startsWith('--') || !OPTIONS.has(flag.slice(2)) || !value || value.startsWith('--')) {
-      throw new Error(`Invalid option ${flag ?? '<missing>'}.\n${USAGE}`);
-    }
-    const name = flag.slice(2);
-    if (Object.hasOwn(options, name)) throw new Error(`Duplicate option ${flag}.`);
+    if (!value || value.startsWith('--')) throw new UsageError(`Option ${flag} needs a value.`);
     options[name] = value;
   }
   return options;
+}
+
+function validateOptions(command, options) {
+  const allowed = new Set(COMMANDS[command].options);
+  for (const name of Object.keys(options)) {
+    if (!allowed.has(name)) throw new UsageError(`--${name} is not an option for ${command}.`);
+  }
+  if (command === 'impact' && !options.value) throw new UsageError('impact needs --value <name>.');
+  if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
+    throw new UsageError('import needs --id contract:<name>.');
+  }
+  if (command === 'plan') {
+    if (options.pipeline && !options.deployers) throw new UsageError('A pipeline plan needs --deployers <address,address>.');
+    if (options.parallel && !options.deployers) throw new UsageError('plan --parallel needs --deployers <address,address>.');
+    if (options.owner && !options.deployers) throw new UsageError('plan --owner needs --deployers <address,address>.');
+  }
+  if (command === 'apply' && options.pipeline && options.parallel) {
+    throw new UsageError('A pipeline apply reads the parallel setting from its saved plan; omit --parallel.');
+  }
 }
 
 function print(value) {
@@ -195,7 +264,6 @@ async function run(command, options) {
     return;
   }
   if (command === 'impact') {
-    if (!options.value) throw new Error('impact needs --value <name>.');
     print(impact(spec, ordered, `values.${options.value}`));
     return;
   }
@@ -294,7 +362,7 @@ async function run(command, options) {
       throw new Error('A write plan needs --deployers <address,address> and --max-spend-wei <amount>.');
     }
     if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
-    if (options.out) await writeJsonAtomic(path.resolve(options.out), plan);
+    if (options.out !== '-') await writeJsonAtomic(path.resolve(options.out ?? 'plan.json'), plan);
     print(plan);
     if (plan.resources.some(resource => resource.action === 'conflict' || resource.action === 'unverified')) process.exitCode = 1;
     return;
@@ -334,15 +402,30 @@ async function run(command, options) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-if (!['adapters', 'graph', 'impact', 'validate', 'plan', 'schedule', 'verify', 'import', 'apply', 'status'].includes(command)) {
-  console.error(USAGE);
+if (command === '--version' || command === '-V' || command === 'version') {
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  console.log(manifest.version);
+} else if (command === '--help' || command === '-h' || command === 'help') {
+  const topic = command === 'help' ? args[0] : null;
+  if (topic && !COMMANDS[topic]) {
+    console.error(`Unknown command ${topic}.\n${usage()}`);
+    process.exitCode = 2;
+  } else {
+    console.log(usage(topic));
+  }
+} else if (!COMMANDS[command]) {
+  console.error(`${command ? `Unknown command ${command}.\n` : ''}${usage()}`);
   process.exitCode = 2;
+} else if (args.includes('--help') || args.includes('-h')) {
+  console.log(usage(command));
 } else {
   try {
-    await run(command, parseOptions(args));
+    const options = parseOptions(args);
+    validateOptions(command, options);
+    await run(command, options);
   } catch (error) {
     if (error.result) print(error.result);
-    console.error(`${error.code ? `${error.code}: ` : ''}${error.message}`);
-    process.exitCode = 1;
+    console.error(`${error.code ? `${error.code}: ` : ''}${error.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
+    process.exitCode = error instanceof UsageError ? 2 : 1;
   }
 }

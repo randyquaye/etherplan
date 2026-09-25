@@ -4,4 +4,5 @@ generated/
 out/
 cache/
 .context/
+plan.json
 .DS_Store

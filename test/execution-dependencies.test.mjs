@@ -170,7 +170,7 @@ describe('split execution dependencies on a private chain', () => {
     const plan = await createPlan({ ...input, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei: '100000000000000000000' });
     assert.deepEqual(plan.pipeline.waves.map(wave => wave.batches.flat().map(entry => [entry.id, entry.nonceOffset])), [[['contract:target', 0], ['contract:stored', 1]]]);
     const ws = await workspace();
-    const result = await apply({ ...input, plan }, ws, { pipeline: true, signers: { deployer: [deployerA] } });
+    const result = await apply({ ...input, plan }, ws, { pipeline: true, signers: { deployer: [deployerA] }, receiptTimeoutMs: 5_000 });
     assert.equal(result.status, 'applied');
     const records = await journalOf(ws.journalFile);
     assert.ok(sequenceOf(records, 'signed', 'contract:stored') < sequenceOf(records, 'broadcast-attempt', 'contract:target'), 'both nonces are signed before the first broadcast');

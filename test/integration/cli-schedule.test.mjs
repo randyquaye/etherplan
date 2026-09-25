@@ -71,7 +71,7 @@ test('schedule defaults to the primary deployer and uses both only with --parall
 
   const addresses = schedule => Object.fromEntries(schedule.waves.flatMap(wave => wave.batches.flat()).map(item => [item.id, item.address]));
   assert.deepEqual(addresses(second), addresses(first));
-  assert.match(runCli('schedule', '--help').stderr, /serial by default/);
+  assert.match(runCli('schedule', '--help').stdout, /default: serial/);
 });
 
 test('schema 2 schedules a stored address in the same wave and explains each execution edge', () => {

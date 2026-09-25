@@ -236,8 +236,8 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /no state record to rebaseline/);
   const misused = runCli(['verify', '--spec', specFile, '--rebaseline']);
-  assert.equal(misused.status, 1);
-  assert.match(misused.stderr, /--rebaseline applies only to import/);
+  assert.equal(misused.status, 2);
+  assert.match(misused.stderr, /--rebaseline is not an option for verify/);
 
   const rebaselined = runCli([...importArguments, '--rebaseline']);
   assert.equal(rebaselined.status, 0, `${rebaselined.stderr}\n${rebaselined.stdout}`);
