@@ -163,6 +163,58 @@ describe('split execution dependencies on a private chain', () => {
     assert.equal(await nonce(deployerA), 1);
   });
 
+  test('a pipeline plan reserves consecutive nonces for contracts that share a split-mode wave', async () => {
+    const input = storedAddress();
+    const plan = await createPlan({ ...input, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+    assert.deepEqual(plan.pipeline.waves.map(wave => wave.batches.flat().map(entry => [entry.id, entry.nonceOffset])), [[['contract:target', 0], ['contract:stored', 1]]]);
+    const ws = await workspace();
+    const result = await apply({ ...input, plan }, ws, { pipeline: true, signers: { deployer: [deployerA] } });
+    assert.equal(result.status, 'applied');
+    const records = await journalOf(ws.journalFile);
+    assert.ok(sequenceOf(records, 'signed', 'contract:stored') < sequenceOf(records, 'broadcast-attempt', 'contract:target'), 'both nonces are signed before the first broadcast');
+    assert.equal(await nonce(deployerA), 2);
+  });
+
+  test('a pipeline apply rechecks a completed dependency before it reserves or resends the dependent', async () => {
+    const ordered = storedAddress();
+    delete ordered.spec.executionAssumptions;
+    ordered.spec.contracts[1].after = ['contract:target'];
+    const plan = await createPlan({ ...ordered, client: chain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+    assert.deepEqual(plan.pipeline.waves.map(wave => wave.batches.flat().map(entry => entry.id)), [['contract:target'], ['contract:stored']]);
+    const [target] = plan.resources;
+    const input = { ...ordered, plan };
+    const pipelined = { pipeline: true, signers: { deployer: [deployerA] } };
+
+    const changed = await workspace();
+    const breakTarget = { afterRecord: async record => {
+      if (record.phase === 'verified' && record.actionId === 'contract:target') await chain.rpc('anvil_setCode', [target.address, '0x00']);
+    } };
+    await rejectsWith(apply(input, changed, { ...pipelined, hooks: breakTarget }), 'dependency', 'contract:stored');
+    assert.equal(sequenceOf(await journalOf(changed.journalFile), 'intent', 'contract:stored'), undefined);
+    assert.equal(await nonce(deployerA), 1);
+    await chain.rpc('evm_revert', [snapshot]);
+    snapshot = await chain.rpc('evm_snapshot');
+
+    // Stop after the dependent is signed, then change its dependency before the resume.
+    const ws = await workspace();
+    const stopAfterSigning = { afterRecord: async record => {
+      if (record.phase === 'signed' && record.actionId === 'contract:stored') throw new Error('stop after signing');
+    } };
+    await assert.rejects(apply(input, ws, { ...pipelined, hooks: stopAfterSigning }), /stop after signing/);
+    const signed = (await journalOf(ws.journalFile)).find(record => record.phase === 'signed' && record.actionId === 'contract:stored');
+    const beforeChange = await chain.rpc('evm_snapshot');
+    await chain.rpc('anvil_setCode', [target.address, '0x00']);
+    await rejectsWith(apply(input, ws, pipelined), 'dependency', 'contract:stored');
+    assert.equal(sequenceOf(await journalOf(ws.journalFile), 'broadcast-attempt', 'contract:stored'), undefined);
+    assert.equal(await nonce(deployerA), 1);
+
+    await chain.rpc('evm_revert', [beforeChange]);
+    const resumed = await apply(input, ws, pipelined);
+    assert.equal(resumed.status, 'applied');
+    assert.deepEqual(resumed.rebroadcasts, [{ actionId: 'contract:stored', transactionHash: signed.transactionHash }]);
+    assert.equal((await journalOf(ws.journalFile)).filter(record => record.phase === 'signed' && record.actionId === 'contract:stored').length, 1);
+  });
+
   test('the plan hash covers both graphs and assumptions, and apply rejects an edited graph', async () => {
     const base = await planFor(storedAddress());
     const { plan } = base;

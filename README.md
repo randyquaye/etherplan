@@ -71,6 +71,20 @@ Apply rechecks the plan and live preconditions. It takes one writer lock, signs 
 
 Add `--parallel` to apply independent deployments from multiple funded deployers. A resource must declare `senderIndependent: true` before it can use a secondary deployer, and the factory must be recognized as permissionless. Owner calls use the owner signer. Use `schedule --deployers address,address` to inspect the proposed waves without sending transactions.
 
+## Single-signer pipelining
+
+Create a pipeline plan with the signer address, then apply that saved plan with `--pipeline`:
+
+```sh
+node src/cli.mjs plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --out plan.json
+node src/cli.mjs schedule --spec path/to/spec.json --plan plan.json --pipeline
+node src/cli.mjs apply --spec path/to/spec.json --plan plan.json --pipeline
+```
+
+Set `DEPLOYER_PRIVATE_KEY` or `DEPLOYER_PRIVATE_KEYS` for apply as usual. Add `--owner 0xYourOwner` at plan time if the plan contains owner calls; the apply signer must match it. A pipeline plan pins signer assignments, dependency waves, and each action's nonce offset in plan order. Absolute nonces are read under the writer lock at apply time. Each ready wave is a receipt barrier: Etherplan reserves consecutive nonces per signer, checks the whole signer group's maximum cost, syncs all signed transactions to the journal, then broadcasts in nonce order and waits for receipts concurrently. For a `schema: 2` spec, the waves follow the execution graph, so contracts that only store a predicted address share a wave. Apply rechecks completed execution dependencies on chain before it reserves nonces for a wave, and before it signs or resends an unmined transaction on resume. The final report includes `timings.submitMs`, `timings.receiptMs`, and `timings.verificationMs`.
+
+Use `--parallel` when creating a pipeline plan to distribute eligible deployments across multiple deployers. Apply reads that choice from the saved plan. Keep the journal with the state file: after interruption, apply validates and resends the exact signed bytes. If an unknown transaction consumes a reserved nonce, apply stops with `nonce-conflict` and requires operator reconciliation; it does not assign another nonce to that action.
+
 ## Existing contracts and proof
 
 `verify` rereads live code, immutables, declared getter values, external code hashes, and binding state. Matching bytecode outside compiler-marked immutable regions is not enough when an immutable has no value proof. Incomplete proof is `unverified`; a mismatch is `conflict`.

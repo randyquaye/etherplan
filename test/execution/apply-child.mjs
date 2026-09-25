@@ -2,12 +2,13 @@
 import { readFile } from 'node:fs/promises';
 import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../src/execution/index.mjs';
-import { accounts, fixture } from './chain.mjs';
+import { accounts, fixture, fixtureMany } from './chain.mjs';
 
 const config = JSON.parse(process.argv[2]);
-const { spec, artifacts } = fixture(config.fixture);
+const { spec, artifacts } = config.fixtureMany ? fixtureMany(config.fixtureMany) : fixture(config.fixture);
 const plan = JSON.parse(await readFile(config.planFile, 'utf8'));
 const client = createPublicClient({ transport: http(config.rpcUrl) });
+let seen = 0;
 
 await applyPlan({
   plan,
@@ -18,10 +19,12 @@ await applyPlan({
   stateFile: config.stateFile,
   journalFile: config.journalFile,
   parallel: config.parallel ?? false,
+  pipeline: config.pipeline ?? false,
   pollIntervalMs: 50,
   hooks: {
     afterRecord(record) {
-      if (record.phase === config.crash.phase && record.actionId === config.crash.actionId) process.kill(process.pid, 'SIGKILL');
+      if (record.phase === config.crash.phase && (!config.crash.actionId || record.actionId === config.crash.actionId) &&
+        ++seen === (config.crash.occurrence ?? 1)) process.kill(process.pid, 'SIGKILL');
     },
   },
 });
