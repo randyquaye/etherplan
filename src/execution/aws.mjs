@@ -8,6 +8,7 @@ import { scopeKey } from './backends.mjs';
 
 const lockKey = scope => `LOCK#${[scope.project, scope.environment, scope.chainId, scope.genesisHash, scope.kind, scope.label ?? scope.address].map(encodeURIComponent).join('/')}`;
 const deploymentKey = scope => `DEPLOY#${scopeKey(scope)}`;
+const signerKey = (scope, address) => `SIGNER#${[scope.project, scope.environment, scope.chainId, scope.genesisHash, address.toLowerCase()].map(encodeURIComponent).join('/')}`;
 const isConditional = error => error?.name === 'ConditionalCheckFailedException' || error?.name === 'TransactionCanceledException';
 
 function requireFence(fence) {
@@ -110,6 +111,14 @@ export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherp
   };
 
   const journalStore = {
+    async *signedForSigner(scope, address) {
+      let ExclusiveStartKey;
+      do {
+        const page = await send(new QueryCommand({ TableName: tableName, KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)', ExpressionAttributeValues: { ':pk': signerKey(scope, address), ':prefix': 'TX#' }, ConsistentRead: true, ExclusiveStartKey }));
+        for (const item of page.Items ?? []) yield item.signed;
+        ExclusiveStartKey = page.LastEvaluatedKey;
+      } while (ExclusiveStartKey);
+    },
     async head(scope) {
       const found = await send(new GetCommand({ TableName: tableName, Key: { PK: deploymentKey(scope), SK: 'J#HEAD' }, ConsistentRead: true }));
       return found.Item ? { sequence: found.Item.sequence, recordHash: found.Item.recordHash } : null;
@@ -134,6 +143,10 @@ export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherp
         ...checks(tableName, fence),
         { Update: { TableName: tableName, Key: { PK, SK: 'J#HEAD' }, UpdateExpression: 'SET #sequence = :sequence, #recordHash = :recordHash, #at = :at', ConditionExpression: previous === 0 ? 'attribute_not_exists(#sequence)' : '#sequence = :previous AND #recordHash = :previousHash', ExpressionAttributeNames: { '#sequence': 'sequence', '#recordHash': 'recordHash', '#at': 'at' }, ExpressionAttributeValues: { ':sequence': expectedSequence, ':recordHash': record.recordHash, ':at': record.at, ...(previous === 0 ? {} : { ':previous': previous, ':previousHash': expectedPreviousHash }) } } },
         { Put: { TableName: tableName, Item: { PK, SK: `J#${String(expectedSequence).padStart(12, '0')}`, record }, ConditionExpression: 'attribute_not_exists(PK)' } },
+        ...(record.phase === 'signed' ? [{ Put: { TableName: tableName, Item: {
+          PK: signerKey(scope, record.signer), SK: `TX#${record.transactionHash.toLowerCase()}`,
+          signed: { label: scope.label, planHash: record.planHash, actionId: record.actionId, signer: record.signer.toLowerCase(), nonce: record.nonce, transactionHash: record.transactionHash.toLowerCase() },
+        }, ConditionExpression: 'attribute_not_exists(PK)' } }] : []),
       ] }));
       return record;
     },

@@ -13,9 +13,16 @@ const scope = deploymentScope({ project: 'test', environment: 'dev', label: 'one
 const planHash = `0x${'bb'.repeat(32)}`;
 
 function memoryBackend() {
-  const records = [];
+  const journals = new Map();
+  const recordsFor = (deployment = scope) => {
+    const key = scopeKey(deployment);
+    if (!journals.has(key)) journals.set(key, []);
+    return journals.get(key);
+  };
+  const records = recordsFor();
+  const signed = [];
   const locks = new Map();
-  let state = null;
+  const states = new Map();
   let version = 0;
   const key = randomBytes(32);
   const lockKey = value => JSON.stringify(value);
@@ -24,21 +31,28 @@ function memoryBackend() {
     return current?.token === entry.token && current.holder.id === entry.holderId && current.expiresAt > Date.now();
   });
   return {
-    records,
+    records, recordsFor,
     stateStore: {
-      async read() { return structuredClone(state); },
-      async compareAndSwap(_scope, expected, value, { fence }) {
-        if (fence.length < 2 || !held(fence) || expected !== (state?.version ?? null)) throw new Error('State fence or version mismatch.');
-        state = { version: String(++version), value: structuredClone(value) };
+      async read(deployment = scope) { return structuredClone(states.get(scopeKey(deployment)) ?? null); },
+      async compareAndSwap(deployment, expected, value, { fence }) {
+        if (fence.length < 2 || !held(fence) || expected !== (states.get(scopeKey(deployment))?.version ?? null)) throw new Error('State fence or version mismatch.');
+        const state = { version: String(++version), value: structuredClone(value) };
+        states.set(scopeKey(deployment), state);
         return structuredClone(state);
       },
     },
     journalStore: {
-      async head() { const last = records.at(-1); return last ? { sequence: last.sequence, recordHash: last.recordHash } : null; },
-      async *read() { for (const record of records) yield structuredClone(record); },
-      async append(_scope, record, { expectedSequence, expectedPreviousHash, fence }) {
-        if (fence.length < 2 || !held(fence) || expectedSequence !== records.length + 1 || expectedPreviousHash !== (records.at(-1)?.recordHash ?? null)) throw new Error('Journal fence or predecessor mismatch.');
-        records.push(structuredClone(record));
+      async *signedForSigner(deployment, address) {
+        for (const entry of signed) if (entry.signer === address.toLowerCase() && entry.project === deployment.project && entry.environment === deployment.environment && entry.chainId === deployment.chainId && entry.genesisHash === deployment.genesisHash) yield structuredClone(entry);
+      },
+      async head(deployment = scope) { const last = recordsFor(deployment).at(-1); return last ? { sequence: last.sequence, recordHash: last.recordHash } : null; },
+      async *read(deployment = scope) { for (const record of recordsFor(deployment)) yield structuredClone(record); },
+      async append(deployment, record, { expectedSequence, expectedPreviousHash, fence }) {
+        const journal = recordsFor(deployment);
+        if (fence.length < 2 || !held(fence) || expectedSequence !== journal.length + 1 || expectedPreviousHash !== (journal.at(-1)?.recordHash ?? null)) throw new Error('Journal fence or predecessor mismatch.');
+        journal.push(structuredClone(record));
+        if (record.phase === 'signed') signed.push({ project: deployment.project, environment: deployment.environment, chainId: deployment.chainId, genesisHash: deployment.genesisHash,
+          label: deployment.label, planHash: record.planHash, actionId: record.actionId, signer: record.signer.toLowerCase(), nonce: record.nonce, transactionHash: record.transactionHash.toLowerCase() });
         return record;
       },
     },
@@ -148,6 +162,29 @@ test('AWS state and journal writes check both leases transactionally', async () 
   }
 });
 
+test('AWS saves the signer index in the same fenced transaction as a signature', async () => {
+  const commands = [];
+  const backend = createAwsBackend({ tableName: 'test', kmsKeyId: 'test', dynamodb: { async send(command) {
+    commands.push(command);
+    return { Items: [] };
+  } }, kms: {}, s3: {} });
+  const fence = [
+    { scope: { ...scope, kind: 'deployment' }, token: 4, holderId: 'runner' },
+    { scope: { ...scope, kind: 'signer', address: deployerA.address }, token: 9, holderId: 'runner' },
+  ];
+  const transactionHash = `0x${'34'.repeat(32)}`;
+  await backend.journalStore.append(scope, { phase: 'signed', sequence: 1, previousHash: null, recordHash: planHash,
+    at: new Date().toISOString(), planHash, actionId: 'contract:alpha', signer: deployerA.address, nonce: '0', transactionHash },
+  { expectedSequence: 1, expectedPreviousHash: null, fence });
+  const items = commands[0].input.TransactItems;
+  assert.equal(items.length, 5);
+  assert.equal(items[4].Put.Item.SK, `TX#${transactionHash}`);
+  assert.equal(items[4].Put.Item.signed.label, scope.label);
+  for await (const _ of backend.journalStore.signedForSigner(scope, deployerA.address)) {}
+  assert.equal(commands[1].input.ConsistentRead, true);
+  assert.equal(commands[1].input.ExpressionAttributeValues[':pk'], items[4].Put.Item.PK);
+});
+
 test('AWS envelope encryption binds every signed transaction identity field', async () => {
   const key = randomBytes(32);
   const kms = { async send(command) {
@@ -201,13 +238,13 @@ test('a new runner recovers encrypted signed bytes without a file or a second si
     async address() { return deployerA.address; },
     async signTransaction(_role, transaction) { signatures++; return deployerA.signTransaction(transaction); },
   };
-  const options = { plan, ...input, client: chain.client, ...backend, scope: deployment, signerProvider, pollIntervalMs: 10 };
+  const options = { plan, ...input, client: chain.client, ...backend, scope: deployment, signerProvider, confirmations: 1, pollIntervalMs: 10 };
   let stopped = false;
   await assert.rejects(applyPlan({ ...options, hooks: { afterRecord(record) {
     if (!stopped && record.phase === 'signed') { stopped = true; throw new Error('simulate runner loss'); }
   } } }), /simulate runner loss/);
   assert.equal(signatures, 1);
-  const saved = backend.records.find(record => record.phase === 'signed');
+  const saved = backend.recordsFor(deployment).find(record => record.phase === 'signed');
   assert.ok(saved.encryptedRawTransaction);
   assert.equal(Object.hasOwn(saved, 'rawTransaction'), false);
   assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 0);
@@ -218,12 +255,41 @@ test('a new runner recovers encrypted signed bytes without a file or a second si
   assert.equal(signatures, 1);
   assert.equal(result.rebroadcasts.length, 1);
   assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 1);
-  assert.equal(backend.records.filter(record => record.phase === 'signed').length, 1);
-  assert.ok(backend.records.every(record => record.principal && Number.isFinite(Date.parse(record.at))));
-  assert.ok((await backend.stateStore.read()).value.resources['contract:alpha']);
+  assert.equal(backend.recordsFor(deployment).filter(record => record.phase === 'signed').length, 1);
+  assert.ok(backend.recordsFor(deployment).every(record => record.principal && Number.isFinite(Date.parse(record.at))));
+  assert.ok((await backend.stateStore.read(deployment)).value.resources['contract:alpha']);
   assert.ok(events.some(event => event.type === 'recovery'));
   assert.ok(events.some(event => event.type === 'verification' || event.type === 'verified'));
   assert.ok(events.every(event => !JSON.stringify(event).includes('rawTransaction')));
+});
+
+test('another label cannot spend a signer nonce while its saved signature is unresolved', async () => {
+  const localChain = await startAnvil();
+  try {
+    const backend = memoryBackend();
+    const genesisHash = (await localChain.client.getBlock({ blockNumber: 0n })).hash;
+    const makeInput = async (name, label) => {
+      const input = fixture({ withCall: false });
+      input.spec.contracts = input.spec.contracts.filter(contract => contract.id === name);
+      input.artifacts = new Map([[name, input.artifacts.get(name)]]);
+      const plan = await createPlan({ ...input, client: localChain.client });
+      return { ...input, plan, client: localChain.client, ...backend,
+        scope: deploymentScope({ project: 'test', environment: 'dev', label }, plan.chain),
+        signers: { deployer: [deployerA] }, confirmations: 1, pollIntervalMs: 10 };
+    };
+    const first = await makeInput('alpha', 'alpha');
+    const second = await makeInput('beta', 'beta');
+    await assert.rejects(applyPlan({ ...first, hooks: { afterRecord(record) {
+      if (record.phase === 'signed') throw new Error('runner stopped after signature');
+    } } }), /runner stopped after signature/);
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 0);
+    await assert.rejects(applyPlan(second), error => error.code === 'foreign-outstanding');
+    assert.equal(backend.recordsFor(second.scope).filter(record => record.phase === 'signed').length, 0);
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 0);
+    await applyPlan(first);
+    await applyPlan(second);
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 2);
+  } finally { await localChain.stop(); }
 });
 
 test('an external signer cannot change the destination before journal persistence', async () => {
@@ -240,8 +306,8 @@ test('an external signer cannot change the destination before journal persistenc
       async address() { return deployerA.address; },
       async signTransaction(_role, request) { return deployerA.signTransaction({ ...request, to: '0x0000000000000000000000000000000000000001' }); },
     };
-    await assert.rejects(applyPlan({ plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider }), error => error.code === 'signer');
-    assert.equal(backend.records.filter(record => record.phase === 'signed').length, 0);
+    await assert.rejects(applyPlan({ plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider, confirmations: 1 }), error => error.code === 'signer');
+    assert.equal(backend.recordsFor(deployment).filter(record => record.phase === 'signed').length, 0);
     assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 0);
   } finally {
     await localChain.stop();
@@ -259,7 +325,7 @@ async function pipelineRun(localChain, label) {
     async address() { return deployerA.address; },
     async signTransaction(_role, transaction) { signer.signatures++; return deployerA.signTransaction(transaction); },
   };
-  const options = { plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider, pipeline: true, pollIntervalMs: 10 };
+  const options = { plan, ...input, client: localChain.client, ...backend, scope: deployment, signerProvider, pipeline: true, confirmations: 1, pollIntervalMs: 10 };
   return { plan, backend, signer, options };
 }
 
@@ -271,7 +337,7 @@ test('a new runner resumes an encrypted pipeline reservation without a second si
     await assert.rejects(applyPlan({ ...options, hooks: { afterRecord(record) {
       if (record.phase === 'signed' && record.actionId === lastId) throw new Error('simulate runner loss');
     } } }), /simulate runner loss/);
-    const saved = backend.records.filter(record => record.phase === 'signed');
+    const saved = backend.recordsFor(options.scope).filter(record => record.phase === 'signed');
     assert.equal(signer.signatures, 3);
     assert.equal(new Set(saved.map(record => record.reservationId)).size, 1);
     assert.ok(saved.every(record => record.encryptedRawTransaction && !Object.hasOwn(record, 'rawTransaction')));
@@ -283,7 +349,7 @@ test('a new runner resumes an encrypted pipeline reservation without a second si
     assert.equal(signer.signatures, 3);
     assert.deepEqual(result.rebroadcasts.map(entry => entry.transactionHash).sort(), saved.map(record => record.transactionHash).sort());
     assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 3);
-    assert.equal(Object.keys((await backend.stateStore.read()).value.resources).length, 3);
+    assert.equal(Object.keys((await backend.stateStore.read(options.scope)).value.resources).length, 3);
     for (const type of ['recovery', 'broadcast-result', 'receipt-observed']) assert.equal(events.filter(event => event.type === type).length, 3, type);
     assert.ok(events.every(event => !JSON.stringify(event).includes('rawTransaction')));
   } finally {
@@ -305,7 +371,7 @@ test('a lost lease stops a pipelined group before its first broadcast', async ()
       if (record.phase === 'signed' && record.actionId === lastId) lost = true;
     } } }), /Writer lease is lost/);
     assert.equal(signer.signatures, 3);
-    assert.equal(backend.records.filter(record => record.phase === 'broadcast-attempt').length, 0);
+    assert.equal(backend.recordsFor(options.scope).filter(record => record.phase === 'broadcast-attempt').length, 0);
     assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address, blockTag: 'pending' }), 0);
   } finally {
     await localChain.stop();

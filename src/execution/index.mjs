@@ -17,6 +17,7 @@ export { openJournal } from './journal.mjs';
 export { acquireLeases, deploymentScope, encryptionContext, lockScopes, openStoredJournal, scopeKey, validateJournal } from './backends.mjs';
 
 const DEFAULTS = { pollIntervalMs: 250, receiptTimeoutMs: 120_000, gasMultiplier: 1.2, fees: null, budgets: {}, hooks: {}, dependencies: {} };
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function roleOf(resource) {
   return resource.signerRole ?? (resource.kind === 'call' ? 'owner' : 'deployer');
@@ -121,27 +122,63 @@ async function recordReceipt(ctx, item, signed, receipt) {
   await append(ctx, item.planned.id, { phase: 'receipt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, receipt: json });
 }
 
+async function stableReceipt(ctx, transactionHash, receipt, actionId, wait = false) {
+  const deadline = Date.now() + ctx.config.receiptTimeoutMs;
+  for (;;) {
+    const current = await findReceipt(ctx.client, transactionHash);
+    const block = current && await ctx.client.getBlock({ blockNumber: BigInt(receipt.blockNumber) });
+    if (!current || current.blockHash.toLowerCase() !== receipt.blockHash.toLowerCase() ||
+      current.blockNumber !== BigInt(receipt.blockNumber) || block?.hash.toLowerCase() !== receipt.blockHash.toLowerCase()) {
+      throw new ApplyError('reorg', `Receipt for ${transactionHash} is no longer in its canonical block.`, { actionId, retryable: true });
+    }
+    if (ctx.config.confirmations === 1 ||
+      (await ctx.client.getBlock({ blockTag: 'latest' })).number - current.blockNumber + 1n >= BigInt(ctx.config.confirmations)) return current;
+    if (!wait || Date.now() >= deadline) throw new ApplyError('finality', `Transaction ${transactionHash} has fewer than ${ctx.config.confirmations} confirmations.`, { actionId, retryable: true });
+    await pause(ctx.config.pollIntervalMs);
+  }
+}
+
+async function revalidateVerified(ctx) {
+  for (const item of ctx.prepared.values()) {
+    const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
+    const latest = records.at(-1);
+    if (latest?.phase !== 'verified') continue;
+    const hash = latest.transactionHash ?? latest.revertedTransaction;
+    if (!hash) continue;
+    const receipt = records.filter(record => record.phase === 'receipt' && record.transactionHash === hash).at(-1)?.receipt;
+    if (!receipt) throw new ApplyError('journal', `Verified action ${item.planned.id} has no receipt.`, { actionId: item.planned.id });
+    await stableReceipt(ctx, hash, receipt, item.planned.id);
+  }
+}
+
+async function assertSignerHistory(ctx, addresses) {
+  if (!ctx.remote) return;
+  for (const address of new Set(addresses.map(value => value.toLowerCase()))) {
+    for await (const signed of ctx.journalStore.signedForSigner(ctx.scope, address)) {
+      if (signed.label === ctx.scope.label && signed.planHash === ctx.plan.planHash) continue;
+      const receipt = await findReceipt(ctx.client, signed.transactionHash);
+      if (!receipt) throw new ApplyError('foreign-outstanding', `Label ${signed.label} has unresolved transaction ${signed.transactionHash} for signer ${address}. Resume that label first.`, { actionId: signed.actionId, retryable: true });
+      await stableReceipt(ctx, signed.transactionHash, receipt, signed.actionId);
+    }
+  }
+}
+
 // A receipt does not complete an action. The postcondition must verify at the receipt block, and that block must still be canonical.
 async function finish(ctx, item, signed, receipt) {
   const transactionHash = signed.transactionHash;
-  const block = await ctx.client.getBlock({ blockNumber: receipt.blockNumber });
-  if (block.hash.toLowerCase() !== receipt.blockHash.toLowerCase()) {
-    throw new ApplyError('reorg', `Receipt block ${receipt.blockNumber} for ${transactionHash} is no longer canonical. Rerun to recheck.`, { actionId: item.planned.id, retryable: true });
-  }
+  await stableReceipt(ctx, transactionHash, receipt, item.planned.id, true);
   if (receipt.status !== 'success') {
     const verificationStart = Date.now();
     const verification = await verify(ctx, item, { blockNumber: receipt.blockNumber, transactionHash, account: signed.signer });
     ctx.timings.verificationMs += Date.now() - verificationStart;
-    const confirmed = await ctx.client.getBlock({ blockNumber: receipt.blockNumber });
-    if (confirmed.hash.toLowerCase() !== receipt.blockHash.toLowerCase()) throw new ApplyError('reorg', `Receipt block ${receipt.blockNumber} for ${transactionHash} changed during verification.`, { actionId: item.planned.id, retryable: true });
+    await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
     if (verification.status === 'verified') return markVerified(ctx, item, verification, { outcome: 'already-satisfied', revertedTransaction: transactionHash });
     await fail(ctx, item, 'reverted', `Transaction ${transactionHash} reverted in block ${receipt.blockNumber}.`, { transactionHash, evidence: summarizeVerification(verification) });
   }
   const verificationStart = Date.now();
   const verification = await verify(ctx, item, { blockNumber: receipt.blockNumber, transactionHash, account: signed.signer });
   ctx.timings.verificationMs += Date.now() - verificationStart;
-  const confirmed = await ctx.client.getBlock({ blockNumber: receipt.blockNumber });
-  if (confirmed.hash.toLowerCase() !== receipt.blockHash.toLowerCase()) throw new ApplyError('reorg', `Receipt block ${receipt.blockNumber} for ${transactionHash} changed during verification.`, { actionId: item.planned.id, retryable: true });
+  await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
   if (verification.status !== 'verified') {
     await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.`, { transactionHash, evidence: summarizeVerification(verification) });
   }
@@ -374,6 +411,7 @@ async function resumePipelineWave(ctx, wave) {
     await decide(ctx, job.item);
     job.completed = true;
   }
+  await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address));
   for (const job of jobs.filter(entry => !entry.signed)) {
     const { intent, item, signer } = job;
     const envelope = { chainId: ctx.plan.chain.id, to: item.planned.tx.to, data: item.planned.tx.data, value: BigInt(intent.value),
@@ -576,6 +614,7 @@ async function signWithLease(ctx, actionId, signer, envelope) {
 
 async function signBatch(ctx, wave, work) {
   await checkExecutionDependencies(ctx, work);
+  await assertSignerHistory(ctx, work.map(job => job.signer.address));
   // Read every signer's nonce and reject pending transactions before recording any intent.
   for (const job of work) {
     const [latest, pending] = await Promise.all([
@@ -613,6 +652,7 @@ function intentFields(job, wave, reservationId, waveAttemptId = null) {
 
 async function signPipelineBatch(ctx, wave, work) {
   await checkExecutionDependencies(ctx, work);
+  await assertSignerHistory(ctx, work.map(job => job.signer.address));
   const groups = new Map();
   for (const job of work) {
     const signer = job.signer.address.toLowerCase();
@@ -657,8 +697,6 @@ async function settleBatch(ctx, work) {
   const rejected = settled.find(result => result.status === 'rejected');
   if (rejected) throw rejected.reason;
 }
-
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function pipelineConflict(ctx, job) {
   const { signer, nonce, transactionHash } = job.signed;
@@ -788,6 +826,7 @@ async function runBatch(ctx, wave, batch) {
 }
 
 async function persist(ctx) {
+  await revalidateVerified(ctx);
   if (!ctx.deps.recordResource) return { file: ctx.stateFile, written: false, reason: 'The state module has no recordResource function.' };
   const verified = ctx.plan.resources.filter(resource => ctx.outcomes.get(resource.id)?.verification);
   if (verified.length === 0) return { file: ctx.stateFile, written: false, reason: 'No resource is verified yet.' };
@@ -845,6 +884,7 @@ async function run(ctx) {
   if (ctx.pipeline && hashJson(ctx.schedule.waves) !== hashJson(ctx.plan.pipeline.waves)) throw new ApplyError('pipeline-plan', 'The saved pipeline schedule differs from the plan resources.');
   if (ctx.schedule.deferred.length) throw new ApplyError('unschedulable', `Some actions have dependencies that the plan cannot satisfy: ${ctx.schedule.deferred.map(entry => entry.id).join(', ')}.`, { evidence: ctx.schedule.deferred });
   await commitments(ctx);
+  await revalidateVerified(ctx);
   await settleJournal(ctx);
   await recheckReused(ctx);
   // Preserve the dependency check for a later signed wave before revisiting
@@ -857,11 +897,13 @@ async function run(ctx) {
     }
   }
   for (const wave of ctx.schedule.waves) {
+    await revalidateVerified(ctx);
     if (ctx.pipeline && await resumePipelineWave(ctx, wave)) {
       ctx.state = await persist(ctx);
       continue;
     }
     for (const batch of wave.batches) {
+      await revalidateVerified(ctx);
       await runBatch(ctx, wave.wave, batch);
       ctx.state = await persist(ctx);
     }
@@ -876,6 +918,10 @@ export async function applyPlan({ plan, spec, artifacts, client, signers, signer
   const config = { ...DEFAULTS, ...options, hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
   const remote = Boolean(stateStore || journalStore || lockProvider || journalCipher || scopeInput);
   if (remote && (!stateStore || !journalStore || !lockProvider || !journalCipher || !scopeInput)) throw new ApplyError('config', 'Production apply needs stateStore, journalStore, lockProvider, journalCipher, and scope together.');
+  if (remote && typeof journalStore.signedForSigner !== 'function') throw new ApplyError('config', 'Production journalStore needs signedForSigner(scope, address).');
+  if (remote && options.confirmations === undefined) throw new ApplyError('config', 'Production apply needs an explicit confirmations policy.');
+  config.confirmations = options.confirmations ?? 1;
+  if (!Number.isSafeInteger(config.confirmations) || config.confirmations < 1) throw new ApplyError('config', 'Confirmations must be a positive integer.');
   if (!remote && (typeof stateFile !== 'string' || typeof journalFile !== 'string')) throw new ApplyError('config', 'Apply needs stateFile and journalFile paths.');
   const scope = remote ? deploymentScope(scopeInput, plan?.chain) : null;
   const signerControl = { scope, fence: null, assertHeld: null };
@@ -896,7 +942,7 @@ export async function applyPlan({ plan, spec, artifacts, client, signers, signer
     journal = remote ? await openStoredJournal({ journalStore, journalCipher, scope, fence: lock.fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile);
     const readState = remote ? async () => { const found = await stateStore.read(scope); return { version: found?.version ?? null, value: found ? validateState(found.value) : null }; } : async () => ({ version: null, value: await deps.readState(stateFile) });
     const writeState = remote ? (version, state) => stateStore.compareAndSwap(scope, version, validateState(state), { fence: lock.fence }) : (_version, state) => deps.writeStateAtomic(stateFile, state);
-    const ctx = { plan, spec, artifacts, client, lanes, deps, journal, lock, config, scope, remote, principal: lock.holder?.principal ?? principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline, sent: [], rebroadcasts: [], outcomes: new Map(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 }, state: { file: stateFile ?? null, written: false } };
+    const ctx = { plan, spec, artifacts, client, lanes, deps, journal, journalStore, lock, config, scope, remote, principal: lock.holder?.principal ?? principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline, sent: [], rebroadcasts: [], outcomes: new Map(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 }, state: { file: stateFile ?? null, written: false } };
     await report(ctx, 'lock-acquisition', { holder: lock.holder, fencingTokens: lock.fence?.map(entry => entry.token), lockWaitMs: Date.now() - lockStarted });
     try {
       return await run(ctx);
