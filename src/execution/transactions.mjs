@@ -29,7 +29,8 @@ export function maximumCost(envelope) {
 
 // Signs with the supplied account, then decodes the bytes and recovers the sender, so a faulty signer cannot change the payload.
 export async function signEnvelope(signer, envelope) {
-  const rawTransaction = await signer.signTransaction({ type: 'eip1559', ...envelope });
+  const result = await signer.signTransaction({ type: 'eip1559', ...envelope });
+  const rawTransaction = typeof result === 'string' ? result : result?.rawTransaction;
   if (typeof rawTransaction !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawTransaction)) throw new Error('Signer did not return a raw transaction.');
   const parsed = parseTransaction(rawTransaction);
   const same = parsed.type === 'eip1559' &&
@@ -50,8 +51,10 @@ export async function signEnvelope(signer, envelope) {
 // Recovery must validate bytes from disk before resending them. The saved plan supplies
 // the payload, while the intent supplies the live nonce, gas and fee choices.
 export async function validateSignedTransaction(signed, intent, planned, chainId) {
-  if (typeof signed.rawTransaction !== 'string' || keccak256(signed.rawTransaction).toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Signed transaction hash differs from its raw bytes.');
+  if (typeof signed.rawTransaction !== 'string' || !/^0x[0-9a-fA-F]+$/.test(signed.rawTransaction) || keccak256(signed.rawTransaction).toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Signed transaction hash differs from its raw bytes.');
+  // A pipeline signed record repeats its intent fields. A serial signed record carries only its signer and nonce.
   for (const field of ['reservationId', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas']) {
+    if (!['reservationId', 'nonce'].includes(field) && signed[field] === undefined) continue;
     if (String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) throw new Error(`Signed ${field} differs from the durable intent.`);
   }
   const parsed = parseTransaction(signed.rawTransaction);
@@ -77,7 +80,7 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
 function errorText(error) {
   const parts = [];
   for (let item = error; item; item = item.cause) parts.push(item.details, item.shortMessage, item.message);
-  return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{100,}/g, '[transaction bytes redacted]');
+  return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{64,}/g, '[redacted hex]');
 }
 
 export async function broadcast(client, rawTransaction) {

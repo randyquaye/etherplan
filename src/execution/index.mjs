@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
+import { validateState } from '../state/index.mjs';
 import { createSchedule } from '../scheduling/index.mjs';
 import { loadDependencies } from './dependencies.mjs';
 import { ApplyError } from './errors.mjs';
 import { LIVE_PHASES, latestRecord, liveTransactions, openJournal } from './journal.mjs';
 import { acquireLock } from './lock.mjs';
+import { acquireLeases, deploymentScope, openStoredJournal } from './backends.mjs';
 import { checkFactory, jsonSafe, preflight } from './preflight.mjs';
 import { broadcast, estimateGasLimit, feesFor, findReceipt, maximumCost, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt } from './transactions.mjs';
 
 export { ApplyError } from './errors.mjs';
 export { acquireLock, LockError } from './lock.mjs';
 export { openJournal } from './journal.mjs';
+export { acquireLeases, deploymentScope, encryptionContext, lockScopes, openStoredJournal, scopeKey, validateJournal } from './backends.mjs';
 
 const DEFAULTS = { pollIntervalMs: 250, receiptTimeoutMs: 120_000, gasMultiplier: 1.2, fees: null, budgets: {}, hooks: {}, dependencies: {} };
 
@@ -31,6 +34,25 @@ function lanesFrom(signers, parallel) {
   return { pool: parallel ? signers.deployer : [signers.deployer[0]], owner: signers.owner ?? null, byAddress };
 }
 
+async function signersFromProvider(provider, roles, plan, control) {
+  if (typeof provider?.address !== 'function' || typeof provider?.signTransaction !== 'function') throw new ApplyError('signer', 'Signer provider needs address(role) and signTransaction(role, request).');
+  const deployerRoles = roles?.deployer ?? ['deployer'];
+  if (!Array.isArray(deployerRoles) || deployerRoles.length === 0 || deployerRoles.some(role => typeof role !== 'string')) throw new ApplyError('signer', 'signerRoles.deployer must be a nonempty role list.');
+  const account = async role => ({ address: await provider.address(role), async signTransaction(request) {
+    await control.assertHeld?.();
+    return provider.signTransaction(role, request, { scope: control.scope, fence: control.fence });
+  } });
+  const deployer = await Promise.all(deployerRoles.map(account));
+  const needsOwner = plan?.resources?.some(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
+  return { deployer, ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}) };
+}
+
+async function report(ctx, type, fields = {}) {
+  const event = jsonSafe({ type, at: new Date().toISOString(), planHash: ctx.plan.planHash, chain: ctx.plan.chain, scope: ctx.scope, principal: ctx.principal, ...fields });
+  if (typeof ctx.config.reporter === 'function') await ctx.config.reporter(event);
+  else await ctx.config.reporter?.emit(event);
+}
+
 export function summarizeVerification(verification) {
   return jsonSafe({
     status: verification.status,
@@ -45,7 +67,10 @@ export function summarizeVerification(verification) {
 }
 
 async function append(ctx, actionId, fields, identity = ctx.plan) {
-  const record = await ctx.journal.append({ ...jsonSafe(fields), planHash: identity.planHash, chain: identity.chain, actionId });
+  await ctx.lock.assertHeld?.();
+  const started = Date.now();
+  const record = await ctx.journal.append({ ...jsonSafe(fields), planHash: identity.planHash, chain: identity.chain, actionId, ...(ctx.remote ? { principal: ctx.principal } : {}) });
+  await report(ctx, record.phase === 'failed' ? 'terminal-failure' : record.phase, { actionId, sequence: record.sequence, transactionHash: record.transactionHash, signer: record.signer, nonce: record.nonce, journalAppendLatencyMs: Date.now() - started, ...(record.phase === 'broadcast' ? { rebroadcast: record.rebroadcast } : {}) });
   await ctx.config.hooks.afterRecord?.(record);
   return record;
 }
@@ -121,6 +146,7 @@ async function finish(ctx, item, signed, receipt) {
 }
 
 async function awaitReceipt(ctx, item, signed) {
+  const started = Date.now();
   const waited = await waitForReceipt(ctx.client, { hash: signed.transactionHash, signer: signed.signer, nonce: signed.nonce, pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: ctx.config.receiptTimeoutMs });
   if (waited.dead) {
     await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
@@ -128,11 +154,17 @@ async function awaitReceipt(ctx, item, signed) {
   if (waited.timeout) {
     throw new ApplyError('receipt-timeout', `No receipt for ${signed.transactionHash} after ${ctx.config.receiptTimeoutMs} ms. Rerun to resume; the same signed transaction is reused.`, { actionId: item.planned.id, retryable: true });
   }
+  await report(ctx, 'receipt-observed', { actionId: item.planned.id, transactionHash: signed.transactionHash, receiptLatencyMs: Date.now() - started });
   return waited.receipt;
 }
 
 async function send(ctx, item, signed, { rebroadcast = false } = {}) {
+  await ctx.lock.assertHeld?.();
+  await append(ctx, item.planned.id, { phase: 'broadcast-attempt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast });
+  await ctx.lock.assertHeld?.();
+  const started = Date.now();
   const sent = await broadcast(ctx.client, signed.rawTransaction);
+  await report(ctx, 'broadcast-result', { actionId: item.planned.id, transactionHash: signed.transactionHash, rebroadcast, accepted: sent.accepted, broadcastLatencyMs: Date.now() - started });
   if (!sent.accepted) {
     if (sent.nonceTooLow) {
       const receipt = await findReceipt(ctx.client, signed.transactionHash);
@@ -149,6 +181,7 @@ async function send(ctx, item, signed, { rebroadcast = false } = {}) {
 
 // Resolves a transaction that an earlier run signed: use its receipt, detect that its nonce is gone, or resend the same bytes.
 async function settle(ctx, item, signed) {
+  await report(ctx, 'recovery', { actionId: item.planned.id, transactionHash: signed.transactionHash });
   let receipt = await findReceipt(ctx.client, signed.transactionHash);
   if (!receipt && await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
     receipt = await findReceipt(ctx.client, signed.transactionHash);
@@ -184,6 +217,16 @@ async function settleForeign(ctx, signed) {
 async function settleJournal(ctx) {
   const { id, genesisHash } = ctx.plan.chain;
   const records = ctx.journal.records.filter(record => record.chain.id === id && record.chain.genesisHash.toLowerCase() === genesisHash.toLowerCase());
+  for (const { latest, signed } of liveTransactions(records)) {
+    if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Resume that plan first.`, { actionId: latest.actionId });
+    if (latest.planHash === ctx.plan.planHash) {
+      const item = ctx.prepared.get(latest.actionId);
+      const intent = ctx.journal.forAction(ctx.plan.planHash, latest.actionId).filter(record => record.phase === 'intent' && record.sequence < signed.sequence).at(-1);
+      if (!item || !intent) throw new ApplyError('journal', 'Signed journal transaction has no matching action or intent.', { actionId: latest.actionId });
+      try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
+      catch (error) { throw new ApplyError('journal', `Saved signed transaction is invalid: ${error.message}`, { actionId: latest.actionId }); }
+    }
+  }
   for (const { latest, signed } of liveTransactions(records)) {
     if (latest.planHash === ctx.plan.planHash) {
       if (ctx.pipeline && signed.reservationId) continue;
@@ -266,7 +309,7 @@ async function resumePipelineReservation(ctx, intents) {
       const { intent, item, signer } = job;
       const envelope = { chainId: ctx.plan.chain.id, to: item.planned.tx.to, data: item.planned.tx.data, value: BigInt(intent.value),
         gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
-      const signed = await signEnvelope(signer, envelope);
+      const signed = await signWithLease(ctx, item.planned.id, signer, envelope);
       job.signed = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, first.wave, first.reservationId), phase: 'signed', ...signed });
       ctx.sent.push({ actionId: item.planned.id, wave: first.wave, signer: first.signer.toLowerCase(), nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() });
     }
@@ -275,6 +318,7 @@ async function resumePipelineReservation(ctx, intents) {
     const latest = job.records.at(-1);
     return latest?.phase !== 'verified' && !(latest?.phase === 'failed' && !latest.retryable);
   });
+  for (const job of active) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: first.reservationId });
   if (active.length) await settlePipelineBatch(ctx, active, { rebroadcast: true });
 }
 
@@ -408,6 +452,15 @@ async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
   }
 }
 
+// A lost lease stops the next signature.
+async function signWithLease(ctx, actionId, signer, envelope) {
+  await ctx.lock.assertHeld?.();
+  const started = Date.now();
+  const signed = await signEnvelope(signer, envelope);
+  await report(ctx, 'signer-result', { actionId, signer: signer.address, signerLatencyMs: Date.now() - started });
+  return signed;
+}
+
 async function signBatch(ctx, wave, work) {
   await checkExecutionDependencies(ctx, work);
   // Read every signer's nonce and reject pending transactions before recording any intent.
@@ -424,10 +477,11 @@ async function signBatch(ctx, wave, work) {
 
   for (const job of work) {
     const { envelope, item, entry } = job;
+    await ctx.lock.assertHeld?.();
     await append(ctx, item.planned.id, { phase: 'intent', wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: envelope.value, dataHash: keccak256(envelope.data), gas: envelope.gas, maxFeePerGas: envelope.maxFeePerGas, maxPriorityFeePerGas: envelope.maxPriorityFeePerGas });
     let signed;
     try {
-      signed = await signEnvelope(job.signer, envelope);
+      signed = await signWithLease(ctx, item.planned.id, job.signer, envelope);
     } catch (error) {
       await fail(ctx, item, 'signer', error.message, { retryable: true, signer: job.signer.address });
     }
@@ -473,7 +527,7 @@ async function signPipelineBatch(ctx, wave, work) {
   // The lock remains held and no broadcast starts until every signed record is synced.
   for (const job of work) {
     let signed;
-    try { signed = await signEnvelope(job.signer, job.envelope); }
+    try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, job.envelope); }
     catch (error) { throw new ApplyError('signer', error.message, { actionId: job.item.planned.id, retryable: true }); }
     job.signed = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, job.intent.reservationId), phase: 'signed', ...signed });
     const signer = job.signer.address.toLowerCase();
@@ -541,10 +595,19 @@ async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
   return { accepted: sent.accepted };
 }
 
+// Starts the raw request before its first await, so a group's requests begin in nonce order.
+async function sendPipelineTransaction(ctx, job, rebroadcast) {
+  const started = Date.now();
+  const sent = await broadcast(ctx.client, job.signed.rawTransaction);
+  await report(ctx, 'broadcast-result', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, rebroadcast, accepted: sent.accepted, broadcastLatencyMs: Date.now() - started });
+  return recordPipelineBroadcast(ctx, job, sent, rebroadcast);
+}
+
 async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
   const prepared = await preparePipelineBroadcast(ctx, job);
   if (prepared.receipt) return prepared;
-  return recordPipelineBroadcast(ctx, job, await broadcast(ctx.client, job.signed.rawTransaction), rebroadcast);
+  await ctx.lock.assertHeld?.();
+  return sendPipelineTransaction(ctx, job, rebroadcast);
 }
 
 async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
@@ -556,9 +619,11 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
   // Reconcile the complete group first. Then initiate all raw requests in plan
   // order without waiting for a lower nonce's RPC response.
   const prepared = await Promise.all(work.map(job => preparePipelineBroadcast(ctx, job)));
+  // One lease check covers the group, so no await separates its first requests.
+  await ctx.lock.assertHeld?.();
   const firstAttempts = await Promise.all(work.map(async (job, index) => {
     if (prepared[index].receipt) return prepared[index];
-    try { return await recordPipelineBroadcast(ctx, job, await broadcast(ctx.client, job.signed.rawTransaction), rebroadcast); }
+    try { return await sendPipelineTransaction(ctx, job, rebroadcast); }
     catch (error) { return { error }; }
   }));
   ctx.timings.submitMs += Date.now() - submitStart;
@@ -584,6 +649,7 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
       if (waited.dead) await pipelineConflict(ctx, job);
       if (waited.timeout) throw new ApplyError('receipt-timeout', `No receipt for ${job.signed.transactionHash}. Rerun to resume the same transaction.`, { actionId: job.item.planned.id, retryable: true });
       receipt = waited.receipt;
+      await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
     }
     ctx.timings.receiptMs += Date.now() - receiptStart;
     await recordReceipt(ctx, job.item, job.signed, receipt);
@@ -614,12 +680,14 @@ async function persist(ctx) {
   if (!ctx.deps.recordResource) return { file: ctx.stateFile, written: false, reason: 'The state module has no recordResource function.' };
   const verified = ctx.plan.resources.filter(resource => ctx.outcomes.get(resource.id)?.verification);
   if (verified.length === 0) return { file: ctx.stateFile, written: false, reason: 'No resource is verified yet.' };
-  let state = await ctx.deps.readState(ctx.stateFile);
+  const current = await ctx.readState();
+  let state = current.value;
   for (const resource of verified) {
     const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id).filter(record => record.phase === 'receipt' && record.receipt?.status === 'success').map(record => record.transactionHash);
     state = await ctx.deps.recordResource({ resource: ctx.prepared.get(resource.id).resource, verification: ctx.outcomes.get(resource.id).verification, state, chain: ctx.plan.chain, transactions });
   }
-  await ctx.deps.writeStateAtomic(ctx.stateFile, state);
+  await ctx.lock.assertHeld?.();
+  await ctx.writeState(current.version, state);
   return { file: ctx.stateFile, written: true, resources: verified.length };
 }
 
@@ -650,7 +718,7 @@ function summary(ctx, status, error) {
 
 async function run(ctx) {
   ctx.prepared = await preflight(ctx);
-  ctx.stateSnapshot = await ctx.deps.readState(ctx.stateFile);
+  ctx.stateSnapshot = (await ctx.readState()).value;
   if (ctx.stateSnapshot && (ctx.stateSnapshot.chain?.id !== ctx.plan.chain.id || ctx.stateSnapshot.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
     throw new ApplyError('wrong-chain', 'State belongs to a different chain than the saved plan.');
   }
@@ -679,21 +747,38 @@ async function run(ctx) {
 }
 
 // Applies a pinned plan under one writer lock, with a durable journal record before every broadcast.
-export async function applyPlan({ plan, spec, artifacts, client, signers, stateFile, journalFile, parallel = false, pipeline = false, ...options }) {
+export async function applyPlan({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }) {
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
   const config = { ...DEFAULTS, ...options, hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
-  if (typeof stateFile !== 'string' || typeof journalFile !== 'string') throw new ApplyError('config', 'Apply needs stateFile and journalFile paths.');
-  const lanes = lanesFrom(signers, parallel);
+  const remote = Boolean(stateStore || journalStore || lockProvider || journalCipher || scopeInput);
+  if (remote && (!stateStore || !journalStore || !lockProvider || !journalCipher || !scopeInput)) throw new ApplyError('config', 'Production apply needs stateStore, journalStore, lockProvider, journalCipher, and scope together.');
+  if (!remote && (typeof stateFile !== 'string' || typeof journalFile !== 'string')) throw new ApplyError('config', 'Apply needs stateFile and journalFile paths.');
+  const scope = remote ? deploymentScope(scopeInput, plan?.chain) : null;
+  const signerControl = { scope, fence: null, assertHeld: null };
+  const lanes = lanesFrom(signerProvider ? await signersFromProvider(signerProvider, signerRoles, plan, signerControl) : signers, parallel);
   const deps = await loadDependencies(config.dependencies);
-  const lock = await acquireLock(`${stateFile}.lock`, { planHash: typeof plan?.planHash === 'string' ? plan.planHash : null });
+  const lockStarted = Date.now();
+  const emitLeaseEvent = event => typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit?.(event);
+  const lock = remote
+    ? await acquireLeases({ lockProvider, scope, addresses: [...lanes.byAddress.keys()], planHash: plan?.planHash, principal, ttlMs,
+      onRenew: event => emitLeaseEvent({ type: 'lock-renewal', at: new Date().toISOString(), planHash: plan?.planHash, chain: plan?.chain, scope, principal: event.holder.principal }),
+      onRenewFailure: event => emitLeaseEvent({ type: 'lock-renewal-failure', at: new Date().toISOString(), planHash: plan?.planHash, chain: plan?.chain, scope, principal: event.holder.principal, reason: event.error.message }),
+    })
+    : await acquireLock(`${stateFile}.lock`, { planHash: typeof plan?.planHash === 'string' ? plan.planHash : null });
+  signerControl.fence = lock.fence ?? null;
+  signerControl.assertHeld = () => lock.assertHeld?.();
   let journal;
   try {
-    journal = await openJournal(journalFile);
-    const ctx = { plan, spec, artifacts, client, lanes, deps, journal, lock, config, stateFile, parallel, pipeline, spent: new Map(), sent: [], rebroadcasts: [], outcomes: new Map(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 }, state: { file: stateFile, written: false } };
+    journal = remote ? await openStoredJournal({ journalStore, journalCipher, scope, fence: lock.fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile);
+    const readState = remote ? async () => { const found = await stateStore.read(scope); return { version: found?.version ?? null, value: found ? validateState(found.value) : null }; } : async () => ({ version: null, value: await deps.readState(stateFile) });
+    const writeState = remote ? (version, state) => stateStore.compareAndSwap(scope, version, validateState(state), { fence: lock.fence }) : (_version, state) => deps.writeStateAtomic(stateFile, state);
+    const ctx = { plan, spec, artifacts, client, lanes, deps, journal, lock, config, scope, remote, principal: lock.holder?.principal ?? principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline, spent: new Map(), sent: [], rebroadcasts: [], outcomes: new Map(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 }, state: { file: stateFile ?? null, written: false } };
+    await report(ctx, 'lock-acquisition', { holder: lock.holder, fencingTokens: lock.fence?.map(entry => entry.token), lockWaitMs: Date.now() - lockStarted });
     try {
       return await run(ctx);
     } catch (error) {
       if (!error || typeof error !== 'object') throw error;
+      await report(ctx, error.code === 'conflict' || error.code === 'plan-mismatch' ? 'conflict' : 'terminal-failure', { actionId: error.actionId, code: error.code, reason: error.message }).catch(() => {});
       if (ctx.prepared) {
         try {
           ctx.state = await persist(ctx);

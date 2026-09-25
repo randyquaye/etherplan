@@ -2,10 +2,13 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { generateAdapters, loadArtifacts } from './artifacts.mjs';
 import { applyPlan, acquireLock } from './execution/index.mjs';
+import { createAwsBackend } from './execution/aws.mjs';
+import { deploymentScope, inspectDeployment } from './execution/backends.mjs';
 import { hashJson } from './identity.mjs';
 import { createPlan, prepareResources } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
@@ -13,8 +16,8 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
-const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'id', 'creation-tx', 'deployers', 'owner']);
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
+const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
   const options = {};
@@ -81,6 +84,21 @@ function signersFromEnvironment() {
   return { deployer: keys.map(key => privateKeyToAccount(key)), ...(ownerKey ? { owner: privateKeyToAccount(ownerKey) } : {}) };
 }
 
+async function backendFromFile(file, chain, { requireBucket = false } = {}) {
+  const config = JSON.parse(await readFile(path.resolve(file), 'utf8'));
+  if (config.kind !== 'aws') throw new Error('Backend config kind must be aws.');
+  if (requireBucket && !config.bucket) throw new Error('AWS plan and apply need an immutable plan bucket in backend config.');
+  const scope = deploymentScope(config.scope, chain);
+  return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, bucket: config.bucket, prefix: config.prefix }), scope, ttlMs: config.ttlMs };
+}
+
+async function signerFromModule(file) {
+  const module = await import(pathToFileURL(path.resolve(file)).href);
+  const signerProvider = module.signerProvider ?? module.default;
+  if (typeof signerProvider?.address !== 'function' || typeof signerProvider?.signTransaction !== 'function') throw new Error('Signer module must export signerProvider with address(role) and signTransaction(role, request).');
+  return { signerProvider, signerRoles: module.signerRoles };
+}
+
 async function importOne({ spec, ordered, artifacts, client, options, stateFile }) {
   if (!options.id?.startsWith('contract:')) throw new Error('import needs --id contract:<name>.');
   const { resources } = prepareResources(spec, ordered, artifacts);
@@ -124,6 +142,15 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
 }
 
 async function run(command, options) {
+  if (command === 'status') {
+    if (!options.backend) throw new Error('status needs --backend file.json.');
+    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
+    const { planHash, ...fields } = plan;
+    if (hashJson(fields) !== planHash) throw new Error('Plan content does not match planHash.');
+    const backend = await backendFromFile(options.backend, plan.chain);
+    print(await inspectDeployment({ ...backend, chain: plan.chain, planHash: plan.planHash }));
+    return;
+  }
   const specFile = path.resolve(options.spec ?? 'spec.json');
   const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const ordered = graph(spec);
@@ -156,16 +183,31 @@ async function run(command, options) {
   const client = publicClient();
   const stateFile = stateFileFor(specFile, options);
   if (command === 'import') {
+    if (options.backend) throw new Error('import with a production backend is not yet supported.');
     await importOne({ spec, ordered, artifacts, client, options, stateFile });
     return;
   }
   if (command === 'apply') {
     const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
+    if (options.backend) {
+      if (!options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
+      const backend = await backendFromFile(options.backend, plan.chain, { requireBucket: true });
+      if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
+      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
+      return;
+    }
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
     print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
     return;
   }
-  const state = await readState(stateFile);
+  let state;
+  let backend;
+  if (options.backend) {
+    const chainId = await client.getChainId();
+    const genesis = await client.getBlock({ blockNumber: 0n });
+    backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
+    state = (await backend.stateStore.read(backend.scope))?.value ?? null;
+  } else state = await readState(stateFile);
   const pipeline = options.pipeline ? {
     deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
   } : null;
@@ -177,6 +219,7 @@ async function run(command, options) {
     if (hashJson(fields) !== planHash) throw new Error('Saved plan content does not match its planHash.');
   }
   if (command === 'plan') {
+    if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
     if (options.out) await writeJsonAtomic(path.resolve(options.out), plan);
     print(plan);
     if (plan.resources.some(resource => resource.action === 'conflict' || resource.action === 'unverified')) process.exitCode = 1;
@@ -205,7 +248,7 @@ async function run(command, options) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-if (!['adapters', 'graph', 'impact', 'validate', 'plan', 'schedule', 'verify', 'import', 'apply'].includes(command)) {
+if (!['adapters', 'graph', 'impact', 'validate', 'plan', 'schedule', 'verify', 'import', 'apply', 'status'].includes(command)) {
   console.error(USAGE);
   process.exitCode = 2;
 } else {
