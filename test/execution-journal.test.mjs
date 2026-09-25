@@ -4,7 +4,7 @@ import { appendFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { currentTransaction, liveTransactions, openJournal } from '../src/execution/journal.mjs';
+import { currentTransaction, intentForSigned, liveTransactions, openJournal } from '../src/execution/journal.mjs';
 import { acquireLock, LockError } from '../src/execution/lock.mjs';
 
 const chain = { id: 31337, genesisHash: `0x${'aa'.repeat(32)}` };
@@ -62,6 +62,7 @@ test('a corrupt complete line, a sequence regression, or a secret-like field fai
   const journal = await openJournal(path.join(dir, 'secret.jsonl'));
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', evidence: { privateKey: '0x01' } }), /forbidden key privateKey/);
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'unknown' }), /unknown phase/);
+  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'verified', creationProof: { kind: 'create' } }), /creationProof.*invalid fields/);
   assert.equal(journal.records.length, 0);
   await journal.close();
 });
@@ -86,6 +87,23 @@ test('live transactions are signed, broadcast, or receipt records without a late
   assert.deepEqual(liveTransactions(records).map(item => [item.latest.phase, item.signed.transactionHash]), [['broadcast', h1], ['receipt', h3]]);
   assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:c')).phase, 'receipt');
   assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:a')).phase, 'broadcast');
+});
+
+test('a live signature uses exactly one intent from its own action and attempt', () => {
+  let sequence = 0;
+  const record = (actionId, phase, extra = {}) => ({ formatVersion: 1, ...base, actionId, phase, sequence: ++sequence, ...extra });
+  const old = record('contract:a', 'intent');
+  const foreign = record('contract:b', 'intent');
+  const first = record('contract:a', 'signed');
+  const failed = record('contract:a', 'failed');
+  const current = record('contract:a', 'intent');
+  const duplicate = record('contract:a', 'intent');
+  const signed = record('contract:a', 'signed');
+  assert.equal(intentForSigned([old, foreign, first, failed, current, signed], signed), current);
+  assert.throws(() => intentForSigned([old, foreign, first, failed, signed], signed), /found 0/);
+  assert.throws(() => intentForSigned([old, foreign, first, failed, current, duplicate, signed], signed), /found 2/);
+  const otherChain = { ...current, chain: { ...chain, genesisHash: `0x${'cc'.repeat(32)}` } };
+  assert.throws(() => intentForSigned([old, foreign, first, failed, otherChain, signed], signed), /found 0/);
 });
 
 test('the writer lock excludes a live holder and recovers only a dead holder on this host', async () => {

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createWalletClient, http, pad } from 'viem';
+import { createWalletClient, http, keccak256, pad } from 'viem';
 import { acquireLock, applyPlan } from '../src/execution/index.mjs';
 import { estimateGasLimit } from '../src/execution/transactions.mjs';
 import { hashJson } from '../src/identity.mjs';
@@ -155,6 +155,70 @@ describe('apply on a private automining chain', () => {
       assert.deepEqual(result.rebroadcasts.map(entry => entry.actionId), phase === 'signed' ? [actionId] : []);
       await chain.rpc('evm_revert', [inner]);
     }
+  });
+
+  test('recovery rejects a substituted valid signature before any chain action', async () => {
+    for (const phase of ['signed', 'broadcast', 'receipt']) {
+      const inner = await chain.rpc('evm_snapshot');
+      const input = await planFor();
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(input.plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+        journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+        crash: { phase, actionId: 'contract:alpha' } });
+      assert.equal(killed.signal, 'SIGKILL', `${phase}: ${killed.stderr}`);
+      const records = await journalOf(ws.journalFile);
+      const intent = records.find(record => record.phase === 'intent' && record.actionId === 'contract:alpha');
+      const signed = records.find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      const rawTransaction = await deployerA.signTransaction({ type: 'eip1559', chainId: input.plan.chain.id,
+        nonce: Number(intent.nonce), to: outsider.address, data: '0x', value: 100n,
+        gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas),
+        maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas) });
+      const substitutedHash = keccak256(rawTransaction);
+      signed.rawTransaction = rawTransaction;
+      for (const record of records.filter(record => record.actionId === 'contract:alpha' && record.transactionHash)) {
+        record.transactionHash = substitutedHash;
+        if (record.receipt) record.receipt.transactionHash = substitutedHash;
+      }
+      await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+      let sends = 0;
+      const client = new Proxy(chain.client, { get(target, property) {
+        if (property === 'request') return async args => {
+          if (args.method === 'eth_sendRawTransaction') sends++;
+          return target.request(args);
+        };
+        return target[property];
+      } });
+      const beforeBalance = await chain.client.getBalance({ address: outsider.address });
+      await assert.rejects(apply(input, ws, { client }), error => {
+        assert.equal(error.code, 'journal');
+        assert.equal(error.actionId, 'contract:alpha');
+        assert.ok(!error.message.includes(rawTransaction));
+        return true;
+      });
+      assert.equal(sends, 0, `${phase} sent a transaction`);
+      assert.equal(await chain.client.getBalance({ address: outsider.address }), beforeBalance);
+      assert.equal(count(await journalOf(ws.journalFile), 'verified', 'contract:alpha'), 0);
+      await chain.rpc('evm_revert', [inner]);
+    }
+  });
+
+  test('a saved broadcast attempt resumes with the same signature', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const records = await journalOf(ws.journalFile);
+    const signed = records.find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+    records.push({ formatVersion: 1, planHash: signed.planHash, chain: signed.chain, actionId: signed.actionId,
+      phase: 'broadcast-attempt', sequence: signed.sequence + 1, signer: signed.signer,
+      nonce: signed.nonce, transactionHash: signed.transactionHash });
+    await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+    assert.equal((await apply(input, ws)).status, 'applied');
+    assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
   });
 
   test('a SIGKILL inside a parallel batch resumes both signed transactions with their original signers', async () => {

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, http, keccak256, parseTransaction } from 'viem';
 import { applyPlan } from '../src/execution/index.mjs';
 import { createPlan } from '../src/planning/index.mjs';
-import { deployerA, fixtureMany, startAnvil } from './execution/chain.mjs';
+import { deployerA, deployerB, fixtureMany, startAnvil } from './execution/chain.mjs';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const CHILD = fileURLToPath(new URL('./execution/apply-child.mjs', import.meta.url));
@@ -258,6 +258,99 @@ test('P-60/P-62–P-67: interrupted reservations resume without duplicate signat
         assert.deepEqual(signed.slice(0, crash.occurrence), before.filter(record => record.phase === 'signed'));
       } else {
         assert.deepEqual(signed, before.filter(record => record.phase === 'signed'));
+      }
+    } finally {
+      await chain.stop();
+    }
+  }
+});
+
+test('B4: a partially signed two-signer wave resumes its original nonces, including mined legacy work', async () => {
+  for (const scenario of ['current', 'legacy-mined', 'legacy-verified']) {
+    const chain = await startAnvil();
+    try {
+      const { spec, artifacts } = fixtureMany(3);
+      const plan = await createPlan({ spec, artifacts, client: chain.client,
+        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true } });
+      const input = { plan, spec, artifacts };
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+        journalFile: ws.journalFile, deployers: [0, 1], parallel: true, pipeline: true, fixtureMany: 3,
+        crash: { phase: 'signed', occurrence: 1 } });
+      assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+      const before = await recordsOf(ws.journalFile);
+      assert.equal(before.filter(record => record.phase === 'intent').length, 3);
+      assert.equal(before.filter(record => record.phase === 'signed').length, 1);
+      assert.equal(new Set(before.filter(record => record.phase === 'intent').map(record => record.waveAttemptId)).size, 1);
+      const first = before.find(record => record.phase === 'signed');
+      if (scenario !== 'current') {
+        for (const record of before) delete record.waveAttemptId;
+        await writeFile(ws.journalFile, `${before.map(record => JSON.stringify(record)).join('\n')}\n`);
+        await chain.rpc('eth_sendRawTransaction', [first.rawTransaction]);
+        const receipt = await chain.client.getTransactionReceipt({ hash: first.transactionHash });
+        assert.equal(receipt.status, 'success');
+        if (scenario === 'legacy-verified') {
+          const common = { formatVersion: 1, planHash: plan.planHash, chain: plan.chain, actionId: first.actionId };
+          before.push({ ...common, sequence: before.at(-1).sequence + 1, phase: 'receipt', signer: first.signer,
+            nonce: first.nonce, transactionHash: first.transactionHash, receipt: { transactionHash: first.transactionHash,
+              status: receipt.status, blockNumber: String(receipt.blockNumber), blockHash: receipt.blockHash, gasUsed: String(receipt.gasUsed) } });
+          before.push({ ...common, sequence: before.at(-1).sequence + 1, phase: 'verified', outcome: 'applied',
+            transactionHash: first.transactionHash });
+          await writeFile(ws.journalFile, `${before.map(record => JSON.stringify(record)).join('\n')}\n`);
+        }
+      }
+      const result = await apply(chain, input, ws, { parallel: true, signers: { deployer: [deployerA, deployerB] } });
+      assert.equal(result.status, 'applied');
+      const records = await recordsOf(ws.journalFile);
+      const signed = records.filter(record => record.phase === 'signed');
+      assert.equal(signed.length, 3);
+      assert.equal(signed.filter(record => record.actionId === first.actionId).length, 1);
+      assert.deepEqual(signed.map(record => Number(record.nonce)), [0, 0, 1]);
+      assert.equal(records.filter(record => record.phase === 'verified').length, 3);
+      assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 2);
+      assert.equal(await chain.client.getTransactionCount({ address: deployerB.address }), 1);
+      assert.equal((await apply(chain, input, ws, { parallel: true, signers: { deployer: [deployerA, deployerB] } })).transactionsSigned, 0);
+    } finally {
+      await chain.stop();
+    }
+  }
+});
+
+test('B4: a shortfall, nonce conflict, or corrupt second signer intent stops recovery before another broadcast', async () => {
+  for (const cause of ['funding', 'nonce', 'pending', 'intent', 'legacy-ambiguous']) {
+    const chain = await startAnvil(cause === 'pending' ? ['--no-mining'] : []);
+    try {
+      const { spec, artifacts } = fixtureMany(2);
+      const plan = await createPlan({ spec, artifacts, client: chain.client,
+        pipeline: { deployers: [deployerA.address, deployerB.address], parallel: true } });
+      const input = { plan, spec, artifacts };
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+        journalFile: ws.journalFile, deployers: [0, 1], parallel: true, pipeline: true, fixtureMany: 2,
+        crash: { phase: 'signed', occurrence: 1 } });
+      assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+      if (cause === 'funding') await chain.rpc('anvil_setBalance', [deployerB.address, '0x3e8']);
+      else if (cause === 'nonce' || cause === 'pending') {
+        const wallet = createWalletClient({ account: deployerB, transport: http(chain.url) });
+        await wallet.sendTransaction({ to: deployerB.address, value: 0n, nonce: 0, chain: null });
+      } else {
+        const records = await recordsOf(ws.journalFile);
+        if (cause === 'intent') records.find(record => record.phase === 'intent' && record.signer.toLowerCase() === deployerB.address.toLowerCase()).nonceOffset = 1;
+        else {
+          for (const record of records) delete record.waveAttemptId;
+          records.splice(records.findIndex(record => record.phase === 'intent' && record.signer.toLowerCase() === deployerB.address.toLowerCase()), 1);
+        }
+        await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+      }
+      const run = () => apply(chain, input, ws, { parallel: true, signers: { deployer: [deployerA, deployerB] } });
+      await rejectsCode(run(), cause === 'funding' ? 'insufficient-funds' : ['nonce', 'pending'].includes(cause) ? 'nonce-conflict' : 'journal');
+      assert.equal((await recordsOf(ws.journalFile)).filter(record => record.phase === 'broadcast-attempt').length, 0);
+      assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 0);
+      if (cause === 'funding') {
+        await chain.rpc('anvil_setBalance', [deployerB.address, '0x8ac7230489e80000']);
+        assert.equal((await run()).status, 'applied');
       }
     } finally {
       await chain.stop();

@@ -5,7 +5,7 @@ import { validateState } from '../state/index.mjs';
 import { createSchedule } from '../scheduling/index.mjs';
 import { loadDependencies } from './dependencies.mjs';
 import { ApplyError } from './errors.mjs';
-import { LIVE_PHASES, latestRecord, liveTransactions, openJournal } from './journal.mjs';
+import { LIVE_PHASES, intentForSigned, latestRecord, liveTransactions, openJournal } from './journal.mjs';
 import { acquireLock } from './lock.mjs';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.mjs';
 import { checkFactory, jsonSafe, preflight } from './preflight.mjs';
@@ -83,13 +83,16 @@ async function fail(ctx, item, code, reason, { retryable = false, evidence, ...f
 }
 
 async function verify(ctx, item, options = {}) {
-  const transactionHash = options.transactionHash ?? ctx.stateSnapshot?.resources?.[item.planned.id]?.transactions?.at(-1);
-  return ctx.deps.verifyResource(item.resource, ctx.client, transactionHash ? { ...options, transactionHash } : options);
+  const id = item.planned.id;
+  const saved = options.creationProof ?? ctx.outcomes.get(id)?.verification?.creationProof ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
+  const transactionHash = options.transactionHash ?? saved?.transactionHash ?? ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ?? ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
+  const creationProof = saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined;
+  return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
 async function markVerified(ctx, item, verification, fields) {
   const { planned } = item;
-  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...fields });
+  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...(verification.creationProof ? { creationProof: verification.creationProof } : {}), ...fields });
   ctx.outcomes.set(planned.id, { id: planned.id, action: planned.action, outcome: fields.outcome, address: planned.address, transactionHash: fields.transactionHash, verification });
 }
 
@@ -221,10 +224,14 @@ async function settleJournal(ctx) {
     if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Resume that plan first.`, { actionId: latest.actionId });
     if (latest.planHash === ctx.plan.planHash) {
       const item = ctx.prepared.get(latest.actionId);
-      const intent = ctx.journal.forAction(ctx.plan.planHash, latest.actionId).filter(record => record.phase === 'intent' && record.sequence < signed.sequence).at(-1);
-      if (!item || !intent) throw new ApplyError('journal', 'Signed journal transaction has no matching action or intent.', { actionId: latest.actionId });
-      try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
-      catch (error) { throw new ApplyError('journal', `Saved signed transaction is invalid: ${error.message}`, { actionId: latest.actionId }); }
+      if (!item) throw new ApplyError('journal', 'Journal has a transaction for an action that is not in this plan.', { actionId: latest.actionId });
+      try {
+        if (latest.transactionHash?.toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Latest transaction phase has a different hash from its signature.');
+        const intent = intentForSigned(records, signed);
+        await validateSignedTransaction(signed, intent, item.planned, id);
+      } catch (error) {
+        throw new ApplyError('journal', `${latest.actionId}: ${error.message}`, { actionId: latest.actionId });
+      }
     }
   }
   for (const { latest, signed } of liveTransactions(records)) {
@@ -239,102 +246,174 @@ async function settleJournal(ctx) {
   }
 }
 
-async function resumePipelineReservation(ctx, intents) {
-  const first = intents[0];
-  const wave = ctx.schedule.waves.find(entry => entry.wave === first.wave);
-  const expected = wave?.batches.flat().filter(entry => entry.signer === first.signer.toLowerCase()) ?? [];
-  if (expected.length !== intents.length || expected.some((entry, index) => entry.id !== intents[index].actionId || entry.nonceOffset !== intents[index].nonceOffset)) {
-    throw new ApplyError('journal', `Reservation ${first.reservationId} does not match the saved pipeline schedule.`);
+// A signed reservation commits the entire wave. Older journals have no attempt ID,
+// but their complete intent set immediately precedes the first signature.
+function pipelineAttempt(ctx, wave) {
+  const actions = new Set(wave.batches.flat().map(entry => entry.id));
+  const records = ctx.journal.records.filter(record => record.planHash === ctx.plan.planHash && actions.has(record.actionId) &&
+    record.reservationId && ['intent', 'signed'].includes(record.phase));
+  const signatures = records.filter(record => record.phase === 'signed');
+  if (!signatures.length) return null;
+  if (records.some(record => record.wave !== wave.wave || record.chain.id !== ctx.plan.chain.id ||
+    record.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
+    throw new ApplyError('journal', `Wave ${wave.wave} has a record with the wrong wave or chain.`);
   }
-  const base = BigInt(first.nonce);
+  const ids = new Set(signatures.map(record => record.waveAttemptId ?? null));
+  if (ids.size !== 1) throw new ApplyError('journal', `Wave ${wave.wave} has signatures from multiple attempts.`);
+  const [attemptId] = ids;
+  const intents = attemptId
+    ? records.filter(record => record.phase === 'intent' && record.waveAttemptId === attemptId)
+    : records.filter(record => record.phase === 'intent' && !record.waveAttemptId && record.sequence < signatures[0].sequence).slice(-wave.batches.flat().length);
+  if (intents.length !== wave.batches.flat().length || signatures.some(record => !intents.some(intent =>
+    intent.actionId === record.actionId && intent.reservationId === record.reservationId))) {
+    throw new ApplyError('journal', `Wave ${wave.wave} has an incomplete or ambiguous signed attempt.`);
+  }
+  return { intents, attemptId };
+}
+
+async function resumePipelineWave(ctx, wave) {
+  const attempt = pipelineAttempt(ctx, wave);
+  if (!attempt) return false;
+  const { intents, attemptId } = attempt;
+  const entries = wave.batches.flat();
+  const byAction = new Map();
+  for (const intent of intents) {
+    if (byAction.has(intent.actionId)) throw new ApplyError('journal', `Wave ${wave.wave} has duplicate intents for ${intent.actionId}.`);
+    byAction.set(intent.actionId, intent);
+  }
+  const groups = new Map();
   const jobs = [];
-  for (const [index, intent] of intents.entries()) {
-    const item = ctx.prepared.get(intent.actionId);
-    const signer = ctx.lanes.byAddress.get(intent.signer.toLowerCase());
-    if (!item || !signer || intent.signer.toLowerCase() !== first.signer.toLowerCase() ||
-      BigInt(intent.nonce) !== base + BigInt(index) || intent.to.toLowerCase() !== item.planned.tx.to.toLowerCase() ||
-      intent.value !== item.planned.tx.value || intent.dataHash.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase()) {
-      throw new ApplyError('journal', `Reservation ${first.reservationId} has an invalid intent for ${intent.actionId}.`, { actionId: intent.actionId });
+  for (const entry of entries) {
+    const intent = byAction.get(entry.id);
+    const item = ctx.prepared.get(entry.id);
+    const signer = ctx.lanes.byAddress.get(entry.signer);
+    if (!intent || !item || !signer || intent.signer?.toLowerCase() !== entry.signer ||
+      intent.nonceOffset !== entry.nonceOffset || intent.to?.toLowerCase() !== item.planned.tx.to.toLowerCase() ||
+      intent.value !== item.planned.tx.value || intent.dataHash?.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase() ||
+      !/^[0-9]+$/.test(String(intent.nonce)) || !/^[0-9]+$/.test(String(intent.gas)) ||
+      !/^[0-9]+$/.test(String(intent.maxFeePerGas)) || !/^[0-9]+$/.test(String(intent.maxPriorityFeePerGas)) ||
+      !Number.isSafeInteger(Number(intent.nonce)) ||
+      !intent.reservationId) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid intent for ${entry.id}.`, { actionId: entry.id });
+    const group = groups.get(entry.signer) ?? [];
+    if (group.length && (intent.reservationId !== group[0].intent.reservationId ||
+      BigInt(intent.nonce) !== BigInt(group[0].intent.nonce) + BigInt(entry.nonceOffset))) {
+      throw new ApplyError('journal', `Wave ${wave.wave} has inconsistent nonces or reservations for ${entry.signer}.`);
     }
-    // Receipt and verified records have no reservationId. Include them up to
-    // the next reservation for this action so recovery does not settle an
-    // already verified transaction a second time.
-    const actionRecords = ctx.journal.forAction(ctx.plan.planHash, intent.actionId);
-    const nextIntent = actionRecords.find(record => record.phase === 'intent' && record.sequence > intent.sequence && record.reservationId !== first.reservationId);
-    const records = actionRecords.filter(record => record.sequence >= intent.sequence && (!nextIntent || record.sequence < nextIntent.sequence));
-    const signatures = records.filter(record => record.phase === 'signed');
-    if (signatures.length > 1) throw new ApplyError('journal', `Reservation ${first.reservationId} has duplicate signatures.`, { actionId: intent.actionId });
+    const actionRecords = ctx.journal.forAction(ctx.plan.planHash, entry.id);
+    const nextIntent = actionRecords.find(record => record.phase === 'intent' && record.sequence > intent.sequence);
+    const history = actionRecords.filter(record => record.sequence >= intent.sequence && (!nextIntent || record.sequence < nextIntent.sequence));
+    const signatures = history.filter(record => record.phase === 'signed');
+    if (signatures.length > 1 || signatures.some(record => record.reservationId !== intent.reservationId || (record.waveAttemptId ?? null) !== attemptId)) {
+      throw new ApplyError('journal', `Wave ${wave.wave} has duplicate or mismatched signatures for ${entry.id}.`, { actionId: entry.id });
+    }
     const signed = signatures[0];
     if (signed) {
       try { await validateSignedTransaction(signed, intent, item.planned, ctx.plan.chain.id); }
-      catch (error) { throw new ApplyError('journal', error.message, { actionId: intent.actionId }); }
+      catch (error) { throw new ApplyError('journal', error.message, { actionId: entry.id }); }
     }
-    jobs.push({ item, entry: expected[index], signer, intent, signed, records });
+    const job = { item, entry, signer, intent, signed, records: history };
+    group.push(job);
+    groups.set(entry.signer, group);
+    jobs.push(job);
   }
-  const conflict = jobs.find(job => job.records.at(-1)?.phase === 'failed' && job.records.at(-1).code === 'nonce-conflict');
-  if (conflict) {
-    const latest = conflict.records.at(-1);
-    throw new ApplyError('nonce-conflict', latest.reason, { actionId: conflict.item.planned.id, evidence: latest });
+  if (byAction.size !== entries.length) throw new ApplyError('journal', `Wave ${wave.wave} has intents outside its saved schedule.`);
+  for (const group of groups.values()) {
+    if (group[0].entry.nonceOffset !== 0) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid first nonce offset.`);
   }
-  // A dependency can change during an interruption. Recheck it before any unmined transaction is signed or resent.
-  const unmined = [];
-  for (const job of jobs) {
-    if (!job.signed || !await findReceipt(ctx.client, job.signed.transactionHash)) unmined.push(job);
+  if (new Set([...groups.values()].map(group => group[0].intent.reservationId)).size !== groups.size) {
+    throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
-  await checkExecutionDependencies(ctx, unmined, false);
-  if (jobs.some(job => job.signed) && jobs.some(job => !job.signed)) {
-    if (jobs.some(job => job.records.some(record => ['broadcast-attempt', 'broadcast', 'receipt'].includes(record.phase)))) {
-      throw new ApplyError('journal', `Reservation ${first.reservationId} was broadcast before all signatures were persisted.`);
-    }
+  const conflict = jobs.find(job => job.records.at(-1)?.phase === 'failed' && !job.records.at(-1).retryable);
+  if (conflict) throw new ApplyError(conflict.records.at(-1).code, conflict.records.at(-1).reason, { actionId: conflict.item.planned.id });
+
+  // Check every signer and precondition before adding any signature or broadcast.
+  for (const job of jobs) job.receipt = job.signed ? await findReceipt(ctx.client, job.signed.transactionHash) : null;
+  for (const job of jobs.filter(entry => entry.records.at(-1)?.phase === 'verified')) await decide(ctx, job.item);
+  const outstanding = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
+  await checkExecutionDependencies(ctx, outstanding, false);
+  for (const job of outstanding) {
+    const observed = await precondition(ctx, job.item);
+    if (observed.satisfied) throw new ApplyError('conflict', `The precondition for ${job.item.planned.id} changed after its nonce was reserved.`, { actionId: job.item.planned.id });
+  }
+  for (const [address, group] of groups) {
     const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: first.signer, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: first.signer, blockTag: 'pending' }),
+      ctx.client.getTransactionCount({ address, blockTag: 'latest' }),
+      ctx.client.getTransactionCount({ address, blockTag: 'pending' }),
     ]);
-    if (BigInt(latest) > base) {
-      const affected = jobs.find(job => BigInt(job.intent.nonce) < BigInt(latest)) ?? jobs[0];
-      if (affected.signed && !await findReceipt(ctx.client, affected.signed.transactionHash)) await pipelineConflict(ctx, affected);
-      throw new ApplyError('nonce-conflict', `Signer ${first.signer} consumed reserved nonce ${affected.intent.nonce} for ${affected.item.planned.id}.`, { actionId: affected.item.planned.id });
+    const base = BigInt(group[0].intent.nonce);
+    if (BigInt(latest) < base || BigInt(pending) < BigInt(latest)) throw new ApplyError('nonce-conflict', `Signer ${address} no longer has the reserved nonce sequence.`, { actionId: group[0].item.planned.id });
+    for (const job of group) {
+      if (BigInt(job.intent.nonce) < BigInt(latest) && !job.receipt) {
+        if (job.signed) await pipelineConflict(ctx, job);
+        throw new ApplyError('nonce-conflict', `Signer ${address} consumed unsigned reserved nonce ${job.intent.nonce}.`, { actionId: job.item.planned.id });
+      }
     }
-    if (pending !== latest) {
-      throw new ApplyError('nonce-conflict', `Signer ${first.signer} has unknown pending transactions in the reserved nonce sequence starting at ${base}.`, { actionId: jobs[0].item.planned.id });
+    for (let nonce = BigInt(latest); nonce < BigInt(pending); nonce++) {
+      const job = group.find(entry => BigInt(entry.intent.nonce) === nonce);
+      if (!job?.signed) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: group[0].item.planned.id });
+      let known = false;
+      try { known = Boolean(await ctx.client.getTransaction({ hash: job.signed.transactionHash })); }
+      catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+      if (!known) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: job.item.planned.id });
     }
-    const required = jobs.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
-    const balance = await ctx.client.getBalance({ address: first.signer });
-    if (balance < required) throw new ApplyError('insufficient-funds', `Signer ${first.signer} has ${balance} wei; the reserved group can cost ${required} wei.`, { actionId: jobs[0].item.planned.id, retryable: true });
-    const budget = ctx.config.budgets[first.signer.toLowerCase()];
-    const spent = signedSpend(await commitments(ctx), first.signer.toLowerCase(), first.reservationId);
-    if (budget !== undefined && spent + required > BigInt(budget)) {
-      throw new ApplyError('budget-exceeded', `Signer ${first.signer} has ${spent} wei committed; ${required} wei for reservation ${first.reservationId} would exceed its ${budget} wei budget.`, { actionId: jobs[0].item.planned.id, retryable: true });
-    }
-    for (const job of jobs.filter(entry => !entry.signed)) {
-      const { intent, item, signer } = job;
-      const envelope = { chainId: ctx.plan.chain.id, to: item.planned.tx.to, data: item.planned.tx.data, value: BigInt(intent.value),
-        gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
-      const signed = await signWithLease(ctx, item.planned.id, signer, envelope);
-      job.signed = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, first.wave, first.reservationId), phase: 'signed', ...signed });
-      ctx.sent.push({ actionId: item.planned.id, wave: first.wave, signer: first.signer.toLowerCase(), nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() });
+    const unmined = group.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
+    if (!unmined.length) continue;
+    const required = unmined.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
+    const balance = await ctx.client.getBalance({ address });
+    if (balance < required) throw new ApplyError('insufficient-funds', `Signer ${address} has ${balance} wei; the reserved group can cost ${required} wei.`, { actionId: unmined[0].item.planned.id, retryable: true });
+    const budget = ctx.config.budgets[address];
+    const reserved = group.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
+    const spent = signedSpend(await commitments(ctx), address, group[0].intent.reservationId);
+    if (budget !== undefined && spent + reserved > BigInt(budget)) {
+      throw new ApplyError('budget-exceeded', `Signer ${address} has ${spent} wei committed; ${reserved} wei for reservation ${group[0].intent.reservationId} would exceed its ${budget} wei budget.`, { actionId: unmined[0].item.planned.id, retryable: true });
     }
   }
-  const active = jobs.filter(job => {
-    const latest = job.records.at(-1);
-    return latest?.phase !== 'verified' && !(latest?.phase === 'failed' && !latest.retryable);
-  });
-  for (const job of active) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: first.reservationId });
+  for (const job of jobs.filter(entry => entry.receipt && entry.records.at(-1)?.phase !== 'verified')) {
+    await recordReceipt(ctx, job.item, job.signed, job.receipt);
+    await finish(ctx, job.item, job.signed, job.receipt);
+    await decide(ctx, job.item);
+    job.completed = true;
+  }
+  for (const job of jobs.filter(entry => !entry.signed)) {
+    const { intent, item, signer } = job;
+    const envelope = { chainId: ctx.plan.chain.id, to: item.planned.tx.to, data: item.planned.tx.data, value: BigInt(intent.value),
+      gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
+    let signed;
+    try { signed = await signWithLease(ctx, item.planned.id, signer, envelope); }
+    catch (error) { throw new ApplyError('signer', error.message, { actionId: item.planned.id, retryable: true }); }
+    job.signed = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId, attemptId), phase: 'signed', ...signed });
+    ctx.sent.push({ actionId: item.planned.id, wave: wave.wave, signer: job.entry.signer, nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() });
+  }
+  const active = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.completed);
+  for (const job of active) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: job.intent.reservationId });
   if (active.length) await settlePipelineBatch(ctx, active, { rebroadcast: true });
+  for (const job of jobs) await decide(ctx, job.item);
+  return true;
 }
 
-async function resumePipelineJournal(ctx) {
-  const groups = new Map();
-  for (const record of ctx.journal.records) {
-    if (record.planHash !== ctx.plan.planHash || record.phase !== 'intent' || !record.reservationId) continue;
-    if (!groups.has(record.reservationId)) groups.set(record.reservationId, []);
-    groups.get(record.reservationId).push(record);
+const lower = value => typeof value === 'string' ? value.toLowerCase() : value ?? null;
+
+// A plan accepts a rebuilt artifact against one saved record. Under the lock, state must still hold that record, or
+// this rebaseline of it, and the live code must still be the code that record describes.
+function checkArtifactDrift(ctx, item, verification) {
+  const drift = item.planned.observation?.stateComparison?.artifactDrift;
+  if (!drift) return null;
+  const { id } = item.planned;
+  if (drift.accepted !== true || lower(drift.artifactHash) !== lower(item.planned.artifactHash)) {
+    throw new ApplyError('plan-not-applicable', `${id} is reused without an accepted artifact drift for its planned artifact.`, { actionId: id });
   }
-  const active = [...groups.values()].filter(intents => intents.some(intent => ctx.journal.forAction(ctx.plan.planHash, intent.actionId)
-    .some(record => record.phase === 'signed' && record.reservationId === intent.reservationId)));
-  const settled = await Promise.allSettled(active.map(intents => resumePipelineReservation(ctx, intents)));
-  const rejected = settled.find(result => result.status === 'rejected');
-  if (rejected) throw rejected.reason;
+  const record = ctx.stateSnapshot?.resources?.[id];
+  const saved = record ? { address: record.address, initcodeHash: record.initcodeHash ?? null, inputsHash: record.inputsHash, salt: record.salt ?? null, codeHash: record.codeHash ?? null } : null;
+  if (!saved || hashJson(jsonSafe(saved)) !== hashJson(jsonSafe(drift.baseline)) ||
+    ![lower(drift.previousArtifactHash), lower(drift.artifactHash)].includes(lower(record.artifactHash))) {
+    throw new ApplyError('stale-state', `The saved state for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, {
+      actionId: id, evidence: { expected: { ...drift.baseline, artifactHash: drift.previousArtifactHash }, actual: saved && { ...saved, artifactHash: record.artifactHash } },
+    });
+  }
+  if (lower(verification.codeHash) !== lower(drift.baseline.codeHash)) {
+    throw new ApplyError('drift', `The live code for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, { actionId: id, evidence: summarizeVerification(verification) });
+  }
+  return { previousArtifactHash: drift.previousArtifactHash, artifactHash: drift.artifactHash };
 }
 
 async function recheckReused(ctx) {
@@ -344,7 +423,8 @@ async function recheckReused(ctx) {
     if (verification.status !== 'verified') {
       throw new ApplyError('drift', `A resource that the plan reuses is now ${verification.status}. Create a new plan.`, { actionId: item.planned.id, evidence: summarizeVerification(verification) });
     }
-    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification });
+    const artifactDrift = checkArtifactDrift(ctx, item, verification);
+    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification, ...(artifactDrift ? { artifactDrift } : {}) });
   }
 }
 
@@ -353,7 +433,7 @@ async function decide(ctx, item) {
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const latest = latestRecord(records);
   if (latest?.phase === 'verified') {
-    const verification = await verify(ctx, item, latest.transactionHash ? { transactionHash: latest.transactionHash } : {});
+    const verification = await verify(ctx, item, { ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), ...(latest.creationProof ? { creationProof: latest.creationProof } : {}) });
     if (verification.status !== 'verified') {
       await fail(ctx, item, 'drift', `The action verified earlier but is now ${verification.status}.`, { evidence: summarizeVerification(verification) });
     }
@@ -398,17 +478,12 @@ async function prepareBatch(ctx, batch) {
 // Count every durable signature, including mined and failed transactions. A nonce
 // can only spend once, so replacements contribute their largest possible cost.
 async function commitments(ctx) {
-  const intents = new Map();
   const bySigner = new Map();
   for (const record of ctx.journal.records) {
-    if (record.planHash !== ctx.plan.planHash || !['intent', 'signed'].includes(record.phase)) continue;
-    if (record.phase === 'intent') {
-      intents.set(record.actionId, record);
-      continue;
-    }
-    const intent = intents.get(record.actionId);
+    if (record.planHash !== ctx.plan.planHash || record.phase !== 'signed') continue;
     const planned = ctx.prepared.get(record.actionId)?.planned;
     try {
+      const intent = intentForSigned(ctx.journal.records, record);
       for (const entry of [intent, record]) {
         if (!entry || entry.chain.id !== ctx.plan.chain.id ||
           entry.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase()) {
@@ -528,9 +603,9 @@ async function signBatch(ctx, wave, work) {
   }
 }
 
-function intentFields(job, wave, reservationId) {
+function intentFields(job, wave, reservationId, waveAttemptId = null) {
   const { envelope, entry } = job;
-  return { phase: 'intent', wave, reservationId, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled,
+  return { phase: 'intent', wave, reservationId, ...(waveAttemptId ? { waveAttemptId } : {}), signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled,
     nonceOffset: entry.nonceOffset, nonce: String(envelope.nonce), to: envelope.to, value: envelope.value,
     dataHash: keccak256(envelope.data), gas: envelope.gas, maxFeePerGas: envelope.maxFeePerGas,
     maxPriorityFeePerGas: envelope.maxPriorityFeePerGas };
@@ -556,16 +631,17 @@ async function signPipelineBatch(ctx, wave, work) {
     }
   }
   // Every intent is durable before any signature. Partial intent groups can be discarded on restart.
+  const waveAttemptId = randomUUID();
   for (const jobs of groups.values()) {
     const reservationId = randomUUID();
-    for (const job of jobs) job.intent = await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId));
+    for (const job of jobs) job.intent = await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId, waveAttemptId));
   }
   // The lock remains held and no broadcast starts until every signed record is synced.
   for (const job of work) {
     let signed;
     try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, job.envelope); }
     catch (error) { throw new ApplyError('signer', error.message, { actionId: job.item.planned.id, retryable: true }); }
-    job.signed = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, job.intent.reservationId), phase: 'signed', ...signed });
+    job.signed = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, job.intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
     const signer = job.signer.address.toLowerCase();
     ctx.sent.push({ actionId: job.item.planned.id, wave, signer, nonce: String(job.envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() });
   }
@@ -770,9 +846,21 @@ async function run(ctx) {
   if (ctx.schedule.deferred.length) throw new ApplyError('unschedulable', `Some actions have dependencies that the plan cannot satisfy: ${ctx.schedule.deferred.map(entry => entry.id).join(', ')}.`, { evidence: ctx.schedule.deferred });
   await commitments(ctx);
   await settleJournal(ctx);
-  if (ctx.pipeline) await resumePipelineJournal(ctx);
   await recheckReused(ctx);
+  // Preserve the dependency check for a later signed wave before revisiting
+  // completed earlier waves. This also stops a resend if its prerequisite drifted.
+  if (ctx.pipeline) {
+    for (const wave of ctx.schedule.waves) {
+      if (!pipelineAttempt(ctx, wave)) continue;
+      const work = wave.batches.flat().map(entry => ({ item: ctx.prepared.get(entry.id) }));
+      await checkExecutionDependencies(ctx, work, false);
+    }
+  }
   for (const wave of ctx.schedule.waves) {
+    if (ctx.pipeline && await resumePipelineWave(ctx, wave)) {
+      ctx.state = await persist(ctx);
+      continue;
+    }
     for (const batch of wave.batches) {
       await runBatch(ctx, wave.wave, batch);
       ctx.state = await persist(ctx);
