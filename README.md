@@ -70,6 +70,8 @@ Without `--plan`, `apply` creates a fresh plan from the current spec, state, and
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
+A saved plan pins the state it observed. Apply rejects it with `stale-state` if another plan or import changed that state; create a new plan from the current state to proceed. An interrupted apply can resume its own saved plan.
+
 For shared recovery across runners, use the [production backend guide](docs/production-backends.md). It covers the AWS reference backend, encrypted journal records, fenced signer locks, external signers, structured events, and the read-only `status` command.
 
 Schedule and apply both use the primary deployer serially by default. Add `--parallel` to either command to assign eligible independent deployments across multiple funded deployers. A resource must declare `senderIndependent: true` before it can use a secondary deployer, and the factory must be recognized as permissionless. Owner calls use the owner signer. Use `schedule --deployers address,address` to inspect the proposed waves without sending transactions.
@@ -91,6 +93,8 @@ Use `--parallel` when creating a pipeline plan to distribute eligible deployment
 ## Existing contracts and proof
 
 `verify` rereads live code, immutables, declared getter values, external code hashes, and binding state. Matching bytecode outside compiler-marked immutable regions is not enough when an immutable has no value proof. Incomplete proof is `unverified`; a mismatch is `conflict`.
+
+Checks must name `view` or `pure` ABI functions. A check proves the declared return value at the block used for verification.
 
 For a deployment with creation transaction evidence, Etherplan records a `creationProof` in the verified journal entry and state. It binds the transaction, canonical receipt block, initcode, address, and exact runtime hash; CREATE2 also binds the factory and salt. Later plan, verify, and apply recheck that identity, the current code and artifact runtime, and all declared getters. This keeps immutables derived from the deployment block verified after time or block number changes. An old state file without this field remains readable. If its creation transaction and receipt-block data are still available, Etherplan can reconstruct the proof; otherwise declare an expected code hash or getter checks for the missing immutable values. A legacy `proofHash` alone does not prove them.
 

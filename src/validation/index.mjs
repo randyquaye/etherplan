@@ -73,6 +73,7 @@ function validateCheck(abi, check, label) {
   return withContext(label, () => {
     const args = check.args ?? [];
     const fn = abiFunction(abi, check.functionName, args.length, label);
+    assert(['view', 'pure'].includes(fn.stateMutability), `ABI function ${check.functionName} must be view or pure to be a check.`);
     encodedArguments(fn.inputs ?? [], args, 'argument');
     const outputs = fn.outputs ?? [];
     assert(outputs.length > 0, `ABI function ${check.functionName} has no output to check.`);
