@@ -10,6 +10,7 @@ import { acquireLock, applyPlan } from '../src/execution/index.mjs';
 import { estimateGasLimit } from '../src/execution/transactions.mjs';
 import { hashJson } from '../src/identity.mjs';
 import { createPlan } from '../src/planning/index.mjs';
+import { verifyResource } from '../src/verification/index.mjs';
 import { deployerA, deployerB, fixture, owner, outsider, startAnvil, TEST_KEYS } from './execution/chain.mjs';
 
 const CHILD = fileURLToPath(new URL('./execution/apply-child.mjs', import.meta.url));
@@ -110,6 +111,23 @@ describe('apply on a private automining chain', () => {
       const tx = await chain.client.getTransaction({ hash: callRecord.transactionHash });
       assert.equal(tx.from.toLowerCase(), owner.address.toLowerCase());
     }
+  });
+
+  test('a mined call with decoded secret-like fields is journaled and resumes', async t => {
+    if (!callPlanned) return t.skip('The fixture did not plan a call.');
+    const input = await planFor();
+    const ws = await workspace();
+    const decoded = { secretHash: `0x${'12'.repeat(32)}`, privateKey: 'contract field' };
+    const dependencies = { async verifyResource(resource, client, options) {
+      const result = await verifyResource(resource, client, options);
+      if (resource.id === 'call:bindGamma' && result.status === 'verified') result.bindingChecks[0].actual = decoded;
+      return result;
+    } };
+    const first = await apply(input, ws, { dependencies });
+    assert.equal(first.status, 'applied');
+    const verified = (await journalOf(ws.journalFile)).find(record => record.actionId === 'call:bindGamma' && record.phase === 'verified');
+    assert.deepEqual(verified.verification.bindingChecks[0].actual, decoded);
+    assert.equal((await apply(input, ws, { dependencies })).transactionsSigned, 0);
   });
 
   test('rerun uses creation evidence for immutables without getters', async () => {

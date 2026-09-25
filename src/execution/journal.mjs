@@ -7,16 +7,20 @@ export const JOURNAL_FORMAT_VERSION = 1;
 export const PHASES = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
 // A transaction in one of these phases may still change the chain or hold its signer's next nonce.
 export const LIVE_PHASES = new Set(['signed', 'broadcast-attempt', 'broadcast', 'receipt']);
-const SECRET_KEY = /private|secret|mnemonic|seed|passphrase/i;
+const SECRET_KEY = /^(private[_-]?key|secret[_-]?key|mnemonic|seed[_-]?phrase|passphrase)$/i;
 
-function assertNoSecrets(value, where = 'record') {
-  if (Array.isArray(value)) value.forEach((item, index) => assertNoSecrets(item, `${where}[${index}]`));
-  else if (value && typeof value === 'object') {
+function validateFields(value, where = 'record', decoded = false, topLevel = true) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))) return;
+  if (Array.isArray(value)) return value.forEach((item, index) => validateFields(item, `${where}[${index}]`, decoded, false));
+  if (value && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))) {
     for (const [key, item] of Object.entries(value)) {
-      if (SECRET_KEY.test(key)) throw new Error(`Journal ${where} has a forbidden key ${key}.`);
-      assertNoSecrets(item, `${where}.${key}`);
+      if (!decoded && SECRET_KEY.test(key)) throw new Error(`Journal ${where} has a forbidden key ${key}.`);
+      validateFields(item, `${where}.${key}`, decoded || (topLevel && (key === 'verification' || key === 'evidence')), false);
     }
+    return;
   }
+  throw new Error(`Journal ${where} must contain only JSON values.`);
 }
 
 function validate(record, line) {
@@ -28,7 +32,7 @@ function validate(record, line) {
   if (!Number.isSafeInteger(record.sequence) || record.sequence < 1) throw new Error(`Journal ${where} needs a positive sequence.`);
   if (!PHASES.includes(record.phase)) throw new Error(`Journal ${where} has an unknown phase ${record.phase}.`);
   validateJournalCreationProof(record, `Journal ${where}`);
-  assertNoSecrets(record, where);
+  validateFields(record, where);
 }
 
 async function syncDirectory(directory) {

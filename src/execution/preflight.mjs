@@ -72,15 +72,11 @@ export async function checkFactory(client, factory) {
   }
 }
 
-// Rejects any plan that is not exactly what the current spec, artifacts, and chain produce. Returns the prepared resource for each plan entry.
-export async function preflight({ plan, spec, artifacts, client, deps }) {
+// Read-only identity check shared by apply and saved-plan schedule previews.
+export async function checkPlanIdentity({ plan, spec, artifacts, client, deps }) {
   if (!plan || ![1, 2].includes(plan.formatVersion) || !Array.isArray(plan.resources)) throw new ApplyError('plan-format', 'Plan must have formatVersion 1 or 2 and resources[].');
   const { planHash, ...fields } = plan;
   if (typeof planHash !== 'string' || hashJson(fields) !== planHash) throw new ApplyError('plan-hash', 'Plan content does not match its planHash. The plan changed after it was created.');
-  const blocked = plan.resources.filter(resource => !APPLICABLE.has(resource.action));
-  if (blocked.length) {
-    throw new ApplyError('plan-not-applicable', `Plan has resources that cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`, { evidence: blocked.map(resource => ({ id: resource.id, action: resource.action, observation: resource.observation })) });
-  }
 
   if (spec === undefined || spec === null) throw new ApplyError('stale-spec', 'Apply needs the spec that produced the plan.');
   const parsed = deps.parseSpec(structuredClone(spec));
@@ -96,6 +92,7 @@ export async function preflight({ plan, spec, artifacts, client, deps }) {
   const contracts = plan.resources.filter(resource => resource.kind === 'contract').map(resource => resource.id);
   const missing = contracts.filter(id => !Object.hasOwn(plan.artifactHashes ?? {}, id));
   if (missing.length) throw new ApplyError('stale-artifact', `Plan has no artifact hash for ${missing.join(', ')}.`);
+  if (Object.keys(plan.artifactHashes ?? {}).length !== contracts.length) throw new ApplyError('stale-artifact', 'The plan artifact hash set differs from its contracts.');
 
   const ordered = deps.graph(parsed);
   if (plan.formatVersion === 2 && (!same(plan.graphs, dependencyGraphs(ordered)) ||
@@ -133,7 +130,18 @@ export async function preflight({ plan, spec, artifacts, client, deps }) {
   }
 
   await checkChain(plan, client);
+  return prepared;
+}
+
+// Apply also requires every planned action to be executable.
+export async function preflight(input) {
+  const { plan } = input;
+  const blocked = plan?.resources?.filter(resource => !APPLICABLE.has(resource.action)) ?? [];
+  if (blocked.length) {
+    throw new ApplyError('plan-not-applicable', `Plan has resources that cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`, { evidence: blocked.map(resource => ({ id: resource.id, action: resource.action, observation: resource.observation })) });
+  }
+  const prepared = await checkPlanIdentity(input);
   const factories = new Map(plan.resources.filter(resource => resource.action === 'deploy').map(resource => [resource.factory.address.toLowerCase(), resource.factory]));
-  for (const factory of factories.values()) await checkFactory(client, factory);
+  for (const factory of factories.values()) await checkFactory(input.client, factory);
   return prepared;
 }
