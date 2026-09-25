@@ -104,14 +104,56 @@ test('a CREATE2 proxy deployment is verified by simulation and by its transactio
 
 test('an immutable read from block context needs a declared value once the context changes', { skip }, async () => {
   const resource = prepared('Stamped', ['9'], { label: 'stamped' });
-  const { receipt } = await deploy(resource);
-  const atDeployment = await verifyResource(resource, client, { blockNumber: receipt.blockNumber });
+  const { hash, receipt } = await deploy(resource);
+  const atDeployment = await verifyResource(resource, client, { blockNumber: receipt.blockNumber, transactionHash: hash });
   assert.equal(atDeployment.status, 'verified', JSON.stringify(atDeployment.missingProofs));
+  assert.equal(atDeployment.creationProof.blockHash, receipt.blockHash.toLowerCase());
+  assert.equal(atDeployment.creationProof.kind, 'create2');
   await client.request({ method: 'evm_increaseTime', params: [3600] });
   await client.request({ method: 'evm_mine', params: [] });
   const later = await verifyResource(resource, client);
   assert.equal(later.status, 'unverified');
   assert.deepEqual(later.evidence.immutables.map(item => [item.name, item.provenBy]), [['CREATED_AT', null], ['SEED', 'create2-simulation']]);
+  const anchored = await verifyResource(resource, client, { creationProof: atDeployment.creationProof });
+  assert.equal(anchored.status, 'verified', JSON.stringify(anchored.missingProofs));
+  assert.deepEqual(anchored.evidence.immutables.map(item => item.provenBy), ['create2-transaction', 'create2-transaction']);
+  const rebuilt = await verifyResource({ ...resource, artifactHash: `0x${'44'.repeat(32)}` }, client, { creationProof: atDeployment.creationProof });
+  assert.equal(rebuilt.status, 'verified');
+  const withClient = (method, replacement) => Object.assign(Object.create(client), { [method]: replacement });
+  const prunedCode = withClient('getCode', async request => {
+    if (request.blockNumber === receipt.blockNumber) throw new Error('historical code pruned');
+    return client.getCode(request);
+  });
+  assert.equal((await verifyResource(resource, prunedCode, { creationProof: atDeployment.creationProof })).status, 'verified');
+  const stale = withClient('getBlock', async request => request.blockNumber === receipt.blockNumber
+    ? { ...(await client.getBlock(request)), hash: `0x${'22'.repeat(32)}` } : client.getBlock(request));
+  assert.equal((await verifyResource(resource, stale, { creationProof: atDeployment.creationProof, simulate: false })).status, 'unverified');
+  const missing = withClient('getTransactionReceipt', async () => { throw new Error('receipt unavailable'); });
+  assert.equal((await verifyResource(resource, missing, { creationProof: atDeployment.creationProof, simulate: false })).status, 'unverified');
+  const wrongTransaction = withClient('getTransaction', async request => ({ ...(await client.getTransaction(request)), input: '0x00' }));
+  assert.equal((await verifyResource(resource, wrongTransaction, { creationProof: atDeployment.creationProof, simulate: false })).status, 'unverified');
+  const changedFactory = withClient('getCode', async request => request.address.toLowerCase() === factory.address.toLowerCase() && request.blockNumber === undefined
+    ? '0x6000' : client.getCode(request));
+  assert.equal((await verifyResource(resource, changedFactory, { creationProof: atDeployment.creationProof, simulate: false })).status, 'unverified');
+  const liveCode = await client.getCode({ address: resource.address });
+  let alteredWord = liveCode;
+  for (const range of resource.artifact.immutables[0].ranges) {
+    alteredWord = `0x${alteredWord.slice(2, 2 + range.start * 2)}${'00'.repeat(range.length)}${alteredWord.slice(2 + (range.start + range.length) * 2)}`;
+  }
+  const changedCode = withClient('getCode', async request => request.address.toLowerCase() === resource.address.toLowerCase()
+    ? alteredWord : client.getCode(request));
+  const changedRuntime = await verifyResource(resource, changedCode, { creationProof: atDeployment.creationProof, simulate: false });
+  assert.equal(changedRuntime.status, 'unverified', JSON.stringify(changedRuntime.reasons));
+  const changedSkeleton = withClient('getCode', async request => request.address.toLowerCase() === resource.address.toLowerCase()
+    ? `0x00${liveCode.slice(4)}` : client.getCode(request));
+  assert.equal((await verifyResource(resource, changedSkeleton, { creationProof: atDeployment.creationProof, simulate: false })).status, 'conflict');
+  assert.equal((await verifyResource({ ...resource, salt: `0x${'33'.repeat(32)}` }, client, { creationProof: atDeployment.creationProof, simulate: false })).status, 'unverified');
+  const changedBlock = await verifyResource(resource, client, { creationProof: { ...atDeployment.creationProof, blockHash: `0x${'11'.repeat(32)}` }, simulate: false });
+  assert.equal(changedBlock.status, 'unverified');
+  const wrongGetter = await verifyResource({ ...resource, checks: [{ functionName: 'CREATED_AT', expected: '0' }] }, client, { creationProof: atDeployment.creationProof });
+  assert.equal(wrongGetter.status, 'conflict');
+  const wrongInitcode = await verifyResource({ ...resource, inputs: ['10'], initcode: undefined }, client, { creationProof: atDeployment.creationProof, simulate: false });
+  assert.equal(wrongInitcode.status, 'unverified');
   const createdAt = await client.readContract({ address: resource.address, abi: artifacts.Stamped.abi, functionName: 'CREATED_AT' });
   const declared = await verifyResource({ ...resource, checks: [{ functionName: 'CREATED_AT', expected: createdAt.toString() }] }, client);
   assert.equal(declared.status, 'verified', JSON.stringify(declared.missingProofs));
@@ -127,6 +169,19 @@ test('a direct CREATE deployment is verified only with its creation replay or va
   const replayed = await verifyResource(importedResource, client, { transactionHash: hash });
   assert.equal(replayed.status, 'verified', JSON.stringify(replayed.missingProofs));
   assert.equal(replayed.evidence.creation.kind, 'create');
+});
+
+test('a direct CREATE import retains receipt proof after its timestamp changes', { skip }, async () => {
+  const resource = prepared('Stamped', ['12'], { label: 'direct-stamped' });
+  const { hash, receipt } = await send({ data: resource.initcode });
+  const imported = { ...resource, address: receipt.contractAddress, salt: undefined, factory: undefined, initcode: undefined, initcodeHash: undefined, imported: true };
+  const captured = await verifyResource(imported, client, { transactionHash: hash });
+  assert.equal(captured.status, 'verified');
+  assert.equal(captured.creationProof.kind, 'create');
+  await client.request({ method: 'evm_increaseTime', params: [3600] });
+  await client.request({ method: 'evm_mine', params: [] });
+  const reused = await verifyResource(imported, client, { creationProof: captured.creationProof });
+  assert.equal(reused.status, 'verified', JSON.stringify(reused.missingProofs));
 });
 
 test('a linked library and its user are verified on chain', { skip }, async () => {

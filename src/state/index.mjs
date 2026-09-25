@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isAddress } from 'viem';
 import { canonicalJson, hashJson } from '../identity.mjs';
+import { validateCreationProof } from '../verification/creation-proof.mjs';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const RESOURCE_ID = /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/;
@@ -38,10 +39,20 @@ function validateChain(chain) {
   assertHash(chain.genesisHash, 'State chain genesisHash');
 }
 
-function validateResource(id, resource) {
+function validateRevision(id, revision, index) {
+  const location = `${id} artifactRevisions[${index}]`;
+  assert(isObject(revision), `State resource ${location} must be an object.`);
+  assert(Object.keys(revision).every(key => ['artifactHash', 'sourceHash', 'proofHash', 'codeHash'].includes(key)), `State resource ${location} has unknown fields.`);
+  assertHash(revision.artifactHash, `${location} artifactHash`);
+  if (revision.sourceHash !== undefined) assertHash(revision.sourceHash, `${location} sourceHash`);
+  assertHash(revision.proofHash, `${location} proofHash`);
+  assertHash(revision.codeHash, `${location} codeHash`);
+}
+
+function validateResource(id, resource, chain) {
   assert(RESOURCE_ID.test(id), `State resource ID ${id} is invalid.`);
   assert(isObject(resource), `State resource ${id} must be an object.`);
-  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance']);
+  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'artifactRevisions', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance', 'creationProof']);
   assert(Object.keys(resource).every(key => allowed.has(key)), `State resource ${id} has unknown fields.`);
   assert(isAddress(resource.address), `State resource ${id} needs an address.`);
   assert(resource.priorAddress === undefined || resource.priorAddress === null || isAddress(resource.priorAddress), `State resource ${id} has an invalid priorAddress.`);
@@ -52,6 +63,10 @@ function validateResource(id, resource) {
   }
   if (resource.artifactHash !== undefined) assertHash(resource.artifactHash, `${id} artifactHash`);
   if (resource.sourceHash !== undefined) assertHash(resource.sourceHash, `${id} sourceHash`);
+  if (resource.artifactRevisions !== undefined) {
+    assert(Array.isArray(resource.artifactRevisions) && resource.artifactHash !== undefined, `State resource ${id} artifactRevisions must be an array beside an artifactHash.`);
+    resource.artifactRevisions.forEach((revision, index) => validateRevision(id, revision, index));
+  }
   if (resource.initcodeHash !== undefined) assertHash(resource.initcodeHash, `${id} initcodeHash`, true);
   if (resource.inputsHash !== undefined) assertHash(resource.inputsHash, `${id} inputsHash`);
   if (resource.priorInputsHash !== undefined) assertHash(resource.priorInputsHash, `${id} priorInputsHash`, true);
@@ -60,6 +75,14 @@ function validateResource(id, resource) {
   if (resource.priorCodeHash !== undefined) assertHash(resource.priorCodeHash, `${id} priorCodeHash`, true);
   if (resource.proofHash !== undefined) assertHash(resource.proofHash, `${id} proofHash`);
   if (resource.priorProofHash !== undefined) assertHash(resource.priorProofHash, `${id} priorProofHash`, true);
+  if (resource.creationProof !== undefined) {
+    assert(id.startsWith('contract:'), `${id} creationProof belongs only to a contract.`);
+    const proof = validateCreationProof(resource.creationProof, `${id} creationProof`);
+    assert(proof.chain.id === chain.id && proof.chain.genesisHash.toLowerCase() === chain.genesisHash.toLowerCase(), `${id} creationProof has a different chain.`);
+    assert(proof.address.toLowerCase() === resource.address.toLowerCase() && proof.codeHash.toLowerCase() === resource.codeHash?.toLowerCase(), `${id} creationProof has a different deployment.`);
+    if (resource.initcodeHash !== null) assert(proof.initcodeHash.toLowerCase() === resource.initcodeHash?.toLowerCase(), `${id} creationProof has a different initcode.`);
+    if (proof.kind === 'create2') assert(proof.salt.toLowerCase() === resource.salt?.toLowerCase(), `${id} creationProof has a different salt.`);
+  }
   if (resource.provenance !== undefined) {
     assert(isObject(resource.provenance), `State resource ${id} provenance must be an object.`);
     assert(['apply', 'import', 'observed'].includes(resource.provenance.kind), `State resource ${id} has invalid provenance kind.`);
@@ -82,7 +105,7 @@ export function validateState(state) {
   assert(state.formatVersion === 1, 'State must have formatVersion: 1.');
   validateChain(state.chain);
   assert(isObject(state.resources), 'State resources must be an object.');
-  for (const [id, resource] of Object.entries(state.resources)) validateResource(id, resource);
+  for (const [id, resource] of Object.entries(state.resources)) validateResource(id, resource, state.chain);
   canonicalJson(state);
   return JSON.parse(JSON.stringify(state));
 }
@@ -136,7 +159,30 @@ function sameChain(left, right) {
   return left.id === right.id && left.genesisHash.toLowerCase() === right.genesisHash.toLowerCase();
 }
 
-export function importResource({ resource, verification, state: stateInput, chain, creationTransactionHash = null }) {
+// Deployment identity is the address, initcode, and constructor inputs. The artifact hash is provenance.
+function sameDeployment(record, { address, initcodeHash, inputsHash }) {
+  return record.address.toLowerCase() === address.toLowerCase() &&
+    (record.initcodeHash ?? null) === (initcodeHash ?? null) && record.inputsHash === inputsHash;
+}
+
+// The artifact evidence that a rebaseline supersedes. Deployment provenance stays on the record.
+function artifactRevision(record) {
+  const revision = { artifactHash: record.artifactHash, proofHash: record.proofHash, codeHash: record.codeHash };
+  if (record.sourceHash !== undefined) revision.sourceHash = record.sourceHash;
+  return revision;
+}
+
+function assertSameCode(existing, verification, id) {
+  assert(existing.codeHash !== null, `Cannot rebaseline ${id}: state has no code hash for it.`);
+  assert(existing.codeHash.toLowerCase() === verification.codeHash.toLowerCase(), `Cannot rebaseline ${id}: its live code hash differs from the saved code hash.`);
+}
+
+/**
+ * Records a verified existing contract. With `rebaseline`, an existing imported record at the same address, initcode,
+ * inputs, and live code hash takes the new artifact; its provenance, transactions, and prior fields are kept, and the
+ * previous artifact evidence is appended to `artifactRevisions`.
+ */
+export function importResource({ resource, verification, state: stateInput, chain, creationTransactionHash = null, rebaseline = false }) {
   assert(resource?.kind === 'contract', 'Only a contract resource can be imported.');
   assert(verification?.id === resource.id && verification.address?.toLowerCase() === resource.address.toLowerCase(), 'Verification identity does not match the imported resource.');
   assert(verification.status === 'verified', `Cannot import ${resource.id} without verified live evidence.`);
@@ -152,29 +198,49 @@ export function importResource({ resource, verification, state: stateInput, chai
     : validateState(stateInput);
   assert(sameChain(state.chain, chain), 'State belongs to a different chain.');
   const existing = state.resources[resource.id];
-  if (existing) {
-    assert(existing.address.toLowerCase() === resource.address.toLowerCase(), `${resource.id} already has a different state address.`);
-    assert(existing.artifactHash === resource.artifactHash, `${resource.id} already has a different artifact identity.`);
-  }
-
-  const record = {
-    address: resource.address,
-    priorAddress: existing?.priorAddress ?? null,
-    artifactHash: resource.artifactHash,
-    initcodeHash: resource.initcodeHash ?? null,
-    inputs: resource.inputs,
-    inputsHash: resource.inputsHash,
-    priorInputs: existing?.inputs ?? null,
-    priorInputsHash: existing?.inputsHash ?? null,
-    salt: resource.salt ?? null,
-    codeHash: verification.codeHash,
-    priorCodeHash: existing?.priorCodeHash ?? null,
-    proofHash: hashJson(verification),
-    priorProofHash: existing?.priorProofHash ?? null,
-    transactions: existing?.transactions ? [...existing.transactions] : [],
-    provenance: { kind: 'import', creationTransactionHash },
-  };
   const sourceHash = resource.artifact?.buildIdentity?.sourceHash;
+  if (existing) assert(existing.address.toLowerCase() === resource.address.toLowerCase(), `${resource.id} already has a different state address.`);
+
+  let record;
+  if (rebaseline) {
+    assert(existing, `${resource.id} has no state record to rebaseline. Import it without --rebaseline.`);
+    assert(existing.provenance?.kind === 'import', `${resource.id} was not imported. Plan and apply accept a rebuilt artifact for an unchanged CREATE2 deployment.`);
+    assert(existing.inputsHash === resource.inputsHash, `Cannot rebaseline ${resource.id}: its constructor inputs differ from state.`);
+    assert(sameDeployment(existing, resource) && (existing.salt ?? null) === (resource.salt ?? null), `Cannot rebaseline ${resource.id}: its initcode or salt differs from state.`);
+    assert(existing.artifactHash !== resource.artifactHash, `${resource.id} already records this artifact; there is nothing to rebaseline.`);
+    assertSameCode(existing, verification, resource.id);
+    const recorded = existing.provenance.creationTransactionHash ?? null;
+    assert(creationTransactionHash === null || recorded === null || recorded.toLowerCase() === creationTransactionHash.toLowerCase(), `${resource.id} records a different creation transaction.`);
+    record = {
+      ...existing,
+      artifactHash: resource.artifactHash,
+      proofHash: hashJson(verification),
+      ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
+      artifactRevisions: [...(existing.artifactRevisions ?? []), artifactRevision(existing)],
+    };
+    delete record.sourceHash;
+  } else {
+    if (existing) assert(existing.artifactHash === resource.artifactHash, `${resource.id} already has a different artifact identity. Use import --rebaseline to accept a new artifact for the same live contract.`);
+    record = {
+      address: resource.address,
+      priorAddress: existing?.priorAddress ?? null,
+      artifactHash: resource.artifactHash,
+      initcodeHash: resource.initcodeHash ?? null,
+      inputs: resource.inputs,
+      inputsHash: resource.inputsHash,
+      priorInputs: existing?.inputs ?? null,
+      priorInputsHash: existing?.inputsHash ?? null,
+      salt: resource.salt ?? null,
+      codeHash: verification.codeHash,
+      priorCodeHash: existing?.priorCodeHash ?? null,
+      proofHash: hashJson(verification),
+      ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
+      priorProofHash: existing?.priorProofHash ?? null,
+      transactions: existing?.transactions ? [...existing.transactions] : [],
+      provenance: { kind: 'import', creationTransactionHash },
+    };
+    if (existing?.artifactRevisions && sameDeployment(existing, resource)) record.artifactRevisions = [...existing.artifactRevisions];
+  }
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
   const imported = {
     formatVersion: 1,
@@ -233,12 +299,15 @@ export function recordResource({ resource, verification, state: stateInput, chai
   const inputsHash = hashJson(inputs);
   const artifact = resource.artifact ?? resource.targetArtifact;
   const artifactHash = resource.artifactHash ?? artifact?.artifactHash;
-  const identityChanged = Boolean(existing) && (
-    existing.address.toLowerCase() !== resource.address.toLowerCase() ||
-    existing.artifactHash !== artifactHash ||
-    existing.inputsHash !== inputsHash ||
-    (existing.initcodeHash ?? null) !== (resource.initcodeHash ?? null)
-  );
+  const identityChanged = Boolean(existing) && !sameDeployment(existing, { address: resource.address, initcodeHash: resource.initcodeHash, inputsHash });
+  // A rebuilt artifact for the same deployment changes provenance, not identity. Only import --rebaseline accepts a new
+  // artifact for an imported contract.
+  const rebaseline = resource.kind === 'contract' && Boolean(existing) && !identityChanged &&
+    existing.artifactHash !== undefined && existing.artifactHash.toLowerCase() !== artifactHash?.toLowerCase();
+  if (rebaseline) {
+    assert(existing.initcodeHash !== null, `${resource.id} is an imported contract. Accept its new artifact with import --rebaseline.`);
+    assertSameCode(existing, verification, resource.id);
+  }
   const record = {
     address: resource.address,
     priorAddress: identityChanged ? existing.address : existing?.priorAddress ?? null,
@@ -249,11 +318,15 @@ export function recordResource({ resource, verification, state: stateInput, chai
     codeHash: verification.codeHash,
     priorCodeHash: identityChanged ? existing.codeHash ?? null : existing?.priorCodeHash ?? null,
     proofHash: hashJson(verification),
+    ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
     priorProofHash: identityChanged ? existing.proofHash ?? null : existing?.priorProofHash ?? null,
     transactions: mergeTransactions(existing?.transactions, transactions),
     provenance: transactions.length > 0 ? { kind: 'apply' } : identityChanged ? { kind: 'observed' } : existing?.provenance ?? { kind: 'observed' },
   };
   if (artifactHash !== undefined) record.artifactHash = artifactHash;
+  // A replacement starts a new revision trail.
+  const revisions = identityChanged ? [] : [...(existing?.artifactRevisions ?? []), ...(rebaseline ? [artifactRevision(existing)] : [])];
+  if (revisions.length > 0) record.artifactRevisions = revisions;
   if (resource.kind === 'contract' || resource.kind === 'call') {
     record.initcodeHash = resource.initcodeHash ?? null;
     record.salt = resource.salt ?? null;

@@ -3,6 +3,7 @@ import os from 'node:os';
 import { bytesToHex, hexToBytes } from 'viem';
 import { hashJson } from '../identity.mjs';
 import { jsonSafe } from './preflight.mjs';
+import { validateJournalCreationProof } from '../verification/creation-proof.mjs';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SCOPE_PART = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -48,6 +49,7 @@ export function validateJournal(records, scope) {
     if (record.chain?.id !== scope.chainId || record.chain.genesisHash?.toLowerCase() !== scope.genesisHash) throw new Error(`Journal chain differs from deployment scope at sequence ${index + 1}.`);
     if (Object.hasOwn(record, 'rawTransaction')) throw new Error('Journal contains plaintext signed transaction bytes.');
     if (record.phase === 'signed' && !record.encryptedRawTransaction) throw new Error(`Signed journal record ${index + 1} has no ciphertext.`);
+    validateJournalCreationProof(record, `Journal record ${index + 1}`);
     previousHash = record.recordHash;
   }
 }
