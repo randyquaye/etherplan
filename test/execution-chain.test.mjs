@@ -7,6 +7,7 @@ import { after, afterEach, before, beforeEach, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url';
 import { createWalletClient, http, keccak256, pad } from 'viem';
 import { acquireLock, applyPlan } from '../src/execution/index.mjs';
+import { estimateGasLimit } from '../src/execution/transactions.mjs';
 import { hashJson } from '../src/identity.mjs';
 import { createPlan } from '../src/planning/index.mjs';
 import { deployerA, deployerB, fixture, owner, outsider, startAnvil, TEST_KEYS } from './execution/chain.mjs';
@@ -316,6 +317,53 @@ describe('apply on a private automining chain', () => {
   test('a spend budget per signer is enforced before signing', async () => {
     const input = await planFor();
     await rejectsWith(apply(input, await workspace(), { budgets: { [deployerA.address]: '1' } }), 'budget-exceeded', 'contract:alpha');
+    assert.equal(await nonce(deployerA), 0);
+
+    const alpha = input.plan.resources.find(resource => resource.id === 'contract:alpha');
+    const fees = await chain.client.estimateFeesPerGas();
+    const gas = await estimateGasLimit(chain.client, { from: deployerA.address, tx: alpha.tx, gasMultiplier: 1.2 });
+    const cap = gas * fees.maxFeePerGas + BigInt(alpha.tx.value);
+    const ws = await workspace();
+    await rejectsWith(apply(input, ws, { fees, budgets: { [deployerA.address]: String(cap) } }), 'budget-exceeded', 'contract:beta');
+    assert.equal(count(await journalOf(ws.journalFile), 'signed'), 1);
+    assert.equal(await nonce(deployerA), 1);
+  });
+
+  test('a serial spend budget still counts a verified signature after restart', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const intent = (await journalOf(ws.journalFile)).find(record => record.phase === 'intent');
+    const cap = (BigInt(intent.gas) * BigInt(intent.maxFeePerGas) + BigInt(intent.value)).toString();
+    const budget = { [deployerA.address]: cap };
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await rejectsWith(apply(input, ws, { budgets: budget }), 'budget-exceeded', 'contract:beta');
+      const records = await journalOf(ws.journalFile);
+      assert.equal(count(records, 'signed'), 1);
+      assert.equal(await nonce(deployerA), 1);
+      assert.match(records.at(-1).reason, new RegExp(`${cap} wei committed`));
+    }
+  });
+
+  test('a changed serial intent cost fails journal validation before rebroadcast', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const records = await journalOf(ws.journalFile);
+    records.find(record => record.phase === 'intent').gas = '1';
+    await writeFile(ws.journalFile, records.map(record => JSON.stringify(record)).join('\n') + '\n');
+
+    await rejectsWith(apply(input, ws), 'journal', 'contract:alpha');
+    assert.equal(count(await journalOf(ws.journalFile), 'broadcast'), 0);
     assert.equal(await nonce(deployerA), 0);
   });
 

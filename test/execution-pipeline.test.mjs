@@ -203,6 +203,29 @@ test('P-06/P-10/P-11/P-12: plan tampering, group funding, budget, and estimation
   }
 });
 
+test('a partial reservation charges its whole group once on recovery', async () => {
+  const chain = await startAnvil();
+  try {
+    const input = await inputFor(chain, 3);
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], pipeline: true, fixtureMany: 3,
+      crash: { phase: 'signed', occurrence: 1 } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const intents = (await recordsOf(ws.journalFile)).filter(record => record.phase === 'intent');
+    const reserved = intents.reduce((sum, record) => sum + BigInt(record.gas) * BigInt(record.maxFeePerGas) + BigInt(record.value), 0n);
+    await rejectsCode(apply(chain, input, ws, { budgets: { [deployerA.address]: String(reserved - 1n) } }), 'budget-exceeded');
+    assert.equal((await recordsOf(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+
+    const result = await apply(chain, input, ws, { budgets: { [deployerA.address]: String(reserved) } });
+    assert.equal(result.status, 'applied');
+    assert.equal((await recordsOf(ws.journalFile)).filter(record => record.phase === 'signed').length, 3);
+  } finally {
+    await chain.stop();
+  }
+});
+
 test('P-60/P-62–P-67: interrupted reservations resume without duplicate signatures or changed nonces', async () => {
   for (const crash of [
     { phase: 'intent', occurrence: 2 }, { phase: 'signed', occurrence: 2 }, { phase: 'signed', occurrence: 4 },

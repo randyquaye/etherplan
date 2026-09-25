@@ -88,6 +88,7 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
     (parsed.value ?? 0n) !== expected.value || parsed.gas !== expected.gas ||
     parsed.maxFeePerGas !== expected.maxFeePerGas || (parsed.maxPriorityFeePerGas ?? 0n) !== expected.maxPriorityFeePerGas ||
     !isAddressEqual(sender, intent.signer)) throw new Error('Saved signed transaction differs from its plan or intent.');
+  return maximumCost(expected);
 }
 
 function errorText(error) {
