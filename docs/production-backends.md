@@ -54,7 +54,7 @@ Create a non-secret backend config file:
 The DynamoDB table has string partition key `PK` and string sort key `SK`. Enable point-in-time recovery. Configure the S3 bucket with versioning or Object Lock and deny plan deletion or overwrite in IAM. The CLI uses the AWS SDK credential chain; do not place AWS credentials or private keys in this config. `plan` writes its hash-addressed plan object to S3. `apply` checks the archived plan before signing.
 
 ```sh
-node src/cli.mjs plan --spec spec.json --backend backend.json --out plan.json
+node src/cli.mjs plan --spec spec.json --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
 node src/cli.mjs apply --spec spec.json --plan plan.json --backend backend.json --signer-module signer.mjs
 node src/cli.mjs status --plan plan.json --backend backend.json
 ```

@@ -111,7 +111,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
   try {
     await copyFile(path.join(source, 'minimal-create2.json'), specFile);
     await copyFile(path.join(source, 'Minimal.json'), artifactFile);
-    const planned = runCli('plan', '--spec', specFile, '--out', planFile);
+    const planned = runCli('plan', '--spec', specFile, '--out', planFile, '--deployers', primary, '--max-spend-wei', '100000000000000000000');
     assert.equal(planned.status, 0, planned.stderr);
     const original = JSON.parse(planned.stdout);
     const valid = schedule('--deployers', primary);
@@ -122,7 +122,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
     assert.equal(preview.waves[0].batches[0][0].id, 'contract:minimal');
     assert.equal(preview.deployers[0].address, primary);
 
-    const pipelineArgs = ['plan', '--spec', specFile, '--out', planFile, '--pipeline', '--deployers', `${primary},${secondary}`];
+    const pipelineArgs = ['plan', '--spec', specFile, '--out', planFile, '--pipeline', '--deployers', `${primary},${secondary}`, '--max-spend-wei', '100000000000000000000'];
     assert.equal(runCli(...pipelineArgs).status, 0);
     const pinnedSerial = schedule();
     assert.equal(pinnedSerial.status, 0, pinnedSerial.stderr);
@@ -162,7 +162,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
     expectStale('stale-observation');
 
     await copyFile(path.join(source, 'minimal-absent-external.json'), specFile);
-    const blockedPlan = runCli('plan', '--spec', specFile, '--out', planFile);
+    const blockedPlan = runCli('plan', '--spec', specFile, '--out', planFile, '--deployers', primary, '--max-spend-wei', '100000000000000000000');
     assert.equal(blockedPlan.status, 1);
     const blocked = schedule();
     assert.equal(blocked.status, 0, blocked.stderr);

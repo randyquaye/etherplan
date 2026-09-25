@@ -15,6 +15,7 @@ const fixtureFile = path.join(root, 'test/fixtures/state-fixture.json');
 const artifactFile = path.join(root, 'test/fixtures/StateFixture.json');
 const key = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const signer = privateKeyToAccount(key).address;
+const planArgs = ['--deployers', signer, '--owner', signer, '--max-spend-wei', '100000000000000000000'];
 
 function cli(args, rpcUrl = '', signed = false) {
   return spawnSync(process.execPath, ['src/cli.mjs', ...args], {
@@ -124,7 +125,7 @@ test('fresh CREATE2 getter error blocks plan and apply before signing or broadca
   const anvil = await startAnvil();
   const ws = await workspace();
   try {
-    const good = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const good = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(good.status, 0, good.stderr);
     const plan = JSON.parse(good.stdout);
     assert.equal(plan.resources[0].action, 'deploy');
@@ -158,11 +159,11 @@ test('an already satisfied call still rejects a misspelled write method', async 
   const anvil = await startAnvil();
   const ws = await workspace();
   try {
-    const planned = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const planned = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, planned.stderr);
     const applied = cli(['apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile], anvil.rpcUrl, true);
     assert.equal(applied.status, 0, applied.stderr);
-    const satisfied = cli(['plan', '--spec', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const satisfied = cli(['plan', '--spec', ws.specFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(satisfied.status, 0, satisfied.stderr);
     assert.equal(JSON.parse(satisfied.stdout).resources.at(-1).action, 'reuse');
 

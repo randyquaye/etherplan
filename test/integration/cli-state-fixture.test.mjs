@@ -218,7 +218,7 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
   const specFile = await saveSpec('rebuilt.json', rebuiltSpec(beneficiary));
   const importArguments = ['import', '--spec', specFile, '--id', 'contract:stateFixture', '--state', stateFile];
 
-  const planned = runCli(['plan', '--spec', specFile, '--state', stateFile]);
+  const planned = runCli(['plan', '--spec', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
   assert.equal(planned.status, 1);
   const [blocked] = JSON.parse(planned.stdout).resources;
   assert.equal(blocked.action, 'conflict');
@@ -253,7 +253,7 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
     assert.deepEqual(record[key], prior[key], key);
   }
 
-  const replanned = runCli(['plan', '--spec', specFile, '--state', stateFile]);
+  const replanned = runCli(['plan', '--spec', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
   assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
   const [reused] = JSON.parse(replanned.stdout).resources;
   assert.equal(reused.action, 'reuse');
