@@ -14,7 +14,7 @@ const secondary = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8';
 let anvil;
 let rpcUrl;
 
-function runSchedule(deployers, spec = 'test/fixtures/parallel-lab.json') {
+function runSchedule(deployers, spec = 'test/fixtures/parallel-lab.json', parallel = false) {
   return spawnSync(process.execPath, [
     'src/cli.mjs',
     'schedule',
@@ -22,6 +22,7 @@ function runSchedule(deployers, spec = 'test/fixtures/parallel-lab.json') {
     spec,
     '--deployers',
     deployers.join(','),
+    ...(parallel ? ['--parallel'] : []),
   ], {
     cwd: projectDirectory,
     encoding: 'utf8',
@@ -44,14 +45,20 @@ after(async () => {
   await stopAnvil(anvil);
 });
 
-test('two funded deployers share an independent wave and preserve CREATE2 addresses', () => {
-  const forward = runSchedule([primary, secondary]);
-  const reverse = runSchedule([secondary, primary]);
+test('schedule defaults to the primary deployer and uses both only with --parallel', () => {
+  const serial = runSchedule([primary, secondary]);
+  const forward = runSchedule([primary, secondary], undefined, true);
+  const reverse = runSchedule([secondary, primary], undefined, true);
+  assert.equal(serial.status, 0, serial.stderr);
   assert.equal(forward.status, 0, forward.stderr);
   assert.equal(reverse.status, 0, reverse.stderr);
 
+  const defaultSchedule = JSON.parse(serial.stdout);
   const first = JSON.parse(forward.stdout);
   const second = JSON.parse(reverse.stdout);
+  assert.equal(defaultSchedule.parallel, false);
+  assert.deepEqual(defaultSchedule.waves[0].batches.flat().map(item => item.deployer), [primary, primary]);
+  assert.equal(first.parallel, true);
   const firstWave = first.waves[0].batches.flat();
   assert.deepEqual(firstWave.map(item => item.id), [
     'contract:alpha',
@@ -64,6 +71,7 @@ test('two funded deployers share an independent wave and preserve CREATE2 addres
 
   const addresses = schedule => Object.fromEntries(schedule.waves.flatMap(wave => wave.batches.flat()).map(item => [item.id, item.address]));
   assert.deepEqual(addresses(second), addresses(first));
+  assert.match(runCli('schedule', '--help').stderr, /serial by default/);
 });
 
 test('schema 2 schedules a stored address in the same wave and explains each execution edge', () => {
@@ -113,6 +121,20 @@ test('saved schedules validate identity before funding and keep blocked plans in
     assert.equal(preview.snapshot, 'plan-observed');
     assert.equal(preview.waves[0].batches[0][0].id, 'contract:minimal');
     assert.equal(preview.deployers[0].address, primary);
+
+    const pipelineArgs = ['plan', '--spec', specFile, '--out', planFile, '--pipeline', '--deployers', `${primary},${secondary}`];
+    assert.equal(runCli(...pipelineArgs).status, 0);
+    const pinnedSerial = schedule();
+    assert.equal(pinnedSerial.status, 0, pinnedSerial.stderr);
+    assert.equal(JSON.parse(pinnedSerial.stdout).parallel, false);
+    const incompatible = schedule('--parallel');
+    assert.equal(incompatible.status, 1);
+    assert.match(incompatible.stderr, /pins serial scheduling/);
+    assert.equal(runCli(...pipelineArgs, '--parallel').status, 0);
+    const pinnedParallel = schedule();
+    assert.equal(pinnedParallel.status, 0, pinnedParallel.stderr);
+    assert.equal(JSON.parse(pinnedParallel.stdout).parallel, true);
+    await save(original);
 
     const expectStale = (code) => {
       const result = schedule('--deployers', '0x000000000000000000000000000000000000dEaD');

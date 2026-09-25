@@ -39,6 +39,11 @@ async function runScenario(parallel) {
   try {
     const planned = runCli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+    const scheduled = runCli([
+      'schedule', '--spec', specFile, '--plan', planFile, '--deployers', `${primary},${secondary}`,
+      ...(parallel ? ['--parallel'] : []),
+    ], anvil.rpcUrl);
+    assert.equal(scheduled.status, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
     const started = performance.now();
     const applied = runCli([
       'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
@@ -54,6 +59,7 @@ async function runScenario(parallel) {
     return {
       elapsedMs,
       plan: JSON.parse(planned.stdout),
+      schedule: JSON.parse(scheduled.stdout),
       result,
       receiptBlocks,
       primaryNonce: BigInt(await anvil.rpc('eth_getTransactionCount', [primary, 'latest'])),
@@ -77,6 +83,10 @@ test('parallel CLI apply shares an independent timed block and preserves predict
   assert.equal(sequential.secondaryNonce, 0n);
   assert.equal(parallel.primaryNonce, 2n);
   assert.equal(parallel.secondaryNonce, 1n);
+  assert.equal(sequential.schedule.parallel, false);
+  assert.equal(parallel.schedule.parallel, true);
+  assert.deepEqual(sequential.schedule.waves[0].batches.flat().map(action => action.signer), [primary, primary]);
+  assert.deepEqual(parallel.schedule.waves[0].batches.flat().map(action => action.signer), [primary, secondary]);
   assert.equal(parallel.receiptBlocks['contract:alpha'], parallel.receiptBlocks['contract:beta']);
   assert.ok(parallel.receiptBlocks['contract:gamma'] > parallel.receiptBlocks['contract:alpha']);
 
