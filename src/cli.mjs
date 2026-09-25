@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -42,6 +43,22 @@ function parseOptions(args) {
 
 function print(value) {
   console.log(JSON.stringify(value, null, 2));
+}
+
+async function approvePlan(plan) {
+  process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
+  const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
+  if (blocked.length) throw new Error(`Plan cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`);
+  process.stderr.write("Apply this plan? Only 'yes' will be accepted: ");
+  const answer = await new Promise(resolve => {
+    const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    input.once('line', line => {
+      resolve(line);
+      input.close();
+    });
+    input.once('close', () => resolve(null));
+  });
+  if (answer !== 'yes') throw new Error('Apply cancelled; no transactions were signed.');
 }
 
 async function writeJsonAtomic(file, value) {
@@ -188,10 +205,32 @@ async function run(command, options) {
     return;
   }
   if (command === 'apply') {
-    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
+    if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
+    if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
+    let plan;
+    let planningBackend;
+    if (options.plan) {
+      plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    } else {
+      let state;
+      if (options.backend) {
+        const chainId = await client.getChainId();
+        const genesis = await client.getBlock({ blockNumber: 0n });
+        planningBackend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: true });
+        state = (await planningBackend.stateStore.read(planningBackend.scope))?.value ?? null;
+      } else state = await readState(stateFile);
+      plan = await createPlan({ spec, artifacts, client, state });
+      await approvePlan(plan);
+      if (planningBackend?.planStore) {
+        await planningBackend.planStore.put(planningBackend.scope, plan);
+      } else {
+        const recoveryPlanFile = path.join(path.dirname(stateFile), 'plans', `${plan.planHash}.json`);
+        await writeJsonAtomic(recoveryPlanFile, plan);
+        process.stderr.write(`Approved plan saved for recovery: ${recoveryPlanFile}\n`);
+      }
+    }
     if (options.backend) {
-      if (!options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
-      const backend = await backendFromFile(options.backend, plan.chain, { requireBucket: true });
+      const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
       print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
       return;

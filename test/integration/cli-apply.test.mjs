@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -18,10 +18,11 @@ let planFile;
 let stateFile;
 let journalFile;
 
-function runCli(arguments_, signed = false) {
+function runCli(arguments_, signed = false, input) {
   return spawnSync(process.execPath, [path.join(projectDirectory, 'src/cli.mjs'), ...arguments_], {
     cwd: directory,
     encoding: 'utf8',
+    input,
     env: {
       ...process.env,
       ETH_RPC_URL: anvil.rpcUrl,
@@ -52,12 +53,29 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
   const plan = JSON.parse(planned.stdout);
   assert.deepEqual(plan.resources.map(resource => resource.action), ['deploy', 'call']);
+  const recoveryPlanFile = path.join(directory, 'plans', `${plan.planHash}.json`);
 
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
+  const declined = runCli(['apply', '--state', stateFile, '--journal', journalFile], true, 'no\n');
+  assert.equal(declined.status, 1);
+  assert.match(declined.stderr, /Only 'yes' will be accepted/);
+  assert.match(declined.stderr, /Apply cancelled/);
+  assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
+  await assert.rejects(access(stateFile), { code: 'ENOENT' });
+  await assert.rejects(access(journalFile), { code: 'ENOENT' });
+  await assert.rejects(access(recoveryPlanFile), { code: 'ENOENT' });
+
+  const closedInput = runCli(['apply', '--state', stateFile, '--journal', journalFile], true);
+  assert.equal(closedInput.status, 1);
+  assert.match(closedInput.stderr, /Apply cancelled/);
+  assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
+
   const applied = runCli([
     'apply', '--state', stateFile, '--journal', journalFile,
-  ], true);
+  ], true, 'yes\n');
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
+  assert.match(applied.stderr, new RegExp(plan.planHash));
+  assert.deepEqual(JSON.parse(await readFile(recoveryPlanFile, 'utf8')), plan);
   const first = JSON.parse(applied.stdout);
   assert.equal(first.status, 'applied');
   assert.equal(first.transactionsSigned, 2);
@@ -86,13 +104,35 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
   const rerun = runCli([
-    'apply', '--state', stateFile, '--journal', journalFile,
+    'apply', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile,
   ], true);
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
+  assert.equal(rerun.stderr, '');
   const second = JSON.parse(rerun.stdout);
   assert.equal(second.transactionsSigned, 0);
   assert.equal(second.transactions.length, 0);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceAfter);
+
+  const updatedSpec = JSON.parse(await readFile(path.join(directory, 'spec.json'), 'utf8'));
+  updatedSpec.contracts.push({
+    ...updatedSpec.contracts[0],
+    id: 'secondFixture',
+    salt: `0x${'44'.repeat(32)}`,
+  });
+  await writeFile(path.join(directory, 'spec.json'), `${JSON.stringify(updatedSpec, null, 2)}\n`);
+  const stale = runCli(['apply', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
+  assert.equal(stale.status, 1);
+  assert.match(stale.stderr, /stale-spec/);
+
+  const fresh = runCli(['apply', '--state', stateFile, '--journal', journalFile], true, 'yes\n');
+  assert.equal(fresh.status, 0, `${fresh.stderr}\n${fresh.stdout}`);
+  const freshResult = JSON.parse(fresh.stdout);
+  assert.equal(freshResult.transactionsSigned, 1);
+  assert.match(fresh.stderr, /contract:secondFixture/);
+  assert.doesNotMatch(fresh.stderr, new RegExp(plan.planHash));
+  assert.equal(JSON.parse(await readFile(path.join(directory, 'plans', `${freshResult.planHash}.json`), 'utf8')).planHash, freshResult.planHash);
+  assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [owner, 'latest'])) - BigInt(nonceAfter), 1n);
+  assert.equal(JSON.parse(await readFile(planFile, 'utf8')).planHash, plan.planHash);
 
   const verified = runCli(['verify', '--state', stateFile]);
   assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
