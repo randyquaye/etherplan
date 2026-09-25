@@ -159,6 +159,7 @@ async function settle(ctx, item, signed) {
   if (!receipt) {
     const observed = await precondition(ctx, item);
     if (observed.satisfied) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
+    await checkExecutionDependencies(ctx, [{ item }], false);
     receipt = await send(ctx, item, signed, { rebroadcast: true });
   }
   await recordReceipt(ctx, item, signed, receipt);
@@ -232,6 +233,12 @@ async function resumePipelineReservation(ctx, intents) {
     const latest = conflict.records.at(-1);
     throw new ApplyError('nonce-conflict', latest.reason, { actionId: conflict.item.planned.id, evidence: latest });
   }
+  // A dependency can change during an interruption. Recheck it before any unmined transaction is signed or resent.
+  const unmined = [];
+  for (const job of jobs) {
+    if (!job.signed || !await findReceipt(ctx.client, job.signed.transactionHash)) unmined.push(job);
+  }
+  await checkExecutionDependencies(ctx, unmined, false);
   if (jobs.some(job => job.signed) && jobs.some(job => !job.signed)) {
     if (jobs.some(job => job.records.some(record => ['broadcast-attempt', 'broadcast', 'receipt'].includes(record.phase)))) {
       throw new ApplyError('journal', `Reservation ${first.reservationId} was broadcast before all signatures were persisted.`);
@@ -377,7 +384,32 @@ async function checkBatchFunding(ctx, work) {
   }
 }
 
+async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
+  const checked = new Map();
+  for (const { item } of work) {
+    for (const id of item.planned.dependencies) {
+      const dependency = ctx.prepared.get(id);
+      if (!dependency || (requireCompleted && !ctx.outcomes.get(id)?.verification)) {
+        throw new ApplyError('dependency', `${item.planned.id} needs completed dependency ${id} before signing.`, { actionId: item.planned.id });
+      }
+      if (!checked.has(id)) {
+        const evidence = ctx.journal.forAction(ctx.plan.planHash, id)
+          .filter(record => ['receipt', 'verified'].includes(record.phase) && record.transactionHash).at(-1);
+        const transactionHash = ctx.outcomes.get(id)?.transactionHash ?? evidence?.transactionHash;
+        checked.set(id, await verify(ctx, dependency, transactionHash ? { transactionHash } : {}));
+      }
+      const verification = checked.get(id);
+      if (verification.status !== 'verified') {
+        throw new ApplyError('dependency', `${item.planned.id} needs verified dependency ${id}; it is now ${verification.status}.`, {
+          actionId: item.planned.id, evidence: { dependency: id, verification: summarizeVerification(verification) },
+        });
+      }
+    }
+  }
+}
+
 async function signBatch(ctx, wave, work) {
+  await checkExecutionDependencies(ctx, work);
   // Read every signer's nonce and reject pending transactions before recording any intent.
   for (const job of work) {
     const [latest, pending] = await Promise.all([
@@ -415,6 +447,7 @@ function intentFields(job, wave, reservationId) {
 }
 
 async function signPipelineBatch(ctx, wave, work) {
+  await checkExecutionDependencies(ctx, work);
   const groups = new Map();
   for (const job of work) {
     const signer = job.signer.address.toLowerCase();

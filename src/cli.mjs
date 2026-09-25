@@ -9,7 +9,7 @@ import { applyPlan, acquireLock } from './execution/index.mjs';
 import { hashJson } from './identity.mjs';
 import { createPlan, prepareResources } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
-import { graph, impact, parseSpec } from './spec/index.mjs';
+import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
@@ -128,7 +128,9 @@ async function run(command, options) {
   const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const ordered = graph(spec);
   if (command === 'graph') {
-    print(ordered.map(node => ({ id: node.id, deps: node.dependencies })));
+    print(usesDependencyPlan(spec)
+      ? { ...dependencyGraphs(ordered), warnings: dependencyWarnings(spec, ordered) }
+      : ordered.map(node => ({ id: node.id, deps: node.dependencies })));
     return;
   }
   if (command === 'impact') {
@@ -140,7 +142,7 @@ async function run(command, options) {
   const artifacts = await loadArtifacts(spec, specFile);
   if (command === 'validate') {
     const { resources } = prepareResources(spec, ordered, artifacts);
-    print({ status: 'valid', resources: resources.map(resource => resource.id) });
+    print({ status: 'valid', resources: resources.map(resource => resource.id), ...(usesDependencyPlan(spec) ? { warnings: dependencyWarnings(spec, ordered) } : {}) });
     return;
   }
   if (command === 'adapters') {
