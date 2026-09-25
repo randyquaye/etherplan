@@ -72,7 +72,7 @@ Apply rechecks the plan and live preconditions. It takes one writer lock, signs 
 
 For shared recovery across runners, use the [production backend guide](docs/production-backends.md). It covers the AWS reference backend, encrypted journal records, fenced signer locks, external signers, structured events, and the read-only `status` command.
 
-Add `--parallel` to apply independent deployments from multiple funded deployers. A resource must declare `senderIndependent: true` before it can use a secondary deployer, and the factory must be recognized as permissionless. Owner calls use the owner signer. Use `schedule --deployers address,address` to inspect the proposed waves without sending transactions.
+Schedule and apply both use the primary deployer serially by default. Add `--parallel` to either command to assign eligible independent deployments across multiple funded deployers. A resource must declare `senderIndependent: true` before it can use a secondary deployer, and the factory must be recognized as permissionless. Owner calls use the owner signer. Use `schedule --deployers address,address` to inspect the proposed waves without sending transactions.
 
 ## Single-signer pipelining
 
