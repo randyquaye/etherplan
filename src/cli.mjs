@@ -140,7 +140,7 @@ async function run(command, options) {
   const artifacts = await loadArtifacts(spec, specFile);
   if (command === 'validate') {
     const { resources } = prepareResources(spec, ordered, artifacts);
-    print({ status: 'valid', resources: resources.map(resource => resource.id) });
+    print({ status: 'valid', resources: resources.map(resource => resource.id), ...(usesDependencyPlan(spec) ? { warnings: dependencyWarnings(spec, ordered) } : {}) });
     return;
   }
   if (command === 'adapters') {

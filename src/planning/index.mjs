@@ -1,6 +1,6 @@
 import { keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
-import { dependencyGraphs, dependencyWarnings, executionOrder, graph, parseSpec, usesDependencyPlan } from '../spec/index.mjs';
+import { dependencyGraphs, dependencyMode, dependencyWarnings, executionOrder, graph, parseSpec, usesDependencyPlan } from '../spec/index.mjs';
 import { executionWaves } from '../scheduling/index.mjs';
 import { prepareResources, transactionFor } from './resources.mjs';
 
@@ -171,7 +171,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     artifactHashes,
     resources: planned,
     ...(described ? {
-      dependencyMode: spec.dependencyMode ?? (spec.schema === 2 ? 'split' : 'compatibility'),
+      dependencyMode: dependencyMode(spec),
       graphs: dependencyGraphs(ordered),
       executionWaves: executionWaves(planned),
       executionAssumptions: spec.executionAssumptions ?? [],

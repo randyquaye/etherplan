@@ -325,17 +325,27 @@ export function executionOrder(ordered) {
   return orderGraph(new Map(ordered.map(node => [node.id, node])), 'executionDependencies', 'Execution dependency');
 }
 
+// An assumption covers a contract only when it names the whole ID, so contracts.portalV2 does not cover contracts.portal.
+function assumed(assumptions, name) {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9_.])contracts\\.${name}(?![A-Za-z0-9_])`);
+  return assumptions.some(text => pattern.test(text));
+}
+
 export function dependencyWarnings(spec, ordered) {
   if (dependencyMode(spec) !== 'split') return [];
   const assumptions = spec.executionAssumptions ?? [];
   const warnings = [];
   for (const node of ordered) {
     if (node.kind !== 'contract') continue;
-    const constructorReferences = referenceDetails(node.item.args, 'args').filter(({ reference }) => reference.startsWith('contracts.'));
-    for (const { reference } of constructorReferences) {
-      const dependency = `contract:${reference.split('.')[1]}`;
-      if (!node.executionDependencies.includes(dependency) && !assumptions.some(text => text.includes(`contracts.${reference.split('.')[1]}`))) {
-        warnings.push(`${node.id} constructor references ${reference} without an execution dependency; confirm it does not call the referenced contract.`);
+    // Creation code can call a constructor argument or a linked library, so both need an edge or an assumption.
+    const creationReferences = [
+      ...referenceDetails(node.item.args, 'args').map(detail => ({ ...detail, text: 'constructor references' })),
+      ...referenceDetails(node.item.libraries, 'libraries').map(detail => ({ ...detail, text: 'links library' })),
+    ].filter(({ reference }) => reference.startsWith('contracts.'));
+    for (const { reference, text } of creationReferences) {
+      const name = reference.split('.')[1];
+      if (!node.executionDependencies.includes(`contract:${name}`) && !assumed(assumptions, name)) {
+        warnings.push(`${node.id} ${text} ${reference} without an execution dependency; confirm its constructor does not call the referenced contract.`);
       }
     }
   }
