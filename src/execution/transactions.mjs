@@ -54,9 +54,16 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
   if (typeof signed.rawTransaction !== 'string' || !/^0x[0-9a-fA-F]+$/.test(signed.rawTransaction) || keccak256(signed.rawTransaction).toLowerCase() !== signed.transactionHash?.toLowerCase()) throw new Error('Signed transaction hash differs from its raw bytes.');
   // A pipeline signed record repeats its intent fields. A serial signed record carries only its signer and nonce.
   for (const field of ['reservationId', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas']) {
-    if (!['reservationId', 'nonce'].includes(field) && signed[field] === undefined) continue;
-    if (String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) throw new Error(`Signed ${field} differs from the durable intent.`);
+    if ((intent.reservationId || signed[field] !== undefined) && String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) {
+      throw new Error(`Signed ${field} differs from the durable intent.`);
+    }
   }
+  if (!/^[0-9]+$/.test(String(intent.nonce)) || !Number.isSafeInteger(Number(intent.nonce)) ||
+    !/^[0-9]+$/.test(String(intent.gas)) || !/^[0-9]+$/.test(String(intent.maxFeePerGas)) ||
+    !/^[0-9]+$/.test(String(intent.maxPriorityFeePerGas)) ||
+    intent.to?.toLowerCase() !== planned.tx.to.toLowerCase() ||
+    intent.dataHash?.toLowerCase() !== keccak256(planned.tx.data).toLowerCase() ||
+    String(intent.value) !== String(planned.tx.value)) throw new Error('Durable intent differs from the saved plan.');
   const parsed = parseTransaction(signed.rawTransaction);
   const sender = await recoverTransactionAddress({ serializedTransaction: signed.rawTransaction });
   const expected = {
@@ -75,6 +82,7 @@ export async function validateSignedTransaction(signed, intent, planned, chainId
     parsed.maxFeePerGas !== expected.maxFeePerGas || parsed.maxPriorityFeePerGas !== expected.maxPriorityFeePerGas ||
     sender.toLowerCase() !== intent.signer?.toLowerCase() || signed.signer?.toLowerCase() !== intent.signer?.toLowerCase() ||
     String(signed.nonce) !== String(intent.nonce)) throw new Error('Saved signed transaction differs from its plan or intent.');
+  return maximumCost(expected);
 }
 
 function errorText(error) {
