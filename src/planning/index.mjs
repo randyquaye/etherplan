@@ -197,6 +197,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     formatVersion: described ? 2 : 1,
     chain,
     observed: { blockNumber: observed.number.toString(), blockHash: observed.hash },
+    stateHash: hashJson(state),
     specHash: hashJson(spec),
     artifactHashes,
     resources: planned,

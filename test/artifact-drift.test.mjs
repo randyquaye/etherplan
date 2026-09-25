@@ -378,7 +378,7 @@ describe('artifact drift on a private chain', () => {
       Object.assign(state.resources['contract:alpha'], change);
       if (change.codeHash || change.salt) delete state.resources['contract:alpha'].creationProof;
       const files = await workspace(state);
-      await rejectsWith(apply({ ...input, plan }, files), 'stale-state', 'contract:alpha');
+      await rejectsWith(apply({ ...input, plan }, files), 'stale-state');
       assert.deepEqual(await readState(files.stateFile), state);
     }
 

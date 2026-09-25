@@ -792,14 +792,22 @@ async function persist(ctx) {
   const verified = ctx.plan.resources.filter(resource => ctx.outcomes.get(resource.id)?.verification);
   if (verified.length === 0) return { file: ctx.stateFile, written: false, reason: 'No resource is verified yet.' };
   const current = await ctx.readState();
+  assertFreshState(ctx, current.value);
   let state = current.value;
   for (const resource of verified) {
     const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id).filter(record => record.phase === 'receipt' && record.receipt?.status === 'success').map(record => record.transactionHash);
     state = await ctx.deps.recordResource({ resource: ctx.prepared.get(resource.id).resource, verification: ctx.outcomes.get(resource.id).verification, state, chain: ctx.plan.chain, transactions });
   }
   await ctx.lock.assertHeld?.();
-  await ctx.writeState(current.version, state);
+  await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
   return { file: ctx.stateFile, written: true, resources: verified.length };
+}
+
+function assertFreshState(ctx, state) {
+  if (typeof ctx.plan.stateHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(ctx.plan.stateHash) ||
+    (hashJson(state) !== ctx.plan.stateHash && state?.lastPlanHash !== ctx.plan.planHash)) {
+    throw new ApplyError('stale-state', 'State changed after this plan was created. Create a new plan.');
+  }
 }
 
 function summary(ctx, status, error) {
@@ -833,6 +841,7 @@ async function run(ctx) {
   if (ctx.stateSnapshot && (ctx.stateSnapshot.chain?.id !== ctx.plan.chain.id || ctx.stateSnapshot.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
     throw new ApplyError('wrong-chain', 'State belongs to a different chain than the saved plan.');
   }
+  assertFreshState(ctx, ctx.stateSnapshot);
   const ownerActions = ctx.plan.resources.filter(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
   if (ownerActions.length && !ctx.lanes.owner) throw new ApplyError('signer', `The plan has owner actions (${ownerActions.map(resource => resource.id).join(', ')}), but no owner signer was supplied.`);
   if (ctx.pipeline !== Boolean(ctx.plan.pipeline)) throw new ApplyError('pipeline-plan', 'A pipeline apply requires a saved pipeline plan, and a pipeline plan requires --pipeline.');

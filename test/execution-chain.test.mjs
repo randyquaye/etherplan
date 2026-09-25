@@ -87,15 +87,15 @@ describe('apply on a private automining chain', () => {
     const rerun = await apply(input, ws);
     assert.equal(rerun.transactionsSigned, 0);
     assert.ok(rerun.resources.every(resource => resource.resumed));
-    const replanned = await planFor();
-    assert.ok(replanned.plan.resources.every(resource => resource.action === 'reuse'));
-    const fresh = await apply(replanned, ws);
+    const state = JSON.parse(await readFile(ws.stateFile, 'utf8'));
+    const replanned = await createPlan({ ...fixture({ withCall: callPlanned }), client: chain.client, state });
+    assert.ok(replanned.resources.every(resource => resource.action === 'reuse'));
+    const fresh = await apply({ ...fixture({ withCall: callPlanned }), plan: replanned }, ws);
     assert.equal(fresh.transactionsSigned, 0);
     assert.ok(fresh.resources.every(resource => resource.outcome === 'reused'));
     assert.equal(await nonce(deployerA), 4);
 
     const records = await journalOf(ws.journalFile);
-    const state = JSON.parse(await readFile(ws.stateFile, 'utf8'));
     assert.deepEqual(Object.keys(state.resources).sort(), input.plan.resources.map(resource => resource.id).sort());
     for (const verified of records.filter(record => record.phase === 'verified' && record.outcome === 'applied')) {
       assert.deepEqual(state.resources[verified.actionId].transactions, [verified.transactionHash]);
@@ -111,6 +111,38 @@ describe('apply on a private automining chain', () => {
       const tx = await chain.client.getTransaction({ hash: callRecord.transactionHash });
       assert.equal(tx.from.toLowerCase(), owner.address.toLowerCase());
     }
+  });
+
+  test('a saved plan cannot replace state written by a newer plan', async () => {
+    const older = fixture({ withCall: false });
+    older.spec.contracts = older.spec.contracts.slice(0, 1);
+    older.artifacts = new Map([['alpha', older.artifacts.get('alpha')]]);
+    const newer = structuredClone(older.spec);
+    newer.contracts[0].salt = `0x${'e'.repeat(64)}`;
+    const oldPlan = await createPlan({ ...older, client: chain.client });
+    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client });
+    const ws = await workspace();
+    await apply({ ...older, spec: newer, plan: newPlan }, ws);
+    const saved = await readFile(ws.stateFile, 'utf8');
+    const nonceBefore = await nonce(deployerA);
+
+    await rejectsWith(apply({ ...older, plan: oldPlan }, ws), 'stale-state');
+    assert.equal(await nonce(deployerA), nonceBefore);
+    assert.equal(await readFile(ws.stateFile, 'utf8'), saved);
+    assert.equal(JSON.parse(saved).resources['contract:alpha'].address, newPlan.resources[0].address);
+  });
+
+  test('apply rechecks the state baseline before writing verified work', async () => {
+    const input = fixture({ withCall: false });
+    input.spec.contracts = input.spec.contracts.slice(0, 1);
+    input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
+    input.plan = await createPlan({ ...input, client: chain.client });
+    const ws = await workspace();
+    const changed = { formatVersion: 1, chain: input.plan.chain, resources: {} };
+    await rejectsWith(apply(input, ws, { hooks: { async afterRecord(record) {
+      if (record.phase === 'verified') await writeFile(ws.stateFile, JSON.stringify(changed));
+    } } }), 'stale-state');
+    assert.deepEqual(JSON.parse(await readFile(ws.stateFile, 'utf8')), changed);
   });
 
   test('a mined call with decoded secret-like fields is journaled and resumes', async t => {
