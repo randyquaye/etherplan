@@ -52,6 +52,8 @@ async function append(ctx, actionId, fields, identity = ctx.plan) {
 
 async function fail(ctx, item, code, reason, { retryable = false, evidence, ...fields } = {}) {
   await append(ctx, item.planned.id, { phase: 'failed', code, reason, retryable, ...fields, ...(evidence === undefined ? {} : { evidence }) });
+  ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: 'failed',
+    code, reason, retryable, ...fields });
   throw new ApplyError(code, reason, { actionId: item.planned.id, evidence, retryable });
 }
 
@@ -210,7 +212,12 @@ async function resumePipelineReservation(ctx, intents) {
       intent.value !== item.planned.tx.value || intent.dataHash.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase()) {
       throw new ApplyError('journal', `Reservation ${first.reservationId} has an invalid intent for ${intent.actionId}.`, { actionId: intent.actionId });
     }
-    const records = ctx.journal.forAction(ctx.plan.planHash, intent.actionId).filter(record => record.reservationId === first.reservationId);
+    // Receipt and verified records have no reservationId. Include them up to
+    // the next reservation for this action so recovery does not settle an
+    // already verified transaction a second time.
+    const actionRecords = ctx.journal.forAction(ctx.plan.planHash, intent.actionId);
+    const nextIntent = actionRecords.find(record => record.phase === 'intent' && record.sequence > intent.sequence && record.reservationId !== first.reservationId);
+    const records = actionRecords.filter(record => record.sequence >= intent.sequence && (!nextIntent || record.sequence < nextIntent.sequence));
     const signatures = records.filter(record => record.phase === 'signed');
     if (signatures.length > 1) throw new ApplyError('journal', `Reservation ${first.reservationId} has duplicate signatures.`, { actionId: intent.actionId });
     const signed = signatures[0];
@@ -219,6 +226,11 @@ async function resumePipelineReservation(ctx, intents) {
       catch (error) { throw new ApplyError('journal', error.message, { actionId: intent.actionId }); }
     }
     jobs.push({ item, entry: expected[index], signer, intent, signed, records });
+  }
+  const conflict = jobs.find(job => job.records.at(-1)?.phase === 'failed' && job.records.at(-1).code === 'nonce-conflict');
+  if (conflict) {
+    const latest = conflict.records.at(-1);
+    throw new ApplyError('nonce-conflict', latest.reason, { actionId: conflict.item.planned.id, evidence: latest });
   }
   if (jobs.some(job => job.signed) && jobs.some(job => !job.signed)) {
     if (jobs.some(job => job.records.some(record => ['broadcast-attempt', 'broadcast', 'receipt'].includes(record.phase)))) {
@@ -456,7 +468,7 @@ async function pipelineConflict(ctx, job) {
     { signer, nonce, transactionHash });
 }
 
-async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
+async function preparePipelineBroadcast(ctx, job) {
   const { signed } = job;
   let receipt = await findReceipt(ctx.client, signed.transactionHash);
   if (receipt) return { receipt };
@@ -476,7 +488,11 @@ async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
       if (!knownTransaction) await pipelineConflict(ctx, job);
     }
   }
-  const sent = await broadcast(ctx.client, signed.rawTransaction);
+  return {};
+}
+
+async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
+  const { signed } = job;
   await append(ctx, job.item.planned.id, { phase: 'broadcast-attempt', reservationId: signed.reservationId, signer: signed.signer,
     nonce: signed.nonce, transactionHash: signed.transactionHash, accepted: sent.accepted,
     ...(sent.error ? { error: sent.error } : {}), rebroadcast });
@@ -485,11 +501,17 @@ async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
       nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast, ...(sent.known ? { known: true } : {}) });
     if (rebroadcast) ctx.rebroadcasts.push({ actionId: job.item.planned.id, transactionHash: signed.transactionHash });
   } else if (sent.nonceTooLow) {
-    receipt = await findReceipt(ctx.client, signed.transactionHash);
+    const receipt = await findReceipt(ctx.client, signed.transactionHash);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
   return { accepted: sent.accepted };
+}
+
+async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
+  const prepared = await preparePipelineBroadcast(ctx, job);
+  if (prepared.receipt) return prepared;
+  return recordPipelineBroadcast(ctx, job, await broadcast(ctx.client, job.signed.rawTransaction), rebroadcast);
 }
 
 async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
@@ -498,12 +520,14 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
     catch (error) { throw new ApplyError('journal', `${job.item.planned.id}: ${error.message}`, { actionId: job.item.planned.id }); }
   }
   const submitStart = Date.now();
-  const firstAttempts = [];
-  // First attempts run in plan order, which is increasing nonce order within each signer.
-  for (const job of work) {
-    try { firstAttempts.push(await attemptPipelineBroadcast(ctx, job, rebroadcast)); }
-    catch (error) { firstAttempts.push({ error }); }
-  }
+  // Reconcile the complete group first. Then initiate all raw requests in plan
+  // order without waiting for a lower nonce's RPC response.
+  const prepared = await Promise.all(work.map(job => preparePipelineBroadcast(ctx, job)));
+  const firstAttempts = await Promise.all(work.map(async (job, index) => {
+    if (prepared[index].receipt) return prepared[index];
+    try { return await recordPipelineBroadcast(ctx, job, await broadcast(ctx.client, job.signed.rawTransaction), rebroadcast); }
+    catch (error) { return { error }; }
+  }));
   ctx.timings.submitMs += Date.now() - submitStart;
   const settled = await Promise.allSettled(work.map(async (job, index) => {
     let attempt = firstAttempts[index];
