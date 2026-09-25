@@ -339,6 +339,31 @@ async function resumePipelineJournal(ctx) {
   if (rejected) throw rejected.reason;
 }
 
+const lower = value => typeof value === 'string' ? value.toLowerCase() : value ?? null;
+
+// A plan accepts a rebuilt artifact against one saved record. Under the lock, state must still hold that record, or
+// this rebaseline of it, and the live code must still be the code that record describes.
+function checkArtifactDrift(ctx, item, verification) {
+  const drift = item.planned.observation?.stateComparison?.artifactDrift;
+  if (!drift) return null;
+  const { id } = item.planned;
+  if (drift.accepted !== true || lower(drift.artifactHash) !== lower(item.planned.artifactHash)) {
+    throw new ApplyError('plan-not-applicable', `${id} is reused without an accepted artifact drift for its planned artifact.`, { actionId: id });
+  }
+  const record = ctx.stateSnapshot?.resources?.[id];
+  const saved = record ? { address: record.address, initcodeHash: record.initcodeHash ?? null, inputsHash: record.inputsHash, salt: record.salt ?? null, codeHash: record.codeHash ?? null } : null;
+  if (!saved || hashJson(jsonSafe(saved)) !== hashJson(jsonSafe(drift.baseline)) ||
+    ![lower(drift.previousArtifactHash), lower(drift.artifactHash)].includes(lower(record.artifactHash))) {
+    throw new ApplyError('stale-state', `The saved state for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, {
+      actionId: id, evidence: { expected: { ...drift.baseline, artifactHash: drift.previousArtifactHash }, actual: saved && { ...saved, artifactHash: record.artifactHash } },
+    });
+  }
+  if (lower(verification.codeHash) !== lower(drift.baseline.codeHash)) {
+    throw new ApplyError('drift', `The live code for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, { actionId: id, evidence: summarizeVerification(verification) });
+  }
+  return { previousArtifactHash: drift.previousArtifactHash, artifactHash: drift.artifactHash };
+}
+
 async function recheckReused(ctx) {
   for (const item of ctx.prepared.values()) {
     if (item.planned.action !== 'reuse') continue;
@@ -346,7 +371,8 @@ async function recheckReused(ctx) {
     if (verification.status !== 'verified') {
       throw new ApplyError('drift', `A resource that the plan reuses is now ${verification.status}. Create a new plan.`, { actionId: item.planned.id, evidence: summarizeVerification(verification) });
     }
-    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification });
+    const artifactDrift = checkArtifactDrift(ctx, item, verification);
+    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification, ...(artifactDrift ? { artifactDrift } : {}) });
   }
 }
 

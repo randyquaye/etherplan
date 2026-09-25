@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFile, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
@@ -97,4 +97,41 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   const verified = runCli(['verify', '--state', stateFile]);
   assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
   assert.equal(JSON.parse(verified.stdout).status, 'verified');
+});
+
+test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined without a transaction', async () => {
+  const before = JSON.parse(await readFile(stateFile, 'utf8'));
+  const prior = before.resources['contract:stateFixture'];
+  const raw = JSON.parse(await readFile(artifactFile, 'utf8'));
+  // The bytecode is unchanged; only the recorded build settings differ.
+  delete raw.rawMetadata;
+  raw.metadata.settings.remappings = ['forge-std/=lib/forge-std/src/'];
+  await writeFile(path.join(directory, 'StateFixture.json'), JSON.stringify(raw));
+
+  const planned = runCli(['plan', '--out', planFile, '--state', stateFile]);
+  assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+  const plan = JSON.parse(planned.stdout);
+  assert.deepEqual(plan.resources.map(resource => resource.action), ['reuse', 'reuse']);
+  const drift = plan.resources[0].observation.stateComparison.artifactDrift;
+  assert.equal(drift.accepted, true);
+  assert.equal(drift.previousArtifactHash, prior.artifactHash);
+  assert.equal(drift.artifactHash, plan.artifactHashes['contract:stateFixture']);
+  assert.notEqual(drift.artifactHash, drift.previousArtifactHash);
+
+  const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
+  const applied = runCli(['apply', '--state', stateFile, '--journal', journalFile], true);
+  assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
+  assert.equal(JSON.parse(applied.stdout).transactionsSigned, 0);
+  assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
+
+  const record = JSON.parse(await readFile(stateFile, 'utf8')).resources['contract:stateFixture'];
+  assert.equal(record.artifactHash, drift.artifactHash);
+  assert.deepEqual(record.artifactRevisions, [{ artifactHash: prior.artifactHash, sourceHash: prior.sourceHash, proofHash: prior.proofHash, codeHash: prior.codeHash }]);
+  for (const key of ['address', 'priorAddress', 'initcodeHash', 'inputsHash', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'priorProofHash', 'transactions', 'provenance']) {
+    assert.deepEqual(record[key], prior[key], key);
+  }
+
+  const replanned = runCli(['plan', '--out', planFile, '--state', stateFile]);
+  assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
+  assert.ok(JSON.parse(replanned.stdout).resources.every(resource => resource.action === 'reuse' && resource.observation.stateComparison?.artifactDrift === undefined));
 });

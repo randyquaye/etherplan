@@ -16,14 +16,14 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline]';
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline] [--rebaseline]';
 const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
 
 function parseOptions(args) {
   const options = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (flag === '--parallel' || flag === '--pipeline') {
+    if (flag === '--parallel' || flag === '--pipeline' || flag === '--rebaseline') {
       const name = flag.slice(2);
       if (options[name]) throw new Error(`Duplicate option ${flag}.`);
       options[name] = true;
@@ -136,15 +136,20 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     }
     const anchor = await client.getBlock({ blockNumber: observed.number });
     if (anchor.hash !== observed.hash) throw new Error('The verification block changed before import. Retry on the current chain.');
-    const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null });
+    const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null, rebaseline: options.rebaseline ?? false });
     await writeStateAtomic(stateFile, state);
-    print({ status: 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: state.resources[selected.id].proofHash, stateFile });
+    const record = state.resources[selected.id];
+    print({
+      status: options.rebaseline ? 'rebaselined' : 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: record.proofHash,
+      ...(options.rebaseline ? { artifactHash: record.artifactHash, previousArtifactHash: record.artifactRevisions.at(-1).artifactHash } : {}), stateFile,
+    });
   } finally {
     await lock.release();
   }
 }
 
 async function run(command, options) {
+  if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
   if (command === 'status') {
     if (!options.backend) throw new Error('status needs --backend file.json.');
     const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));

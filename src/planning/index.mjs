@@ -58,29 +58,59 @@ function decide(resource, observation, plannedById) {
   return 'conflict';
 }
 
-// Both address and artifact/input identity changing is a replacement; only one changing is a conflict.
-function compareState(resource, record) {
-  if (!record || resource.kind !== 'contract') return null;
-  const addressMatches = record.address.toLowerCase() === resource.address.toLowerCase();
-  const identity = {
-    artifactHash: resource.artifactHash,
-    initcodeHash: resource.initcodeHash ?? null,
-    inputsHash: resource.inputsHash,
-  };
-  const previousIdentity = {
-    artifactHash: record.artifactHash,
-    initcodeHash: record.initcodeHash ?? null,
-    inputsHash: record.inputsHash,
-  };
-  const identityMatches = Object.keys(identity).every(key => identity[key]?.toLowerCase?.() === previousIdentity[key]?.toLowerCase?.());
+function lower(value) {
+  return typeof value === 'string' ? value.toLowerCase() : value ?? null;
+}
+
+// A rebuilt artifact for an unchanged CREATE2 deployment is reused only when the saved and live code agree and the new
+// artifact verifies the live contract. prepareResources derives the address from the current factory, salt, and initcode.
+function artifactDrift(resource, record, verification) {
+  const reasons = [];
+  if (resource.initcodeHash === undefined || record.initcodeHash === null) {
+    reasons.push(`An imported contract needs an explicit rebaseline: etherplan import --id ${resource.id} --rebaseline.`);
+  } else if (lower(record.salt) !== lower(resource.salt)) {
+    reasons.push('The saved salt differs from the spec salt.');
+  }
+  if (!record.codeHash) reasons.push('State has no code hash for this deployment.');
+  else if (lower(record.codeHash) !== lower(verification.codeHash)) reasons.push(`Live code hash ${verification.codeHash ?? 'null'} differs from the saved code hash ${record.codeHash}.`);
+  if (verification.status !== 'verified') reasons.push(`The new artifact leaves the live contract ${verification.status}.`);
   return {
+    accepted: reasons.length === 0,
+    previousArtifactHash: record.artifactHash,
+    artifactHash: resource.artifactHash,
+    previousSourceHash: record.sourceHash ?? null,
+    sourceHash: resource.artifact.buildIdentity?.sourceHash ?? null,
+    baseline: { address: record.address, initcodeHash: record.initcodeHash, inputsHash: record.inputsHash, salt: record.salt, codeHash: record.codeHash },
+    reasons,
+  };
+}
+
+// Deployment identity is the address, initcode, and constructor inputs; the artifact hash is provenance. Both address
+// and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only change is drift.
+function compareState(resource, record, verification) {
+  if (!record || resource.kind !== 'contract') return null;
+  const addressMatches = lower(record.address) === lower(resource.address);
+  const identityMatches = lower(record.initcodeHash) === lower(resource.initcodeHash) && lower(record.inputsHash) === lower(resource.inputsHash);
+  const artifactMatches = lower(record.artifactHash) === lower(resource.artifactHash);
+  const comparison = {
     previousAddress: record.address,
-    previousIdentity,
+    previousIdentity: {
+      artifactHash: record.artifactHash,
+      initcodeHash: record.initcodeHash ?? null,
+      inputsHash: record.inputsHash,
+    },
     addressMatches,
     identityMatches,
+    artifactMatches,
     replacement: !addressMatches && !identityMatches,
     conflict: addressMatches !== identityMatches,
+    liveCodeMatchesState: record.codeHash === null || record.codeHash === undefined || lower(record.codeHash) === lower(verification.codeHash),
   };
+  if (addressMatches && identityMatches && !artifactMatches) {
+    comparison.artifactDrift = artifactDrift(resource, record, verification);
+    comparison.conflict = !comparison.artifactDrift.accepted;
+  }
+  return comparison;
 }
 
 function assertBlock(block, location) {
@@ -135,12 +165,8 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     if (saved?.creationProof) options.creationProof = saved.creationProof;
     options.chain = chain;
     const verification = await verifyResource(resource, client, options);
-    const stateComparison = compareState(resource, state?.resources?.[resource.id]);
-    const observation = stateComparison ? { ...verification, stateComparison: {
-      ...stateComparison,
-      liveCodeMatchesState: state?.resources?.[resource.id]?.codeHash === null || state?.resources?.[resource.id]?.codeHash === undefined ||
-        state.resources[resource.id].codeHash.toLowerCase() === verification.codeHash?.toLowerCase(),
-    } } : verification;
+    const stateComparison = compareState(resource, state?.resources?.[resource.id], verification);
+    const observation = stateComparison ? { ...verification, stateComparison } : verification;
     observations.set(resource.id, { observation, verification, stateComparison });
   }
   for (const node of executionOrder(ordered)) {
