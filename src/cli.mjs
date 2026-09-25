@@ -107,7 +107,7 @@ async function backendFromFile(file, chain, { requireBucket = false } = {}) {
   if (config.kind !== 'aws') throw new Error('Backend config kind must be aws.');
   if (requireBucket && !config.bucket) throw new Error('AWS plan and apply need an immutable plan bucket in backend config.');
   const scope = deploymentScope(config.scope, chain);
-  return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, bucket: config.bucket, prefix: config.prefix }), scope, ttlMs: config.ttlMs };
+  return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, bucket: config.bucket, prefix: config.prefix }), scope, ttlMs: config.ttlMs, confirmations: config.confirmations };
 }
 
 async function signerFromModule(file) {

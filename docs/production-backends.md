@@ -6,7 +6,9 @@ Etherplan's local state file, journal, and process lock remain the default for d
 
 A scope contains `project`, `environment`, `chainId`, `genesisHash`, and `label`. The chain values must match the saved plan. A deployment lock covers the complete scope. Signer locks cover the project, environment, chain, and signer address, regardless of deployment label. The lock provider returns monotonically increasing fencing tokens. Every DynamoDB state or journal transaction checks the deployment and signer tokens, holder identity, and live expiry. A lease renewal failure stops the next signature, broadcast, or state write.
 
-Journal records include sequence, predecessor hash, plan hash, chain identity, action ID, phase, write time, and applying principal. Signed transaction bytes are encrypted before the journal store sees them. Recovery validates the complete ordered hash chain, decrypts signed records, checks the signed envelope against the pinned plan and durable intent, and resends the exact persisted bytes. An unfinished transaction for another plan stops a production apply before any write.
+Journal records include sequence, predecessor hash, plan hash, chain identity, action ID, phase, write time, and applying principal. Signed transaction bytes are encrypted before the journal store sees them. Recovery validates the complete ordered hash chain, decrypts signed records, checks the signed envelope against the pinned plan and durable intent, and resends the exact persisted bytes. An unfinished transaction for another plan stops a production apply before any write. Each signed append also writes a signer-wide index entry in the same fenced DynamoDB transaction. Before signing, apply checks indexed transactions from other labels for a canonical receipt at the configured confirmation depth. A missing or orphaned receipt stops the new label until the earlier label is resolved.
+
+Production applies require an explicit positive `confirmations` value in deployment policy. A receipt is verified and released to dependent waves only after that many canonical blocks. On restart and before later batches or state writes, apply rechecks recorded receipts and stops on a reorganization. Local file applies use one confirmation unless `confirmations` is supplied. Confirmation depth is chain-specific and does not guarantee permanent finality.
 
 ## Programmatic apply
 
@@ -28,7 +30,7 @@ const result = await applyPlan({
   plan, spec, artifacts, client, signerProvider,
   stateStore: backend.stateStore, journalStore: backend.journalStore,
   lockProvider: backend.lockProvider, journalCipher: backend.journalCipher,
-  scope, principal: 'ci-role/my-app-deploy',
+  scope, principal: 'ci-role/my-app-deploy', confirmations: 12,
   reporter: event => deploymentLog.write(event),
 });
 ```
@@ -47,11 +49,14 @@ Create a non-secret backend config file:
   "tableName": "etherplan-deployments",
   "kmsKeyId": "arn:aws:kms:REGION:ACCOUNT:key/KEY_ID",
   "bucket": "etherplan-plans",
+  "confirmations": 12,
   "scope": { "project": "my-app", "environment": "testnet", "label": "blue" }
 }
 ```
 
 The DynamoDB table has string partition key `PK` and string sort key `SK`. Enable point-in-time recovery. Configure the S3 bucket with versioning or Object Lock and deny plan deletion or overwrite in IAM. The CLI uses the AWS SDK credential chain; do not place AWS credentials or private keys in this config. `plan` writes its hash-addressed plan object to S3. `apply` checks the archived plan before signing.
+
+For an existing installation, stop all apply runners and reconcile every previously signed transaction to the chosen confirmation depth before upgrading all runners together. Older journal entries have no signer index entry; mixed-version runners cannot safely share a signer across labels. A custom remote `journalStore` must provide `signedForSigner(scope, address)` with consistent reads and write each signed entry atomically with its journal append under the signer fence.
 
 ```sh
 node src/cli.mjs plan --spec spec.json --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
