@@ -48,7 +48,7 @@ test('an unterminated last line is removed on open, and earlier records survive'
   assert.deepEqual(lines.map(line => line.phase), ['intent', 'failed']);
 });
 
-test('a corrupt complete line, a sequence regression, or a secret-like field fails closed', async () => {
+test('a corrupt complete line, a sequence regression, or signer metadata fails closed', async () => {
   const dir = await directory();
   const corrupt = path.join(dir, 'corrupt.jsonl');
   await writeFile(corrupt, 'not json\n');
@@ -60,11 +60,26 @@ test('a corrupt complete line, a sequence regression, or a secret-like field fai
   await assert.rejects(openJournal(regressed), /sequence is not increasing/);
 
   const journal = await openJournal(path.join(dir, 'secret.jsonl'));
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', evidence: { privateKey: '0x01' } }), /forbidden key privateKey/);
+  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', privateKey: '0x01' }), /forbidden key privateKey/);
+  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', metadata: { secret_key: '0x01' } }), /forbidden key secret_key/);
+  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', evidence: { result: undefined } }), /must contain only JSON values/);
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'unknown' }), /unknown phase/);
   await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'verified', creationProof: { kind: 'create' } }), /creationProof.*invalid fields/);
   assert.equal(journal.records.length, 0);
   await journal.close();
+});
+
+test('decoded verification and error evidence round-trip without treating field names as signer secrets', async () => {
+  const file = path.join(await directory(), 'journal.jsonl');
+  const journal = await openJournal(file);
+  const decoded = { secretHash: `0x${'12'.repeat(32)}`, privateKey: 'a contract field' };
+  await journal.append({ ...base, actionId: 'call:a', phase: 'verified', verification: { bindingChecks: [{ actual: decoded }] } });
+  await journal.append({ ...base, actionId: 'call:a', phase: 'failed', evidence: { decoded } });
+  await journal.close();
+  const reopened = await openJournal(file);
+  assert.deepEqual(reopened.records[0].verification.bindingChecks[0].actual, decoded);
+  assert.deepEqual(reopened.records[1].evidence.decoded, decoded);
+  await reopened.close();
 });
 
 test('live transactions are signed, broadcast, or receipt records without a later outcome', () => {

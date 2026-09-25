@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { hashJson } from '../../src/identity.mjs';
 import { startAnvil, stopAnvil } from './anvil.mjs';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
@@ -22,6 +26,12 @@ function runSchedule(deployers, spec = 'test/fixtures/parallel-lab.json') {
     cwd: projectDirectory,
     encoding: 'utf8',
     env: { ...process.env, ETH_RPC_URL: rpcUrl },
+  });
+}
+
+function runCli(...arguments_) {
+  return spawnSync(process.execPath, ['src/cli.mjs', ...arguments_], {
+    cwd: projectDirectory, encoding: 'utf8', env: { ...process.env, ETH_RPC_URL: rpcUrl },
   });
 }
 
@@ -76,4 +86,71 @@ test('schedule rejects duplicate or unfunded deployers', () => {
   const unfunded = runSchedule([primary, '0x000000000000000000000000000000000000dEaD']);
   assert.equal(unfunded.status, 1);
   assert.match(unfunded.stderr, /nonzero|fund/i);
+});
+
+test('saved schedules validate identity before funding and keep blocked plans inspectable', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-schedule-'));
+  const specFile = path.join(directory, 'spec.json');
+  const artifactFile = path.join(directory, 'Minimal.json');
+  const planFile = path.join(directory, 'plan.json');
+  const source = path.join(projectDirectory, 'test/fixtures');
+  const schedule = (...args) => runCli('schedule', '--spec', specFile, '--plan', planFile, ...args);
+  const save = async plan => writeFile(planFile, JSON.stringify(plan));
+  const rehash = plan => {
+    const { planHash, ...fields } = plan;
+    return { ...fields, planHash: hashJson(fields) };
+  };
+  try {
+    await copyFile(path.join(source, 'minimal-create2.json'), specFile);
+    await copyFile(path.join(source, 'Minimal.json'), artifactFile);
+    const planned = runCli('plan', '--spec', specFile, '--out', planFile);
+    assert.equal(planned.status, 0, planned.stderr);
+    const original = JSON.parse(planned.stdout);
+    const valid = schedule('--deployers', primary);
+    assert.equal(valid.status, 0, valid.stderr);
+    const preview = JSON.parse(valid.stdout);
+    assert.equal(preview.applicable, true);
+    assert.equal(preview.snapshot, 'plan-observed');
+    assert.equal(preview.waves[0].batches[0][0].id, 'contract:minimal');
+    assert.equal(preview.deployers[0].address, primary);
+
+    const expectStale = (code) => {
+      const result = schedule('--deployers', '0x000000000000000000000000000000000000dEaD');
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, new RegExp(code));
+      assert.equal(result.stdout, '');
+    };
+    const changedSpec = JSON.parse(await readFile(specFile, 'utf8'));
+    changedSpec.contracts[0].salt = `0x${'22'.repeat(32)}`;
+    await writeFile(specFile, JSON.stringify(changedSpec));
+    expectStale('stale-spec');
+    await copyFile(path.join(source, 'minimal-create2.json'), specFile);
+
+    const artifact = JSON.parse(await readFile(artifactFile, 'utf8'));
+    artifact.metadata = artifact.metadata.replace('0.8.30', '0.8.31');
+    await writeFile(artifactFile, JSON.stringify(artifact));
+    expectStale('stale-artifact');
+    await copyFile(path.join(source, 'Minimal.json'), artifactFile);
+
+    await save(rehash({ ...original, artifactHashes: { ...original.artifactHashes, 'contract:extra': `0x${'11'.repeat(32)}` } }));
+    expectStale('stale-artifact');
+    await save(rehash({ ...original, chain: { ...original.chain, id: 1 } }));
+    expectStale('wrong-chain');
+    await save(rehash({ ...original, observed: { ...original.observed, blockHash: `0x${'33'.repeat(32)}` } }));
+    expectStale('stale-observation');
+
+    await copyFile(path.join(source, 'minimal-absent-external.json'), specFile);
+    const blockedPlan = runCli('plan', '--spec', specFile, '--out', planFile);
+    assert.equal(blockedPlan.status, 1);
+    const blocked = schedule();
+    assert.equal(blocked.status, 0, blocked.stderr);
+    const blockedPreview = JSON.parse(blocked.stdout);
+    assert.equal(blockedPreview.applicable, false);
+    assert.equal(blockedPreview.snapshot, 'plan-observed');
+    assert.ok(blockedPreview.resources.some(resource => resource.action === 'conflict' && resource.observation));
+    assert.equal(blockedPreview.deployers, undefined);
+    assert.equal(blockedPreview.waves, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

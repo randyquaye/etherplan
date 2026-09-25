@@ -10,8 +10,9 @@ import { generateAdapters, loadArtifacts } from './artifacts.mjs';
 import { applyPlan, acquireLock } from './execution/index.mjs';
 import { createAwsBackend } from './execution/aws.mjs';
 import { deploymentScope, inspectDeployment } from './execution/backends.mjs';
+import { checkPlanIdentity } from './execution/preflight.mjs';
 import { hashJson } from './identity.mjs';
-import { createPlan, prepareResources } from './planning/index.mjs';
+import { createPlan, prepareResources, transactionFor } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
 import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.mjs';
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
@@ -247,23 +248,23 @@ async function run(command, options) {
     print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
     return;
   }
-  let state;
+  let plan;
   let backend;
-  if (options.backend) {
-    const chainId = await client.getChainId();
-    const genesis = await client.getBlock({ blockNumber: 0n });
-    backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
-    state = (await backend.stateStore.read(backend.scope))?.value ?? null;
-  } else state = await readState(stateFile);
-  const pipeline = options.pipeline ? {
-    deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
-  } : null;
-  const plan = command === 'schedule' && options.plan
-    ? JSON.parse(await readFile(path.resolve(options.plan), 'utf8'))
-    : await createPlan({ spec, artifacts, client, state, pipeline });
   if (command === 'schedule' && options.plan) {
-    const { planHash, ...fields } = plan;
-    if (hashJson(fields) !== planHash) throw new Error('Saved plan content does not match its planHash.');
+    plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    await checkPlanIdentity({ plan, spec, artifacts, client, deps: { parseSpec, graph, prepareResources, transactionFor } });
+  } else {
+    let state;
+    if (options.backend) {
+      const chainId = await client.getChainId();
+      const genesis = await client.getBlock({ blockNumber: 0n });
+      backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
+      state = (await backend.stateStore.read(backend.scope))?.value ?? null;
+    } else state = await readState(stateFile);
+    const pipeline = options.pipeline ? {
+      deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
+    } : null;
+    plan = await createPlan({ spec, artifacts, client, state, pipeline });
   }
   if (command === 'plan') {
     if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
@@ -280,6 +281,12 @@ async function run(command, options) {
     if (status !== 'verified') process.exitCode = 1;
     return;
   }
+  const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
+  if (options.plan && blocked.length) {
+    print({ chain: plan.chain, observed: plan.observed, applicable: false, snapshot: 'plan-observed',
+      resources: plan.resources.map(({ id, kind, address, action, observation }) => ({ id, kind, address, action, observation })) });
+    return;
+  }
   const deployers = options.deployers?.split(',') ?? plan.pipeline?.deployers;
   if (!deployers) throw new Error('schedule needs --deployers <address,address>.');
   const schedule = createSchedule(plan, deployers, { owner: options.owner ?? plan.pipeline?.owner ?? null, parallel: options.parallel ?? plan.pipeline?.parallel ?? true, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
@@ -291,7 +298,7 @@ async function run(command, options) {
     ...entry,
     ...(entry.kind === 'contract' ? { deployer: requested.get(entry.signer) ?? entry.signer } : {}),
   }))) }));
-  print({ chain: plan.chain, observed: plan.observed, deployers: funding, ...schedule, waves });
+  print({ chain: plan.chain, observed: plan.observed, applicable: true, snapshot: 'plan-observed', deployers: funding, ...schedule, waves });
 }
 
 const [command, ...args] = process.argv.slice(2);
