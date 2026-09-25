@@ -83,13 +83,16 @@ async function fail(ctx, item, code, reason, { retryable = false, evidence, ...f
 }
 
 async function verify(ctx, item, options = {}) {
-  const transactionHash = options.transactionHash ?? ctx.stateSnapshot?.resources?.[item.planned.id]?.transactions?.at(-1);
-  return ctx.deps.verifyResource(item.resource, ctx.client, transactionHash ? { ...options, transactionHash } : options);
+  const id = item.planned.id;
+  const saved = options.creationProof ?? ctx.outcomes.get(id)?.verification?.creationProof ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
+  const transactionHash = options.transactionHash ?? saved?.transactionHash ?? ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ?? ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
+  const creationProof = saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined;
+  return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
 async function markVerified(ctx, item, verification, fields) {
   const { planned } = item;
-  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...fields });
+  await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...(verification.creationProof ? { creationProof: verification.creationProof } : {}), ...fields });
   ctx.outcomes.set(planned.id, { id: planned.id, action: planned.action, outcome: fields.outcome, address: planned.address, transactionHash: fields.transactionHash, verification });
 }
 
@@ -352,7 +355,7 @@ async function decide(ctx, item) {
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const latest = latestRecord(records);
   if (latest?.phase === 'verified') {
-    const verification = await verify(ctx, item, latest.transactionHash ? { transactionHash: latest.transactionHash } : {});
+    const verification = await verify(ctx, item, { ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), ...(latest.creationProof ? { creationProof: latest.creationProof } : {}) });
     if (verification.status !== 'verified') {
       await fail(ctx, item, 'drift', `The action verified earlier but is now ${verification.status}.`, { evidence: summarizeVerification(verification) });
     }

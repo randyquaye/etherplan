@@ -31,6 +31,8 @@ const OTHER_LIBRARY = '0x00000000000000000000000000000000000000bb';
 const LABEL = `0x${'ab'.repeat(32)}`;
 const SALT = `0x${'11'.repeat(32)}`;
 const DOUBLER = `${fixture.sourceName}:Doubler`;
+const GENESIS_HASH = `0x${'aa'.repeat(32)}`;
+const RECEIPT_HASH = `0x${'bb'.repeat(32)}`;
 
 function word(value) {
   return (typeof value === 'bigint' ? value.toString(16) : value.slice(2)).toLowerCase().padStart(64, '0');
@@ -60,6 +62,8 @@ function mockClient({ codes = {}, reads = {}, call, transactions = {}, receipts 
   return {
     calls,
     getCode: async ({ address }) => codes[address.toLowerCase()] ?? '0x',
+    getChainId: async () => 31337,
+    getBlock: async ({ blockNumber }) => ({ number: blockNumber, hash: blockNumber === 0n ? GENESIS_HASH : RECEIPT_HASH }),
     readContract: async ({ address, functionName }) => {
       const value = reads[`${address.toLowerCase()}:${functionName}`];
       if (value instanceof Error) throw value;
@@ -300,18 +304,18 @@ test('direct CREATE and CREATE2 transactions are creation evidence only when the
     '0xfail': { to: factory.address, from: deployer, input: concatHex([SALT, create2.initcode]) },
   };
   const receipts = {
-    '0xc2': { status: 'success', contractAddress: null, blockNumber: 9n },
-    '0xc1': { status: 'success', contractAddress: create2.address, blockNumber: 9n },
-    '0xbad': { status: 'success', contractAddress: create2.address, blockNumber: 9n },
-    '0xelse': { status: 'success', contractAddress: null, blockNumber: 9n },
-    '0xfail': { status: 'reverted', contractAddress: null, blockNumber: 9n },
+    '0xc2': { status: 'success', contractAddress: null, blockNumber: 9n, blockHash: RECEIPT_HASH },
+    '0xc1': { status: 'success', contractAddress: create2.address, blockNumber: 9n, blockHash: RECEIPT_HASH },
+    '0xbad': { status: 'success', contractAddress: create2.address, blockNumber: 9n, blockHash: RECEIPT_HASH },
+    '0xelse': { status: 'success', contractAddress: null, blockNumber: 9n, blockHash: RECEIPT_HASH },
+    '0xfail': { status: 'reverted', contractAddress: null, blockNumber: 9n, blockHash: RECEIPT_HASH },
   };
   const codes = { [address]: live, [factory.address.toLowerCase()]: FACTORY_CODE };
   const replaying = mockClient({ codes, transactions, receipts, call: async () => ({ data: live }) });
 
   const viaFactory = await verifyCreation(replaying, create2, '0xc2');
   assert.deepEqual([viaFactory.kind, viaFactory.status, viaFactory.exactRuntime, viaFactory.blockNumber], ['create2', 'verified', true, '9']);
-  assert.deepEqual([replaying.calls[0].blockNumber, replaying.calls[0].account], [8n, deployer]);
+  assert.deepEqual([replaying.calls[0].blockNumber, replaying.calls[0].account], [9n, deployer]);
   const verified = await verifyResource(create2, replaying, { transactionHash: '0xc2', simulate: false });
   assert.equal(verified.status, 'verified');
   assert.equal(verified.proofs.find(proof => proof.name === 'creation').method, 'create2-transaction');
