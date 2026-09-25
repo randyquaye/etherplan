@@ -35,6 +35,20 @@ test('graph reports the deployment and binding order', () => {
   ]);
 });
 
+test('schema 2 graph and validate show both graphs with edge reasons and creation warnings', () => {
+  const warning = 'contract:gamma constructor references contracts.alpha.address without an execution dependency; confirm its constructor does not call the referenced contract.';
+  const graph = parseSuccess(runCli('graph', '--spec', 'test/fixtures/split-lab.json'));
+  assert.deepEqual(graph.resolution.find(node => node.id === 'contract:gamma').needs, [
+    { id: 'contract:alpha', reasons: ['args[0] needs contracts.alpha.address', 'checks.BENEFICIARY needs contracts.alpha.address'] },
+  ]);
+  assert.deepEqual(graph.execution, ['alpha', 'beta', 'gamma'].map(name => ({ id: `contract:${name}`, after: [] })));
+  assert.deepEqual(graph.warnings, [warning]);
+
+  const validation = parseSuccess(runCli('validate', '--spec', 'test/fixtures/split-lab.json'));
+  assert.deepEqual(validation.warnings, [warning]);
+  assert.equal(parseSuccess(runCli('validate', '--spec', 'test/fixtures/parallel-lab.json')).warnings, undefined);
+});
+
 test('commands use spec.json in the working directory unless --spec is supplied', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-cli-spec-'));
   try {

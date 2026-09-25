@@ -2,9 +2,11 @@ import { concatHex, keccak256 } from 'viem';
 import { canonicalJson, hashJson } from '../identity.mjs';
 import { encodeMethod } from '../validation/index.mjs';
 import { ApplyError } from './errors.mjs';
+import { dependencyGraphs, dependencyMode, dependencyWarnings, usesDependencyPlan } from '../spec/index.mjs';
+import { executionWaves } from '../scheduling/index.mjs';
 
 const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
-const IDENTITY_FIELDS = ['kind', 'dependencies', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after'];
+const IDENTITY_FIELDS = ['kind', 'dependencies', 'resolutionDependencies', 'executionEdges', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after', 'ownerOnly', 'transfersOwnership'];
 
 // Makes in-memory values comparable with plan JSON: quantities become decimal strings and hex becomes lowercase.
 export function jsonSafe(value) {
@@ -72,7 +74,7 @@ export async function checkFactory(client, factory) {
 
 // Rejects any plan that is not exactly what the current spec, artifacts, and chain produce. Returns the prepared resource for each plan entry.
 export async function preflight({ plan, spec, artifacts, client, deps }) {
-  if (!plan || plan.formatVersion !== 1 || !Array.isArray(plan.resources)) throw new ApplyError('plan-format', 'Plan must have formatVersion 1 and resources[].');
+  if (!plan || ![1, 2].includes(plan.formatVersion) || !Array.isArray(plan.resources)) throw new ApplyError('plan-format', 'Plan must have formatVersion 1 or 2 and resources[].');
   const { planHash, ...fields } = plan;
   if (typeof planHash !== 'string' || hashJson(fields) !== planHash) throw new ApplyError('plan-hash', 'Plan content does not match its planHash. The plan changed after it was created.');
   const blocked = plan.resources.filter(resource => !APPLICABLE.has(resource.action));
@@ -84,6 +86,7 @@ export async function preflight({ plan, spec, artifacts, client, deps }) {
   const parsed = deps.parseSpec(structuredClone(spec));
   const specHash = hashJson(parsed);
   if (specHash !== plan.specHash) throw new ApplyError('stale-spec', 'The spec changed after the plan was created.', { evidence: { expected: plan.specHash, actual: specHash } });
+  if (plan.formatVersion !== (usesDependencyPlan(parsed) ? 2 : 1)) throw new ApplyError('stale-spec', 'The plan format does not match the specification dependency mode.');
 
   if (!(artifacts instanceof Map)) throw new ApplyError('stale-artifact', 'Apply needs the artifact map that produced the plan.');
   for (const [id, expected] of Object.entries(plan.artifactHashes ?? {})) {
@@ -94,10 +97,20 @@ export async function preflight({ plan, spec, artifacts, client, deps }) {
   const missing = contracts.filter(id => !Object.hasOwn(plan.artifactHashes ?? {}, id));
   if (missing.length) throw new ApplyError('stale-artifact', `Plan has no artifact hash for ${missing.join(', ')}.`);
 
-  const { resources } = await deps.prepareResources(parsed, deps.graph(parsed), artifacts);
+  const ordered = deps.graph(parsed);
+  if (plan.formatVersion === 2 && (!same(plan.graphs, dependencyGraphs(ordered)) ||
+    plan.dependencyMode !== dependencyMode(parsed) ||
+    !same(plan.executionAssumptions, parsed.executionAssumptions ?? []) ||
+    !same(plan.warnings, dependencyWarnings(parsed, ordered)))) {
+    throw new ApplyError('stale-resource', 'The saved dependency graphs or execution assumptions differ from the current specification.');
+  }
+  const { resources } = await deps.prepareResources(parsed, ordered, artifacts);
   const freshIds = resources.map(resource => resource.id);
   const plannedIds = plan.resources.map(resource => resource.id);
   if (!same(freshIds, plannedIds)) throw new ApplyError('stale-resource', 'The resource set or its order differs from the plan.', { evidence: { expected: plannedIds, actual: freshIds } });
+  if (plan.formatVersion === 2 && !same(plan.executionWaves, executionWaves(plan.resources))) {
+    throw new ApplyError('stale-resource', 'The saved execution waves differ from the plan resources.');
+  }
 
   const prepared = new Map();
   for (const [index, planned] of plan.resources.entries()) {
