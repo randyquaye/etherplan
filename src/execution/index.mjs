@@ -361,10 +361,10 @@ async function resumePipelineWave(ctx, wave) {
     const required = unmined.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
     const balance = await ctx.client.getBalance({ address });
     if (balance < required) throw new ApplyError('insufficient-funds', `Signer ${address} has ${balance} wei; the reserved group can cost ${required} wei.`, { actionId: unmined[0].item.planned.id, retryable: true });
-    const budget = ctx.config.budgets[address];
+    const budget = budgetFor(ctx, address);
     const reserved = group.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
     const spent = signedSpend(await commitments(ctx), address, group[0].intent.reservationId);
-    if (budget !== undefined && spent + reserved > BigInt(budget)) {
+    if (spent + reserved > budget) {
       throw new ApplyError('budget-exceeded', `Signer ${address} has ${spent} wei committed; ${reserved} wei for reservation ${group[0].intent.reservationId} would exceed its ${budget} wei budget.`, { actionId: unmined[0].item.planned.id, retryable: true });
     }
   }
@@ -513,6 +513,12 @@ function signedSpend(commitments, signer, exceptReservation = null) {
   }, 0n);
 }
 
+function budgetFor(ctx, signer) {
+  const approved = BigInt(ctx.plan.maxSpendWei);
+  const supplied = ctx.config.budgets[signer];
+  return supplied === undefined || approved < BigInt(supplied) ? approved : BigInt(supplied);
+}
+
 // Check the whole batch before signing any transaction in it.
 async function checkBatchFunding(ctx, work) {
   const shortfalls = [];
@@ -528,9 +534,9 @@ async function checkBatchFunding(ctx, work) {
     const required = jobs.reduce((sum, entry) => sum + entry.cost, 0n);
     const balance = await ctx.client.getBalance({ address: job.signer.address });
     const spent = signedSpend(ledger, lane);
-    const budget = ctx.config.budgets[lane];
+    const budget = budgetFor(ctx, lane);
     if (balance < required) shortfalls.push({ job, code: 'insufficient-funds', reason: `Signer ${job.signer.address} has ${balance} wei; the signer group can cost ${required} wei.`, balanceWei: balance, requiredWei: required });
-    else if (budget !== undefined && spent + required > BigInt(budget)) shortfalls.push({ job, code: 'budget-exceeded', reason: `Signer ${job.signer.address} has ${spent} wei committed; ${required} wei for ${jobs.map(entry => entry.item.planned.id).join(', ')} would exceed its ${budget} wei budget.`, budgetWei: budget, spentWei: spent, requiredWei: required });
+    else if (spent + required > budget) shortfalls.push({ job, code: 'budget-exceeded', reason: `Signer ${job.signer.address} has ${spent} wei committed; ${required} wei for ${jobs.map(entry => entry.item.planned.id).join(', ')} would exceed its ${budget} wei budget.`, budgetWei: budget, spentWei: spent, requiredWei: required });
   }
   if (shortfalls.length) {
     for (const { job, code, reason, ...evidence } of shortfalls) {
@@ -837,9 +843,16 @@ async function run(ctx) {
   if (ownerActions.length && !ctx.lanes.owner) throw new ApplyError('signer', `The plan has owner actions (${ownerActions.map(resource => resource.id).join(', ')}), but no owner signer was supplied.`);
   if (ctx.pipeline !== Boolean(ctx.plan.pipeline)) throw new ApplyError('pipeline-plan', 'A pipeline apply requires a saved pipeline plan, and a pipeline plan requires --pipeline.');
   const deployers = ctx.lanes.pool.map(account => account.address.toLowerCase());
-  const owner = ctx.lanes.owner?.address.toLowerCase() ?? null;
-  if (ctx.pipeline && (hashJson(deployers) !== hashJson(ctx.plan.pipeline.deployers) || owner !== ctx.plan.pipeline.owner || ctx.parallel !== ctx.plan.pipeline.parallel)) {
-    throw new ApplyError('pipeline-plan', 'The supplied signers differ from the saved pipeline plan.');
+  const owner = (ctx.pipeline || ownerActions.length) ? ctx.lanes.owner?.address.toLowerCase() ?? null : null;
+  const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
+  const hasWrites = ctx.plan.resources.some(resource => ['deploy', 'call'].includes(resource.action));
+  if (hasWrites && (!pinned || !Array.isArray(pinned.deployers) || pinned.deployers.length === 0 ||
+    typeof pinned.parallel !== 'boolean' || typeof ctx.plan.maxSpendWei !== 'string' ||
+    !/^[0-9]+$/.test(ctx.plan.maxSpendWei) || BigInt(ctx.plan.maxSpendWei) === 0n)) {
+    throw new ApplyError('plan-policy', 'The saved plan needs signer addresses and a positive maxSpendWei ceiling. Create a new plan.');
+  }
+  if (pinned && (hashJson(deployers) !== hashJson(pinned.deployers) || owner !== pinned.owner || ctx.parallel !== pinned.parallel)) {
+    throw new ApplyError('signer', 'The supplied signers or parallel setting differ from the saved plan.');
   }
   ctx.schedule = createSchedule(ctx.plan, deployers, { owner, parallel: ctx.parallel, pipeline: ctx.pipeline });
   if (ctx.pipeline && hashJson(ctx.schedule.waves) !== hashJson(ctx.plan.pipeline.waves)) throw new ApplyError('pipeline-plan', 'The saved pipeline schedule differs from the plan resources.');

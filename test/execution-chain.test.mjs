@@ -55,9 +55,9 @@ describe('apply on a private automining chain', () => {
   let callPlanned;
 
   const nonce = account => chain.client.getTransactionCount({ address: account.address });
-  const planFor = (options = {}) => {
+  const planFor = (options = {}, policy = { deployers: [deployerA.address], owner: owner.address, parallel: false }, maxSpendWei = '100000000000000000000') => {
     const { spec, artifacts } = fixture({ withCall: callPlanned, ...options });
-    return createPlan({ spec, artifacts, client: chain.client }).then(plan => ({ plan, spec, artifacts }));
+    return createPlan({ spec, artifacts, client: chain.client, signers: policy, maxSpendWei }).then(plan => ({ plan, spec, artifacts }));
   };
   const apply = ({ plan, spec, artifacts }, ws, extra = {}) => applyPlan({
     plan, spec, artifacts, client: chain.client, signers: { deployer: [deployerA], owner }, stateFile: ws.stateFile, journalFile: ws.journalFile, pollIntervalMs: 20, ...extra,
@@ -133,7 +133,7 @@ describe('apply on a private automining chain', () => {
   test('rerun uses creation evidence for immutables without getters', async () => {
     const input = fixture({ withCall: false });
     for (const contract of input.spec.contracts) delete contract.checks;
-    input.plan = await createPlan({ ...input, client: chain.client });
+    input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
     const ws = await workspace();
     const first = await apply(input, ws);
     assert.equal(first.transactionsSigned, 4);
@@ -240,7 +240,7 @@ describe('apply on a private automining chain', () => {
   });
 
   test('a SIGKILL inside a parallel batch resumes both signed transactions with their original signers', async () => {
-    const input = await planFor();
+    const input = await planFor({}, { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true });
     const ws = await workspace();
     await writeFile(ws.planFile, JSON.stringify(input.plan));
     const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0, 1], owner: 3, parallel: true, fixture: { withCall: callPlanned }, crash: { phase: 'signed', actionId: 'contract:beta' } });
@@ -305,18 +305,17 @@ describe('apply on a private automining chain', () => {
     await rejectsWith(apply(input, ws), 'previous-failure', 'contract:alpha');
   });
 
-  test('another account can deploy the same CREATE2 plan; apply then records it without a transaction', async () => {
+  test('a different deployer is rejected before any transaction', async () => {
     const input = await planFor({ withCall: false });
-    const other = await apply(input, await workspace(), { signers: { deployer: [outsider] } });
-    assert.equal(other.transactionsSigned, 4);
-    const result = await apply(input, await workspace());
-    assert.equal(result.transactionsSigned, 0);
-    assert.ok(result.resources.every(resource => resource.outcome === 'already-satisfied'));
+    await rejectsWith(apply(input, await workspace(), { signers: { deployer: [outsider] } }), 'signer');
+    const { signers, maxSpendWei, ...oldFields } = input.plan;
+    await rejectsWith(apply({ ...input, plan: rehash(oldFields) }, await workspace()), 'plan-policy');
+    assert.equal(await nonce(outsider), 0);
     assert.equal(await nonce(deployerA), 0);
   });
 
   test('an insufficiently funded deployer stops the batch before signing; a rerun after funding continues', async () => {
-    const input = await planFor();
+    const input = await planFor({}, { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true });
     const ws = await workspace();
     const signers = { deployer: [deployerA, deployerB], owner };
     await chain.rpc('anvil_setBalance', [deployerB.address, '0x3e8']);
@@ -332,23 +331,29 @@ describe('apply on a private automining chain', () => {
     assert.equal(await nonce(deployerB), 1);
   });
 
-  test('a spend budget per signer is enforced before signing', async () => {
+  test('a reviewed ceiling rejects a fee spike and counts earlier transactions by the same signer', async () => {
     const input = await planFor();
-    await rejectsWith(apply(input, await workspace(), { budgets: { [deployerA.address]: '1' } }), 'budget-exceeded', 'contract:alpha');
-    assert.equal(await nonce(deployerA), 0);
-
     const alpha = input.plan.resources.find(resource => resource.id === 'contract:alpha');
     const fees = await chain.client.estimateFeesPerGas();
     const gas = await estimateGasLimit(chain.client, { from: deployerA.address, tx: alpha.tx, gasMultiplier: 1.2 });
     const cap = gas * fees.maxFeePerGas + BigInt(alpha.tx.value);
+    const limited = await planFor({}, undefined, String(cap));
+    assert.notEqual(limited.plan.planHash, input.plan.planHash);
+    await rejectsWith(apply(limited, await workspace(), { fees: { ...fees, maxFeePerGas: fees.maxFeePerGas * 100n } }), 'budget-exceeded', 'contract:alpha');
+    assert.equal(await nonce(deployerA), 0);
+
     const ws = await workspace();
-    await rejectsWith(apply(input, ws, { fees, budgets: { [deployerA.address]: String(cap) } }), 'budget-exceeded', 'contract:beta');
+    await rejectsWith(apply(limited, ws, { fees }), 'budget-exceeded', 'contract:beta');
     assert.equal(count(await journalOf(ws.journalFile), 'signed'), 1);
     assert.equal(await nonce(deployerA), 1);
   });
 
-  test('a serial spend budget still counts a verified signature after restart', async () => {
-    const input = await planFor();
+  test('the reviewed ceiling still counts a verified signature after restart', async () => {
+    const preliminary = await planFor();
+    const alpha = preliminary.plan.resources.find(resource => resource.id === 'contract:alpha');
+    const fees = await chain.client.estimateFeesPerGas();
+    const gas = await estimateGasLimit(chain.client, { from: deployerA.address, tx: alpha.tx, gasMultiplier: 1.2 });
+    const input = await planFor({}, undefined, String(gas * fees.maxFeePerGas * 11n / 10n));
     const ws = await workspace();
     await writeFile(ws.planFile, JSON.stringify(input.plan));
     const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
@@ -356,15 +361,14 @@ describe('apply on a private automining chain', () => {
       crash: { phase: 'signed', actionId: 'contract:alpha' } });
     assert.equal(killed.signal, 'SIGKILL', killed.stderr);
     const intent = (await journalOf(ws.journalFile)).find(record => record.phase === 'intent');
-    const cap = (BigInt(intent.gas) * BigInt(intent.maxFeePerGas) + BigInt(intent.value)).toString();
-    const budget = { [deployerA.address]: cap };
+    const committed = (BigInt(intent.gas) * BigInt(intent.maxFeePerGas) + BigInt(intent.value)).toString();
 
     for (let attempt = 0; attempt < 2; attempt++) {
-      await rejectsWith(apply(input, ws, { budgets: budget }), 'budget-exceeded', 'contract:beta');
+      await rejectsWith(apply(input, ws), 'budget-exceeded', 'contract:beta');
       const records = await journalOf(ws.journalFile);
       assert.equal(count(records, 'signed'), 1);
       assert.equal(await nonce(deployerA), 1);
-      assert.match(records.at(-1).reason, new RegExp(`${cap} wei committed`));
+      assert.match(records.at(-1).reason, new RegExp(`${committed} wei committed`));
     }
   });
 
@@ -456,7 +460,7 @@ describe('parallel apply on a manually mined chain', () => {
     const probe = await createPlan({ ...fixture(), client: chain.client });
     const withCall = probe.resources.find(resource => resource.kind === 'call').action === 'call';
     const { spec, artifacts } = fixture({ withCall });
-    const plan = await createPlan({ spec, artifacts, client: chain.client });
+    const plan = await createPlan({ spec, artifacts, client: chain.client, signers: { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true }, maxSpendWei: '100000000000000000000' });
     const ws = await workspace();
     let signed = 0;
     let sent = 0;

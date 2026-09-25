@@ -6,6 +6,7 @@ import { keccak256, toHex } from 'viem';
 import { startAnvil, stopAnvil } from './anvil.mjs';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
+const planArgs = ['--deployers', '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', '--max-spend-wei', '100000000000000000000'];
 let anvil;
 let rpcUrl;
 let rpc;
@@ -36,8 +37,8 @@ after(async () => {
 test('plan is read-only, complete, and deterministic at one observation block', async () => {
   const blockBefore = await rpc('eth_blockNumber');
   const nonceBefore = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
-  const first = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json');
-  const second = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json');
+  const first = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json', ...planArgs);
+  const second = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json', ...planArgs);
   const blockAfter = await rpc('eth_blockNumber');
   const nonceAfter = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
 

@@ -17,6 +17,7 @@ const ownerKey = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2
 const deployerKey = '0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d';
 const owner = privateKeyToAccount(ownerKey);
 const deployer = privateKeyToAccount(deployerKey);
+const planArgs = ['--deployers', deployer.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000'];
 
 function runSync(arguments_, rpcUrl, signed = false) {
   return spawnSync(process.execPath, ['src/cli.mjs', ...arguments_], {
@@ -99,7 +100,7 @@ test('apply rejects a spec changed after planning before any signature', async (
   const anvil = await startAnvil();
   const ws = await workspace('etherplan-cli-stale-');
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     ws.spec.values.beneficiary = '0x0000000000000000000000000000000000000002';
     await writeFile(ws.specFile, `${JSON.stringify(ws.spec, null, 2)}\n`);
@@ -121,7 +122,7 @@ test('an insufficient deployer balance stops before signing and resumes after fu
   const anvil = await startAnvil();
   const ws = await workspace('etherplan-cli-funding-');
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     await anvil.rpc('anvil_setBalance', [deployer.address, '0x3e8']);
 
@@ -150,7 +151,7 @@ test('a consumed signed nonce stops safely and a later run deploys once', async 
   const ws = await workspace('etherplan-cli-nonce-');
   let gate;
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     gate = await signedGate(anvil.rpcUrl);
     const child = spawn(process.execPath, [

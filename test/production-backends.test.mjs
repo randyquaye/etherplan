@@ -192,7 +192,7 @@ test('a new runner recovers encrypted signed bytes without a file or a second si
   const input = fixture({ withCall: false });
   input.spec.contracts = input.spec.contracts.slice(0, 1);
   input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
-  const plan = await createPlan({ ...input, client: chain.client });
+  const plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
   const genesisHash = (await chain.client.getBlock({ blockNumber: 0n })).hash;
   const deployment = deploymentScope({ project: 'test', environment: 'dev', label: 'recover' }, { id: 31337, genesisHash });
   const backend = memoryBackend();
@@ -232,7 +232,7 @@ test('an external signer cannot change the destination before journal persistenc
     const input = fixture({ withCall: false });
     input.spec.contracts = input.spec.contracts.slice(0, 1);
     input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
-    const plan = await createPlan({ ...input, client: localChain.client });
+    const plan = await createPlan({ ...input, client: localChain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
     const genesisHash = (await localChain.client.getBlock({ blockNumber: 0n })).hash;
     const deployment = deploymentScope({ project: 'test', environment: 'dev', label: 'bad-signer' }, { id: 31337, genesisHash });
     const backend = memoryBackend();
@@ -250,7 +250,7 @@ test('an external signer cannot change the destination before journal persistenc
 
 async function pipelineRun(localChain, label) {
   const input = fixtureMany(3);
-  const plan = await createPlan({ ...input, client: localChain.client, pipeline: { deployers: [deployerA.address], parallel: false } });
+  const plan = await createPlan({ ...input, client: localChain.client, pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei: '100000000000000000000' });
   const genesisHash = (await localChain.client.getBlock({ blockNumber: 0n })).hash;
   const deployment = deploymentScope({ project: 'test', environment: 'dev', label }, { id: 31337, genesisHash });
   const backend = memoryBackend();

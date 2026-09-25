@@ -18,8 +18,8 @@ import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDep
 import { importResource, readState, writeStateAtomic } from './state/index.mjs';
 import { verifyResource } from './verification/index.mjs';
 
-const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--parallel] [--pipeline] [--rebaseline]\nSchedule and apply are serial by default; use --parallel for eligible concurrent deployments.';
-const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner']);
+const USAGE = 'Usage: etherplan <adapters|graph|impact|validate|plan|schedule|verify|import|apply|status> [--spec file.json] [--value name] [--out path] [--plan file] [--state file] [--journal file] [--backend file.json] [--signer-module file.mjs] [--id contract:name] [--creation-tx hash] [--deployers address,address] [--owner address] [--max-spend-wei amount] [--parallel] [--pipeline] [--rebaseline]\nSchedule and apply are serial by default; use --parallel for eligible concurrent deployments.';
+const OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei']);
 
 function parseOptions(args) {
   const options = {};
@@ -115,6 +115,14 @@ async function signerFromModule(file) {
   const signerProvider = module.signerProvider ?? module.default;
   if (typeof signerProvider?.address !== 'function' || typeof signerProvider?.signTransaction !== 'function') throw new Error('Signer module must export signerProvider with address(role) and signTransaction(role, request).');
   return { signerProvider, signerRoles: module.signerRoles };
+}
+
+async function addressesFromModule(source, needsOwner) {
+  const roles = source.signerRoles ?? {};
+  return {
+    deployers: await Promise.all((roles.deployer ?? ['deployer']).map(role => source.signerProvider.address(role))),
+    owner: needsOwner ? await source.signerProvider.address(roles.owner ?? 'owner') : null,
+  };
 }
 
 async function importOne({ spec, ordered, artifacts, client, options, stateFile }) {
@@ -216,8 +224,10 @@ async function run(command, options) {
   if (command === 'apply') {
     if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
     if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
+    if (options.plan && options['max-spend-wei']) throw new Error('A saved plan already pins maxSpendWei; omit --max-spend-wei.');
     let plan;
     let planningBackend;
+    let signerSource;
     if (options.plan) {
       plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
     } else {
@@ -228,7 +238,12 @@ async function run(command, options) {
         planningBackend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: true });
         state = (await planningBackend.stateStore.read(planningBackend.scope))?.value ?? null;
       } else state = await readState(stateFile);
-      plan = await createPlan({ spec, artifacts, client, state });
+      if (!options['max-spend-wei']) throw new Error('Fresh apply needs --max-spend-wei <amount>.');
+      signerSource = options.backend ? await signerFromModule(options['signer-module']) : { signers: signersFromEnvironment() };
+      const addresses = options.backend ? await addressesFromModule(signerSource, spec.calls.length > 0) : {
+        deployers: signerSource.signers.deployer.map(account => account.address), owner: signerSource.signers.owner?.address ?? null,
+      };
+      plan = await createPlan({ spec, artifacts, client, state, signers: { ...addresses, parallel: options.parallel ?? false }, maxSpendWei: options['max-spend-wei'] });
       await approvePlan(plan);
       if (planningBackend?.planStore) {
         await planningBackend.planStore.put(planningBackend.scope, plan);
@@ -241,11 +256,11 @@ async function run(command, options) {
     if (options.backend) {
       const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...await signerFromModule(options['signer-module']), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
+      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...(signerSource ?? await signerFromModule(options['signer-module'])), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
       return;
     }
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
-    print(await applyPlan({ plan, spec, artifacts, client, signers: signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
+    print(await applyPlan({ plan, spec, artifacts, client, signers: signerSource?.signers ?? signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false }));
     return;
   }
   let plan;
@@ -264,9 +279,15 @@ async function run(command, options) {
     const pipeline = options.pipeline ? {
       deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
     } : null;
-    plan = await createPlan({ spec, artifacts, client, state, pipeline });
+    const signers = command === 'plan' && !pipeline && options.deployers ? {
+      deployers: options.deployers.split(','), owner: options.owner ?? null, parallel: options.parallel ?? false,
+    } : null;
+    plan = await createPlan({ spec, artifacts, client, state, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
   }
   if (command === 'plan') {
+    if (plan.resources.some(resource => ['deploy', 'call'].includes(resource.action)) && (!options.deployers || !options['max-spend-wei'])) {
+      throw new Error('A write plan needs --deployers <address,address> and --max-spend-wei <amount>.');
+    }
     if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
     if (options.out) await writeJsonAtomic(path.resolve(options.out), plan);
     print(plan);
@@ -287,10 +308,15 @@ async function run(command, options) {
       resources: plan.resources.map(({ id, kind, address, action, observation }) => ({ id, kind, address, action, observation })) });
     return;
   }
-  const deployers = options.deployers?.split(',') ?? plan.pipeline?.deployers;
+  const pinned = plan.pipeline ?? plan.signers;
+  const deployers = options.deployers?.split(',') ?? pinned?.deployers;
   if (!deployers) throw new Error('schedule needs --deployers <address,address>.');
   if (plan.pipeline && options.parallel && !plan.pipeline.parallel) throw new Error('The saved pipeline plan pins serial scheduling; omit --parallel.');
-  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? plan.pipeline?.owner ?? null, parallel: options.parallel ?? plan.pipeline?.parallel ?? false, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
+  if (pinned && (hashJson(deployers.map(address => address.toLowerCase())) !== hashJson(pinned.deployers) ||
+    (options.owner?.toLowerCase() ?? pinned.owner) !== pinned.owner || (options.parallel ?? pinned.parallel) !== pinned.parallel)) {
+    throw new Error('The requested signers or parallel setting differ from the saved plan.');
+  }
+  const schedule = createSchedule(plan, deployers, { owner: options.owner ?? pinned?.owner ?? null, parallel: options.parallel ?? pinned?.parallel ?? false, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
   if (plan.pipeline && hashJson(schedule.waves) !== hashJson(plan.pipeline.waves)) throw new Error('The requested schedule differs from the saved pipeline plan.');
   const funding = await Promise.all(deployers.map(async address => ({ address, balanceWei: (await client.getBalance({ address })).toString() })));
   if (funding.some(account => account.balanceWei === '0')) throw new Error('Every supplied deployer must have a nonzero native-token balance.');

@@ -128,7 +128,8 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
     const journalFile = path.join(directory, 'journal.jsonl');
     let gate;
     try {
-      const planned = runSync(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile], anvil.rpcUrl);
+      const planned = runSync(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+        '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000'], anvil.rpcUrl);
       assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
       gate = await startRpcGate(anvil.rpcUrl, phase);
       const running = runAsync([

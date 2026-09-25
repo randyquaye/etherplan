@@ -1,4 +1,4 @@
-import { keccak256 } from 'viem';
+import { isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.mjs';
 import { dependencyGraphs, dependencyMode, dependencyWarnings, executionOrder, graph, parseSpec, usesDependencyPlan } from '../spec/index.mjs';
 import { executionWaves } from '../scheduling/index.mjs';
@@ -130,7 +130,7 @@ function assertStateChain(state, chain) {
  * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null }) {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null, signers = null, maxSpendWei = null }) {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const described = usesDependencyPlan(spec);
@@ -208,6 +208,20 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
       warnings: dependencyWarnings(spec, ordered),
     } : {}),
   };
+  if (maxSpendWei !== null) {
+    assert((typeof maxSpendWei === 'string' || typeof maxSpendWei === 'bigint') &&
+      /^[0-9]+$/.test(String(maxSpendWei)) && BigInt(maxSpendWei) > 0n, 'Plan maxSpendWei must be a positive decimal wei amount.');
+    fields.maxSpendWei = String(maxSpendWei);
+  }
+  if (signers && pipeline) throw new Error('Supply signer addresses through either signers or pipeline.');
+  if (signers) {
+    const deployers = (signers.parallel ? signers.deployers : signers.deployers?.slice(0, 1))?.map(address => address.toLowerCase());
+    assert(deployers?.length && deployers.every(address => isAddress(address, { strict: false })) && new Set(deployers).size === deployers.length, 'Plan needs distinct deployer addresses.');
+    assert(signers.owner == null || isAddress(signers.owner, { strict: false }), 'Plan owner must be an Ethereum address.');
+    const needsOwner = planned.some(resource => ['deploy', 'call'].includes(resource.action) && resource.signerRole === 'owner');
+    assert(!needsOwner || signers.owner, 'Plan with owner actions needs --owner <address>.');
+    fields.signers = { deployers, owner: needsOwner ? signers.owner.toLowerCase() : null, parallel: signers.parallel ?? false };
+  }
   if (pipeline) {
     const deployers = (pipeline.parallel ? pipeline.deployers : pipeline.deployers.slice(0, 1)).map(address => address.toLowerCase());
     const schedule = createSchedule(fields, deployers, { owner: pipeline.owner ?? null, parallel: pipeline.parallel ?? false, pipeline: true });

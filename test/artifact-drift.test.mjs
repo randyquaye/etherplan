@@ -11,6 +11,8 @@ import { graph, parseSpec } from '../src/spec/index.mjs';
 import { importResource, readState, recordResource, validateState, writeStateAtomic } from '../src/state/index.mjs';
 import { verifyResource } from '../src/verification/index.mjs';
 import { deployerA, fixture, owner, startAnvil } from './execution/chain.mjs';
+
+const planPolicy = { signers: { deployers: [deployerA.address], owner: owner.address }, maxSpendWei: '100000000000000000000' };
 import { holderArtifact, registryArtifact } from './execution/contracts.mjs';
 import { state as interfaceState } from './interface-fixtures.mjs';
 
@@ -317,7 +319,7 @@ describe('artifact drift on a private chain', () => {
     chain = await startAnvil();
     const input = fixture();
     const files = await workspace(null);
-    const result = await apply({ ...input, plan: await createPlan({ ...input, client: chain.client }) }, files);
+    const result = await apply({ ...input, plan: await createPlan({ ...input, client: chain.client, ...planPolicy }) }, files);
     assert.equal(result.status, 'applied');
     baseline = await readState(files.stateFile);
   });
@@ -328,7 +330,7 @@ describe('artifact drift on a private chain', () => {
 
   test('B1: a rebuilt artifact reuses an unchanged deployment and rebaselines state without a transaction', async () => {
     const input = rebuiltInput();
-    const plan = await createPlan({ ...input, client: chain.client, state: baseline });
+    const plan = await createPlan({ ...input, client: chain.client, state: baseline, ...planPolicy });
     assert.ok(plan.resources.every(resource => resource.action === 'reuse'));
     assert.deepEqual(Object.fromEntries(plan.resources.map(resource => [resource.id, resource.observation.stateComparison?.artifactDrift?.accepted ?? null])), {
       'contract:alpha': true, 'contract:beta': null, 'contract:registry': true, 'contract:gamma': null, 'call:bindGamma': null,
@@ -360,13 +362,13 @@ describe('artifact drift on a private chain', () => {
     const rerun = await apply({ ...input, plan }, files);
     assert.equal(rerun.transactionsSigned, 0);
     assert.equal((await readState(files.stateFile)).resources['contract:alpha'].artifactRevisions.length, 1);
-    const replanned = await createPlan({ ...input, client: chain.client, state: await readState(files.stateFile) });
+    const replanned = await createPlan({ ...input, client: chain.client, state: await readState(files.stateFile), ...planPolicy });
     assert.ok(replanned.resources.every(resource => resource.action === 'reuse' && resource.observation.stateComparison?.artifactDrift === undefined));
   });
 
   test('apply rejects accepted drift when the artifact, saved state, or live code changes after planning', async () => {
     const input = rebuiltInput();
-    const plan = await createPlan({ ...input, client: chain.client, state: baseline });
+    const plan = await createPlan({ ...input, client: chain.client, state: baseline, ...planPolicy });
     const before = await nonces();
 
     const again = rebuiltInput();
@@ -393,7 +395,7 @@ describe('artifact drift on a private chain', () => {
     const rejectedState = structuredClone(baseline);
     rejectedState.resources['contract:alpha'].codeHash = moved;
     delete rejectedState.resources['contract:alpha'].creationProof;
-    const blocked = await createPlan({ ...input, client: chain.client, state: rejectedState });
+    const blocked = await createPlan({ ...input, client: chain.client, state: rejectedState, ...planPolicy });
     assert.equal(blocked.resources.find(resource => resource.id === 'contract:alpha').action, 'conflict');
     const forged = rehash({ ...blocked, resources: blocked.resources.map(resource => resource.action === 'conflict' ? { ...resource, action: 'reuse' } : resource) });
     await rejectsWith(apply({ ...input, plan: forged }, await workspace(rejectedState)), 'plan-not-applicable', 'contract:alpha');
