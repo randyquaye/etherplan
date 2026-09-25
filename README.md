@@ -54,18 +54,19 @@ node src/cli.mjs plan --spec path/to/spec.json --out plan.json
 | `validate`, `adapters` | Yes | Yes | No |
 | `plan`, `schedule`, `verify`, `import`, `apply` | Yes | Yes | Yes |
 
-`apply` repeats offline validation and checks the saved plan against current inputs before it signs or sends a transaction. `graph` reports structure and dependencies only; it does not load artifacts.
+`apply` repeats offline validation and checks the plan against current inputs before it signs or sends a transaction. `graph` reports structure and dependencies only; it does not load artifacts.
 
 Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `call`, `conflict`, or `unverified`. The plan includes exact transaction destinations and data for writes, plus spec and artifact hashes, chain identity, and an observed block hash. A plan with a conflict or missing proof cannot be applied.
 
 For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of keys in the process environment. Set `OWNER_PRIVATE_KEY` if the plan has owner calls. A single key can also be supplied as `DEPLOYER_PRIVATE_KEY`.
 
 ```sh
+node src/cli.mjs apply --spec path/to/spec.json
 node src/cli.mjs apply --spec path/to/spec.json --plan plan.json
 node src/cli.mjs verify --spec path/to/spec.json
 ```
 
-`apply` also reads `plan.json` from the working directory when `--plan` is omitted. With both files there, `etherplan apply` needs neither path. Use `--plan` to select a different saved plan.
+Without `--plan`, `apply` creates a fresh plan from the current spec, state, and chain, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec or artifact is rejected. Pipeline applies still require an explicit saved pipeline plan.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
