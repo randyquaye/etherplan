@@ -93,4 +93,14 @@ Use `--parallel` when creating a pipeline plan to distribute eligible deployment
 
 Use `import --spec path/to/spec.json --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
 
+## Rebuilt artifacts
+
+State separates a contract's deployment identity (address, initcode hash, and constructor inputs) from its artifact provenance (artifact and source hashes). A rebuild can change the artifact hash without changing the bytecode, for example when build metadata or settings change.
+
+For a CREATE2 contract, the plan reuses the existing deployment and reports `observation.stateComparison.artifactDrift` with the old and new artifact hashes. This requires that the address, initcode, inputs, and salt match state, that the live code hash equals the saved code hash, and that the new artifact verifies the live contract. Otherwise the contract is a `conflict`, and `artifactDrift.reasons` says why. A deployment change is not drift: when the address and the initcode or inputs both change, it is a replacement; when only one changes, it is a `conflict`. For example, a salt change with the same initcode and inputs is a `conflict`, even after a rebuild. To deploy the same contract at a new address on purpose, remove its state record first. The plan still pins the new artifact hash. Apply signs no transaction for the drift. Under its lock, apply rechecks the saved record and the live code hash, and stops with `stale-state` or `drift` if either changed. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to the record's `artifactRevisions`. Provenance, transactions, and prior-deployment fields are unchanged. A replacement starts a new revision list.
+
+An imported contract is not rebaselined automatically. After rebuilding its artifact, run `import --spec path/to/spec.json --id contract:name --rebaseline`. The existing import record must have the same address, inputs, and code hash, and the new artifact must verify the live contract. The recorded creation transaction is reused as proof unless `--creation-tx` is given. The import provenance is kept and an artifact revision is appended. Without `--rebaseline`, import still rejects a changed artifact.
+
+An artifact revision records provenance only. It does not show that mutable storage matches the constructor inputs; declare getter checks for values that must hold.
+
 `adapters --spec path/to/spec.json --out generated` optionally writes TypeScript wrappers. Planning and deployment do not need generated wrappers.

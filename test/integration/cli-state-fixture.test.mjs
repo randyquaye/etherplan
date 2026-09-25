@@ -33,6 +33,14 @@ function runVerify(specFile) {
   });
 }
 
+function runCli(arguments_) {
+  return spawnSync(process.execPath, ['src/cli.mjs', ...arguments_], {
+    cwd: projectDirectory,
+    encoding: 'utf8',
+    env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
+  });
+}
+
 function runImport(specFile, stateFile, transactionHash) {
   return spawnSync(process.execPath, [
     'src/cli.mjs',
@@ -191,4 +199,63 @@ test('verify distinguishes a binding before value, conflict, and desired value',
   const desired = runVerify(specFile);
   assert.equal(desired.status, 0, `${desired.stderr}\n${desired.stdout}`);
   assert.match(desired.stdout, /verified|reuse|after/i);
+});
+
+test('import --rebaseline accepts a rebuilt artifact for an imported contract; plan and import stay blocked without it', async () => {
+  const stateFile = path.join(directory, 'import-state.json');
+  const before = JSON.parse(await readFile(stateFile, 'utf8'));
+  const prior = before.resources['contract:stateFixture'];
+  const raw = structuredClone(artifact);
+  delete raw.rawMetadata;
+  raw.metadata.settings.remappings = ['forge-std/=lib/forge-std/src/'];
+  const rebuiltFile = path.join(directory, 'StateFixture.rebuilt.json');
+  await writeFile(rebuiltFile, JSON.stringify(raw));
+  const rebuiltSpec = expectedBeneficiary => {
+    const spec = importedSpec(expectedBeneficiary);
+    spec.contracts[0].artifact = rebuiltFile;
+    return spec;
+  };
+  const specFile = await saveSpec('rebuilt.json', rebuiltSpec(beneficiary));
+  const importArguments = ['import', '--spec', specFile, '--id', 'contract:stateFixture', '--state', stateFile];
+
+  const planned = runCli(['plan', '--spec', specFile, '--state', stateFile]);
+  assert.equal(planned.status, 1);
+  const [blocked] = JSON.parse(planned.stdout).resources;
+  assert.equal(blocked.action, 'conflict');
+  assert.match(blocked.observation.stateComparison.artifactDrift.reasons.join(' '), /import --id contract:stateFixture --rebaseline/);
+
+  const plain = runCli(importArguments);
+  assert.equal(plain.status, 1);
+  assert.match(plain.stderr, /different artifact identity\. Use import --rebaseline/);
+  const wrongFile = await saveSpec('rebuilt-wrong.json', rebuiltSpec(wrongBeneficiary));
+  const wrong = runCli(['import', '--spec', wrongFile, '--id', 'contract:stateFixture', '--state', stateFile, '--rebaseline']);
+  assert.equal(wrong.status, 1);
+  assert.match(wrong.stderr, /conflict/);
+  assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), before);
+  const missing = runCli([...importArguments.slice(0, -1), path.join(directory, 'missing-state.json'), '--rebaseline']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /no state record to rebaseline/);
+  const misused = runCli(['verify', '--spec', specFile, '--rebaseline']);
+  assert.equal(misused.status, 1);
+  assert.match(misused.stderr, /--rebaseline applies only to import/);
+
+  const rebaselined = runCli([...importArguments, '--rebaseline']);
+  assert.equal(rebaselined.status, 0, `${rebaselined.stderr}\n${rebaselined.stdout}`);
+  const result = JSON.parse(rebaselined.stdout);
+  assert.equal(result.status, 'rebaselined');
+  assert.equal(result.previousArtifactHash, prior.artifactHash);
+  assert.notEqual(result.artifactHash, prior.artifactHash);
+  const record = JSON.parse(await readFile(stateFile, 'utf8')).resources['contract:stateFixture'];
+  assert.equal(record.artifactHash, result.artifactHash);
+  assert.deepEqual(record.provenance, { kind: 'import', creationTransactionHash: creationHash });
+  assert.deepEqual(record.artifactRevisions, [{ artifactHash: prior.artifactHash, sourceHash: prior.sourceHash, proofHash: prior.proofHash, codeHash: prior.codeHash }]);
+  for (const key of ['address', 'priorAddress', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'priorProofHash', 'transactions']) {
+    assert.deepEqual(record[key], prior[key], key);
+  }
+
+  const replanned = runCli(['plan', '--spec', specFile, '--state', stateFile]);
+  assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
+  const [reused] = JSON.parse(replanned.stdout).resources;
+  assert.equal(reused.action, 'reuse');
+  assert.equal(reused.observation.stateComparison.artifactDrift, undefined);
 });
