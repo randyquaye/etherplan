@@ -113,9 +113,6 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     const observed = await client.getBlock({ blockTag: 'latest' });
     const chain = { id: chainId, genesisHash: genesis.hash };
     const current = await readState(stateFile);
-    // A rebaseline can reuse the recorded creation transaction as immutable proof for the new artifact.
-    const creationTransaction = options['creation-tx'] ??
-      (options.rebaseline ? current?.resources?.[options.id]?.provenance?.creationTransactionHash : null) ?? null;
     const checked = new Map();
     async function verifyDependency(id) {
       if (checked.has(id)) return checked.get(id);
@@ -124,7 +121,10 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
       for (const dependency of resource.dependencies) await verifyDependency(dependency);
       const verification = await verifyResource(resource, client, {
         blockNumber: observed.number,
-        ...(id === options.id && creationTransaction ? { transactionHash: creationTransaction } : {}),
+        chain,
+        ...(current?.resources?.[id]?.creationProof ? { creationProof: current.resources[id].creationProof } : {}),
+        ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } :
+          current?.resources?.[id]?.provenance?.creationTransactionHash ? { transactionHash: current.resources[id].provenance.creationTransactionHash } : {}),
       });
       if (verification.status !== 'verified') throw new Error(`Cannot import ${options.id}: ${id} is ${verification.status}. ${[...verification.reasons ?? [], ...verification.missingProofs ?? []].join(' ')}`);
       checked.set(id, verification);

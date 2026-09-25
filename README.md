@@ -91,6 +91,8 @@ Use `--parallel` when creating a pipeline plan to distribute eligible deployment
 
 `verify` rereads live code, immutables, declared getter values, external code hashes, and binding state. Matching bytecode outside compiler-marked immutable regions is not enough when an immutable has no value proof. Incomplete proof is `unverified`; a mismatch is `conflict`.
 
+For a deployment with creation transaction evidence, Etherplan records a `creationProof` in the verified journal entry and state. It binds the transaction, canonical receipt block, initcode, address, and exact runtime hash; CREATE2 also binds the factory and salt. Later plan, verify, and apply recheck that identity, the current code and artifact runtime, and all declared getters. This keeps immutables derived from the deployment block verified after time or block number changes. An old state file without this field remains readable. If its creation transaction and receipt-block data are still available, Etherplan can reconstruct the proof; otherwise declare an expected code hash or getter checks for the missing immutable values. A legacy `proofHash` alone does not prove them.
+
 Use `import --spec path/to/spec.json --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
 
 ## Rebuilt artifacts

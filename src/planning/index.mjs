@@ -159,8 +159,11 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
   const plannedById = new Map();
   for (const resource of resources) {
     const options = { blockNumber: observed.number };
-    const transactionHash = state?.resources?.[resource.id]?.transactions?.at(-1);
+    const saved = state?.resources?.[resource.id];
+    const transactionHash = saved?.creationProof?.transactionHash ?? saved?.provenance?.creationTransactionHash ?? saved?.transactions?.at(-1);
     if (transactionHash) options.transactionHash = transactionHash;
+    if (saved?.creationProof) options.creationProof = saved.creationProof;
+    options.chain = chain;
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state?.resources?.[resource.id], verification);
     const observation = stateComparison ? { ...verification, stateComparison } : verification;

@@ -376,6 +376,7 @@ describe('artifact drift on a private chain', () => {
     for (const change of [{ artifactHash: `0x${'5d'.repeat(32)}` }, { codeHash: `0x${'5e'.repeat(32)}` }, { salt: `0x${'5f'.repeat(32)}` }]) {
       const state = structuredClone(baseline);
       Object.assign(state.resources['contract:alpha'], change);
+      if (change.codeHash || change.salt) delete state.resources['contract:alpha'].creationProof;
       const files = await workspace(state);
       await rejectsWith(apply({ ...input, plan }, files), 'stale-state', 'contract:alpha');
       assert.deepEqual(await readState(files.stateFile), state);
@@ -391,6 +392,7 @@ describe('artifact drift on a private chain', () => {
     // Rehashing a plan cannot turn rejected drift into reuse.
     const rejectedState = structuredClone(baseline);
     rejectedState.resources['contract:alpha'].codeHash = moved;
+    delete rejectedState.resources['contract:alpha'].creationProof;
     const blocked = await createPlan({ ...input, client: chain.client, state: rejectedState });
     assert.equal(blocked.resources.find(resource => resource.id === 'contract:alpha').action, 'conflict');
     const forged = rehash({ ...blocked, resources: blocked.resources.map(resource => resource.action === 'conflict' ? { ...resource, action: 'reuse' } : resource) });

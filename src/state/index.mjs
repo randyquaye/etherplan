@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isAddress } from 'viem';
 import { canonicalJson, hashJson } from '../identity.mjs';
+import { validateCreationProof } from '../verification/creation-proof.mjs';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const RESOURCE_ID = /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/;
@@ -48,10 +49,10 @@ function validateRevision(id, revision, index) {
   assertHash(revision.codeHash, `${location} codeHash`);
 }
 
-function validateResource(id, resource) {
+function validateResource(id, resource, chain) {
   assert(RESOURCE_ID.test(id), `State resource ID ${id} is invalid.`);
   assert(isObject(resource), `State resource ${id} must be an object.`);
-  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'artifactRevisions', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance']);
+  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'artifactRevisions', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance', 'creationProof']);
   assert(Object.keys(resource).every(key => allowed.has(key)), `State resource ${id} has unknown fields.`);
   assert(isAddress(resource.address), `State resource ${id} needs an address.`);
   assert(resource.priorAddress === undefined || resource.priorAddress === null || isAddress(resource.priorAddress), `State resource ${id} has an invalid priorAddress.`);
@@ -74,6 +75,14 @@ function validateResource(id, resource) {
   if (resource.priorCodeHash !== undefined) assertHash(resource.priorCodeHash, `${id} priorCodeHash`, true);
   if (resource.proofHash !== undefined) assertHash(resource.proofHash, `${id} proofHash`);
   if (resource.priorProofHash !== undefined) assertHash(resource.priorProofHash, `${id} priorProofHash`, true);
+  if (resource.creationProof !== undefined) {
+    assert(id.startsWith('contract:'), `${id} creationProof belongs only to a contract.`);
+    const proof = validateCreationProof(resource.creationProof, `${id} creationProof`);
+    assert(proof.chain.id === chain.id && proof.chain.genesisHash.toLowerCase() === chain.genesisHash.toLowerCase(), `${id} creationProof has a different chain.`);
+    assert(proof.address.toLowerCase() === resource.address.toLowerCase() && proof.codeHash.toLowerCase() === resource.codeHash?.toLowerCase(), `${id} creationProof has a different deployment.`);
+    if (resource.initcodeHash !== null) assert(proof.initcodeHash.toLowerCase() === resource.initcodeHash?.toLowerCase(), `${id} creationProof has a different initcode.`);
+    if (proof.kind === 'create2') assert(proof.salt.toLowerCase() === resource.salt?.toLowerCase(), `${id} creationProof has a different salt.`);
+  }
   if (resource.provenance !== undefined) {
     assert(isObject(resource.provenance), `State resource ${id} provenance must be an object.`);
     assert(['apply', 'import', 'observed'].includes(resource.provenance.kind), `State resource ${id} has invalid provenance kind.`);
@@ -96,7 +105,7 @@ export function validateState(state) {
   assert(state.formatVersion === 1, 'State must have formatVersion: 1.');
   validateChain(state.chain);
   assert(isObject(state.resources), 'State resources must be an object.');
-  for (const [id, resource] of Object.entries(state.resources)) validateResource(id, resource);
+  for (const [id, resource] of Object.entries(state.resources)) validateResource(id, resource, state.chain);
   canonicalJson(state);
   return JSON.parse(JSON.stringify(state));
 }
@@ -206,6 +215,7 @@ export function importResource({ resource, verification, state: stateInput, chai
       ...existing,
       artifactHash: resource.artifactHash,
       proofHash: hashJson(verification),
+      ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
       artifactRevisions: [...(existing.artifactRevisions ?? []), artifactRevision(existing)],
     };
     delete record.sourceHash;
@@ -224,6 +234,7 @@ export function importResource({ resource, verification, state: stateInput, chai
       codeHash: verification.codeHash,
       priorCodeHash: existing?.priorCodeHash ?? null,
       proofHash: hashJson(verification),
+      ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
       priorProofHash: existing?.priorProofHash ?? null,
       transactions: existing?.transactions ? [...existing.transactions] : [],
       provenance: { kind: 'import', creationTransactionHash },
@@ -307,6 +318,7 @@ export function recordResource({ resource, verification, state: stateInput, chai
     codeHash: verification.codeHash,
     priorCodeHash: identityChanged ? existing.codeHash ?? null : existing?.priorCodeHash ?? null,
     proofHash: hashJson(verification),
+    ...(verification.creationProof ? { creationProof: verification.creationProof } : {}),
     priorProofHash: identityChanged ? existing.proofHash ?? null : existing?.priorProofHash ?? null,
     transactions: mergeTransactions(existing?.transactions, transactions),
     provenance: transactions.length > 0 ? { kind: 'apply' } : identityChanged ? { kind: 'observed' } : existing?.provenance ?? { kind: 'observed' },
