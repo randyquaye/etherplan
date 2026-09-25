@@ -119,8 +119,9 @@ describe('apply on a private automining chain', () => {
     older.artifacts = new Map([['alpha', older.artifacts.get('alpha')]]);
     const newer = structuredClone(older.spec);
     newer.contracts[0].salt = `0x${'e'.repeat(64)}`;
-    const oldPlan = await createPlan({ ...older, client: chain.client });
-    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client });
+    const policy = { signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' };
+    const oldPlan = await createPlan({ ...older, client: chain.client, ...policy });
+    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client, ...policy });
     const ws = await workspace();
     await apply({ ...older, spec: newer, plan: newPlan }, ws);
     const saved = await readFile(ws.stateFile, 'utf8');
@@ -136,7 +137,7 @@ describe('apply on a private automining chain', () => {
     const input = fixture({ withCall: false });
     input.spec.contracts = input.spec.contracts.slice(0, 1);
     input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
-    input.plan = await createPlan({ ...input, client: chain.client });
+    input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
     const ws = await workspace();
     const changed = { formatVersion: 1, chain: input.plan.chain, resources: {} };
     await rejectsWith(apply(input, ws, { hooks: { async afterRecord(record) {
