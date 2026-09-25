@@ -112,6 +112,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     const genesis = await client.getBlock({ blockNumber: 0n });
     const observed = await client.getBlock({ blockTag: 'latest' });
     const chain = { id: chainId, genesisHash: genesis.hash };
+    const current = await readState(stateFile);
     const checked = new Map();
     async function verifyDependency(id) {
       if (checked.has(id)) return checked.get(id);
@@ -120,7 +121,10 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
       for (const dependency of resource.dependencies) await verifyDependency(dependency);
       const verification = await verifyResource(resource, client, {
         blockNumber: observed.number,
-        ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } : {}),
+        chain,
+        ...(current?.resources?.[id]?.creationProof ? { creationProof: current.resources[id].creationProof } : {}),
+        ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } :
+          current?.resources?.[id]?.provenance?.creationTransactionHash ? { transactionHash: current.resources[id].provenance.creationTransactionHash } : {}),
       });
       if (verification.status !== 'verified') throw new Error(`Cannot import ${options.id}: ${id} is ${verification.status}. ${[...verification.reasons ?? [], ...verification.missingProofs ?? []].join(' ')}`);
       checked.set(id, verification);
@@ -132,7 +136,6 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     }
     const anchor = await client.getBlock({ blockNumber: observed.number });
     if (anchor.hash !== observed.hash) throw new Error('The verification block changed before import. Retry on the current chain.');
-    const current = await readState(stateFile);
     const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null });
     await writeStateAtomic(stateFile, state);
     print({ status: 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: state.resources[selected.id].proofHash, stateFile });

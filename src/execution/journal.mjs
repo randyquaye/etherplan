@@ -1,6 +1,7 @@
 import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from '../identity.mjs';
+import { validateJournalCreationProof } from '../verification/creation-proof.mjs';
 
 export const JOURNAL_FORMAT_VERSION = 1;
 export const PHASES = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
@@ -26,6 +27,7 @@ function validate(record, line) {
   if (!record.chain || !Number.isSafeInteger(record.chain.id) || typeof record.chain.genesisHash !== 'string') throw new Error(`Journal ${where} needs chain identity.`);
   if (!Number.isSafeInteger(record.sequence) || record.sequence < 1) throw new Error(`Journal ${where} needs a positive sequence.`);
   if (!PHASES.includes(record.phase)) throw new Error(`Journal ${where} has an unknown phase ${record.phase}.`);
+  validateJournalCreationProof(record, `Journal ${where}`);
   assertNoSecrets(record, where);
 }
 
