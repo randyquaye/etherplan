@@ -22,7 +22,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
 
   const overview = cli('--help');
   assert.equal(overview.status, 0, overview.stderr);
-  for (const command of ['validate', 'graph', 'impact', 'plan', 'apply', 'verify', 'schedule', 'import', 'adapters', 'status']) {
+  for (const command of ['validate', 'compile', 'graph', 'impact', 'plan', 'apply', 'verify', 'schedule', 'import', 'adapters', 'status']) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(command, '--help');
     assert.equal(help.status, 0, help.stderr);
@@ -36,7 +36,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
 
 test('invalid and unrelated options fail before a spec or RPC is opened', () => {
   for (const args of [
-    [], ['missing'], ['graph', '--value', 'owner'], ['impact'],
+    [], ['missing'], ['graph', '--value', 'owner'], ['compile', '--out', 'spec.json'], ['impact'],
     ['plan', '--parallel'], ['plan', '--pipeline'], ['apply', '--pipeline', '--parallel'],
     ['import'], ['import', '--id', 'external:registry'],
     ['validate', '--spec'], ['validate', '--spec', 'a', '--spec', 'b'],

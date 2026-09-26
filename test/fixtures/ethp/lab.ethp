@@ -1,0 +1,106 @@
+# Schema 2 lab: the split-lab contracts, the state-fixture binding call, a linked library, and an external.
+# Test helpers copy StateFixture.json and write Doubler.json and Linked.json beside this file.
+chain_id        = 31337
+dependency_mode = "split"
+
+factory {
+  address   = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
+  code_hash = "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+}
+
+execution_assumptions = [
+  {
+    consumer  = contracts.gamma
+    location  = "args[0]"
+    reference = contracts.alpha.address
+    reason    = "StateFixture stores its beneficiary without calling it."
+  },
+]
+
+resource "call" "bind" {
+  target              = contracts.alpha
+  method              = "setBinding"
+  args                = [var.desired_binding]
+  after               = [contracts.beta]
+  signer_role         = "owner"
+  owner_only          = true
+  transfers_ownership = false
+}
+
+resource "check" "bindResult" {
+  target = calls.bind
+  getter = "binding"
+  before = var.zero_address
+  equals = var.desired_binding
+}
+
+resource "contract" "alpha" {
+  artifact           = "StateFixture.json"
+  source             = "test/fixtures/StateFixture.sol"
+  name               = "StateFixture"
+  salt               = "0x1111111111111111111111111111111111111111111111111111111111111111"
+  args               = [var.upstream, var.owner]
+  sender_independent = true
+}
+
+resource "check" "alphaImmutables" {
+  target      = contracts.alpha
+  BENEFICIARY = var.upstream
+}
+
+resource "check" "alphaOwner" {
+  target = contracts.alpha
+  owner  = var.owner
+}
+
+resource "contract" "beta" {
+  artifact           = "StateFixture.json"
+  salt               = "0x2222222222222222222222222222222222222222222222222222222222222222"
+  args               = [var.other, var.owner]
+  sender_independent = true
+}
+
+resource "check" "betaState" {
+  target      = contracts.beta
+  BENEFICIARY = var.other
+  owner       = var.owner
+}
+
+resource "contract" "gamma" {
+  artifact           = "StateFixture.json"
+  salt               = "0x3333333333333333333333333333333333333333333333333333333333333333"
+  args               = [contracts.alpha.address, var.owner]
+  sender_independent = true
+}
+
+resource "check" "gammaState" {
+  target      = contracts.gamma
+  BENEFICIARY = contracts.alpha.address
+  owner       = var.owner
+}
+
+resource "contract" "doubler" {
+  artifact = "Doubler.json"
+  salt     = "0x4444444444444444444444444444444444444444444444444444444444444444"
+  args     = []
+}
+
+# Linked's constructor calls the library, so the library must be live first.
+resource "contract" "linked" {
+  artifact    = "Linked.json"
+  salt        = "0x5555555555555555555555555555555555555555555555555555555555555555"
+  args        = [21]
+  libraries   = { "src/Sample.sol:Doubler" = contracts.doubler.address }
+  after       = [contracts.doubler]
+  signer_role = "deployer"
+}
+
+resource "check" "linkedSeed" {
+  target = contracts.linked
+  SEED   = "42"
+}
+
+resource "external" "create2Factory" {
+  address   = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
+  code_hash = "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+}

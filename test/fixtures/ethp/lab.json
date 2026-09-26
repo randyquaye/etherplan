@@ -1,0 +1,124 @@
+{
+  "schema": 2,
+  "chainId": 31337,
+  "dependencyMode": "split",
+  "values": {
+    "desired_binding": "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+    "other": "0x0000000000000000000000000000000000000002",
+    "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "upstream": "0x0000000000000000000000000000000000000001",
+    "zero_address": "0x0000000000000000000000000000000000000000"
+  },
+  "externals": {
+    "create2Factory": {
+      "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+    }
+  },
+  "factory": {
+    "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+    "codeHash": "0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989"
+  },
+  "contracts": [
+    {
+      "id": "alpha",
+      "artifact": "StateFixture.json",
+      "source": "test/fixtures/StateFixture.sol",
+      "name": "StateFixture",
+      "salt": "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "args": [
+        { "ref": "values.upstream" },
+        { "ref": "values.owner" }
+      ],
+      "checks": {
+        "BENEFICIARY": { "ref": "values.upstream" },
+        "owner": { "ref": "values.owner" }
+      },
+      "senderIndependent": true
+    },
+    {
+      "id": "beta",
+      "artifact": "StateFixture.json",
+      "salt": "0x2222222222222222222222222222222222222222222222222222222222222222",
+      "args": [
+        { "ref": "values.other" },
+        { "ref": "values.owner" }
+      ],
+      "checks": {
+        "BENEFICIARY": { "ref": "values.other" },
+        "owner": { "ref": "values.owner" }
+      },
+      "senderIndependent": true
+    },
+    {
+      "id": "doubler",
+      "artifact": "Doubler.json",
+      "salt": "0x4444444444444444444444444444444444444444444444444444444444444444",
+      "args": []
+    },
+    {
+      "id": "gamma",
+      "artifact": "StateFixture.json",
+      "salt": "0x3333333333333333333333333333333333333333333333333333333333333333",
+      "args": [
+        { "ref": "contracts.alpha.address" },
+        { "ref": "values.owner" }
+      ],
+      "checks": {
+        "BENEFICIARY": { "ref": "contracts.alpha.address" },
+        "owner": { "ref": "values.owner" }
+      },
+      "senderIndependent": true
+    },
+    {
+      "id": "linked",
+      "artifact": "Linked.json",
+      "salt": "0x5555555555555555555555555555555555555555555555555555555555555555",
+      "args": [
+        21
+      ],
+      "libraries": {
+        "src/Sample.sol:Doubler": { "ref": "contracts.doubler.address" }
+      },
+      "checks": {
+        "SEED": "42"
+      },
+      "after": [
+        "contract:doubler"
+      ],
+      "signerRole": "deployer"
+    }
+  ],
+  "calls": [
+    {
+      "id": "bind",
+      "target": "alpha",
+      "method": "setBinding",
+      "args": [
+        { "ref": "values.desired_binding" }
+      ],
+      "check": {
+        "function": "binding",
+        "args": [],
+        "equals": { "ref": "values.desired_binding" }
+      },
+      "before": {
+        "equals": { "ref": "values.zero_address" }
+      },
+      "after": [
+        "contract:beta"
+      ],
+      "signerRole": "owner",
+      "ownerOnly": true,
+      "transfersOwnership": false
+    }
+  ],
+  "executionAssumptions": [
+    {
+      "consumer": "contract:gamma",
+      "location": "args[0]",
+      "reference": "contracts.alpha.address",
+      "reason": "StateFixture stores its beneficiary without calling it."
+    }
+  ]
+}
