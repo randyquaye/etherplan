@@ -2,6 +2,8 @@
 // Lowers parsed .ethp, .ethpvars, and .ethpconfig documents into the canonical JSON inputs.
 // Each error names the file, line, and column of the attribute, block, or value that caused it.
 import { fail } from './hcl.ts';
+import type { JsonValue } from '../types.ts';
+import type { CommandOptions, CompiledConfig, CompiledSpec, ConfigOptionName, ConfigOptions, HclDocument } from './types.ts';
 
 const ID = /^[a-z][a-zA-Z0-9_]*$/;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -48,7 +50,7 @@ const ASSUMPTION_FIELDS = ['consumer', 'location', 'reference', 'reason'];
 const CALL_CHECK_FIELDS = new Set(['target', 'getter', 'args', 'before', 'equals']);
 const RESERVED_GETTERS = new Set(['getter', 'args', 'before', 'equals', 'after']);
 
-export const CONFIG_OPTIONS = ['state', 'journal', 'backend', 'out', 'deployers', 'owner', 'parallel', 'pipeline'];
+export const CONFIG_OPTIONS: ConfigOptionName[] = ['state', 'journal', 'backend', 'out', 'deployers', 'owner', 'parallel', 'pipeline'];
 const CONFIG_PATHS = new Set(['state', 'journal', 'backend', 'out']);
 
 function assert(condition, node, message) {
@@ -159,7 +161,7 @@ function ordered(item, order) {
  * Compiles parsed .ethp and optional .ethpvars documents into a schema 2 JSON spec for parseSpec.
  * Resources are sorted by type and ID, so source block order does not affect the spec or its hash.
  */
-export function compileSpec(document, variables = null, varsFile = 'spec.ethpvars') {
+export function compileSpec(document: HclDocument, variables: HclDocument | null = null, varsFile = 'spec.ethpvars'): CompiledSpec {
   for (const attribute of document.attributes.values()) {
     const hint = attribute.name === 'chainId' ? ' Use chain_id.' : TOP_BLOCKS.has(attribute.name) ? ` Declare ${attribute.name} as a block.` : '';
     assert(TOP_ATTRIBUTES.has(attribute.name), attribute, `Unknown top-level attribute ${attribute.name}.${hint}`);
@@ -275,7 +277,7 @@ export function compileSpec(document, variables = null, varsFile = 'spec.ethpvar
 }
 
 /** Decodes a flat .ethpvars document of literal assignments into spec values. */
-export function compileVariables(document) {
+export function compileVariables(document: HclDocument): Record<string, JsonValue> {
   return Object.fromEntries(attributesOf(document, 'A variables file').map(attribute => {
     const { name } = attribute;
     assertNotSecret(name, attribute);
@@ -289,7 +291,7 @@ export function compileVariables(document) {
  * Decodes a parsed .ethpconfig document. `commands` maps each command that reads a spec to its CLI options.
  * `resolvePath` resolves configured paths relative to the config file.
  */
-export function compileConfig(document, commands, resolvePath) {
+export function compileConfig(document: HclDocument, commands: CommandOptions, resolvePath: (value: string) => string): CompiledConfig {
   for (const attribute of document.attributes.values()) {
     assertNotSecret(attribute.name, attribute);
     fail(attribute, `Unknown top-level attribute ${attribute.name}. Set options in a defaults or command "<name>" block.`);
@@ -336,7 +338,7 @@ export function compileConfig(document, commands, resolvePath) {
 }
 
 /** Selects one command's config options: its command block over defaults, omitting false booleans. */
-export function configOptions(config, command, accepted) {
+export function configOptions(config: CompiledConfig, command: string, accepted: string[]): ConfigOptions {
   const selected = {
     ...Object.fromEntries(Object.entries(config.defaults).filter(([name]) => accepted.includes(name))),
     ...config.commands[command],

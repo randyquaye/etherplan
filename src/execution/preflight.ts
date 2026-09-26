@@ -5,12 +5,16 @@ import { encodeMethod } from '../validation/index.ts';
 import { ApplyError } from './errors.ts';
 import { dependencyGraphs, dependencyMode, dependencyWarnings, usesDependencyPlan } from '../spec/index.ts';
 import { executionWaves } from '../scheduling/index.ts';
+import type { PlannedTransaction, PreparedCall, PreparedContract } from '../planning/types.ts';
+import type { Factory } from '../spec/types.ts';
+import type { Address, Client, Hash, Hex, JsonSafe, ResourceId } from '../types.ts';
+import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
 const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
 const IDENTITY_FIELDS = ['kind', 'dependencies', 'resolutionDependencies', 'executionEdges', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after', 'ownerOnly', 'transfersOwnership'];
 
 // Makes in-memory values comparable with plan JSON: quantities become decimal strings and hex becomes lowercase.
-export function jsonSafe(value) {
+export function jsonSafe<T>(value: T): JsonSafe<T> {
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'string') return /^0x[0-9a-fA-F]*$/.test(value) ? value.toLowerCase() : value;
   if (Array.isArray(value)) return value.map(jsonSafe);
@@ -24,15 +28,15 @@ function same(a, b) {
   return canonicalJson(jsonSafe(a ?? null)) === canonicalJson(jsonSafe(b ?? null));
 }
 
-export function create2Address(factory, salt, initcodeHash) {
+export function create2Address(factory: Address, salt: Hex, initcodeHash: Hash): Address {
   return `0x${keccak256(concatHex(['0xff', factory, salt, initcodeHash])).slice(-40)}`;
 }
 
-export function deployTransaction(resource) {
+export function deployTransaction(resource: PreparedContract): PlannedTransaction {
   return { to: resource.factory.address, data: concatHex([resource.salt, resource.initcode]), value: '0' };
 }
 
-export function callTransaction(resource) {
+export function callTransaction(resource: PreparedCall): PlannedTransaction {
   const abi = resource.abi ?? resource.targetArtifact?.abi;
   return { to: resource.address, data: encodeMethod(abi, resource.method, resource.args, resource.id), value: '0' };
 }
@@ -65,7 +69,7 @@ async function checkChain(plan, client) {
   }
 }
 
-export async function checkFactory(client, factory) {
+export async function checkFactory(client: Client, factory: Factory): Promise<void> {
   const code = await client.getCode({ address: factory.address });
   const codeHash = code && code !== '0x' ? keccak256(code) : null;
   if (codeHash?.toLowerCase() !== factory.codeHash.toLowerCase()) {
@@ -74,7 +78,7 @@ export async function checkFactory(client, factory) {
 }
 
 // Read-only identity check shared by apply and saved-plan schedule previews.
-export async function checkPlanIdentity({ plan, spec, artifacts, client, deps }) {
+export async function checkPlanIdentity({ plan, spec, artifacts, client, deps }: PlanIdentityInput): Promise<Map<ResourceId, PreparedAction>> {
   if (!plan || ![1, 2].includes(plan.formatVersion) || !Array.isArray(plan.resources)) throw new ApplyError('plan-format', 'Plan must have formatVersion 1 or 2 and resources[].');
   const { planHash, ...fields } = plan;
   if (typeof planHash !== 'string' || hashJson(fields) !== planHash) throw new ApplyError('plan-hash', 'Plan content does not match its planHash. The plan changed after it was created.');
@@ -135,7 +139,7 @@ export async function checkPlanIdentity({ plan, spec, artifacts, client, deps })
 }
 
 // Apply also requires every planned action to be executable.
-export async function preflight(input) {
+export async function preflight(input: PlanIdentityInput): Promise<Map<ResourceId, PreparedAction>> {
   const { plan } = input;
   const blocked = plan?.resources?.filter(resource => !APPLICABLE.has(resource.action)) ?? [];
   if (blocked.length) {

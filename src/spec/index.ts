@@ -1,7 +1,9 @@
 // @ts-nocheck
 import { isAddress } from 'viem';
+import type { JsonValue, ResourceId } from '../types.ts';
+import type { DependencyGraphs, DependencyMode, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecValue } from './types.ts';
 
-export const DEFAULT_FACTORY = {
+export const DEFAULT_FACTORY: Factory = {
   address: '0x4e59b44847b379578588920cA78FbF26c0B4956C',
   codeHash: '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989',
 };
@@ -99,11 +101,11 @@ function referenceDetails(value, location, into = []) {
   return into;
 }
 
-export function dependencyMode(spec) {
+export function dependencyMode(spec: ParsedSpec): DependencyMode {
   return spec.dependencyMode ?? (spec.schema === 2 ? 'split' : 'compatibility');
 }
 
-export function usesDependencyPlan(spec) {
+export function usesDependencyPlan(spec: ParsedSpec): boolean {
   return spec.schema === 2 || spec.dependencyMode !== undefined || spec.executionAssumptions !== undefined;
 }
 
@@ -163,7 +165,7 @@ function validateAssumptions(spec) {
   }
 }
 
-export function parseSpec(raw) {
+export function parseSpec(raw: unknown): ParsedSpec {
   const spec = cloneJson(raw);
   assert(isObject(spec), 'Spec must be an object.');
   assertNoSecrets(spec);
@@ -288,7 +290,7 @@ function edgeList(edges) {
     .map(([id, reasons]) => ({ id, reasons: [...reasons].sort() }));
 }
 
-export function graph(spec) {
+export function graph(spec: ParsedSpec): OrderedNode[] {
   const mode = dependencyMode(spec);
   const nodes = new Map();
   for (const [name, item] of Object.entries(spec.externals)) nodes.set(`external:${name}`, { id: `external:${name}`, kind: 'external', type: 'external', item });
@@ -340,18 +342,18 @@ export function graph(spec) {
   return mode === 'compatibility' ? executionSorted : resolutionOrder;
 }
 
-export function dependencyGraphs(ordered) {
+export function dependencyGraphs(ordered: OrderedNode[]): DependencyGraphs {
   return {
     resolution: ordered.map(node => ({ id: node.id, needs: node.resolutionEdges })),
     execution: ordered.map(node => ({ id: node.id, after: node.executionEdges })),
   };
 }
 
-export function executionOrder(ordered) {
+export function executionOrder(ordered: OrderedNode[]): OrderedNode[] {
   return orderGraph(new Map(ordered.map(node => [node.id, node])), 'executionDependencies', 'Execution dependency');
 }
 
-export function dependencyWarnings(spec, ordered) {
+export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): string[] {
   if (dependencyMode(spec) !== 'split') return [];
   const assumptions = spec.executionAssumptions ?? [];
   const warnings = [];
@@ -369,7 +371,7 @@ export function dependencyWarnings(spec, ordered) {
   return [...new Set(warnings)].sort();
 }
 
-export function impact(spec, ordered, reference) {
+export function impact(spec: ParsedSpec, ordered: OrderedNode[], reference: string): ResourceId[] {
   assert(/^values\.[a-z][a-zA-Z0-9_]*$/.test(reference), 'Impact source must be values.<name>.');
   assert(Object.hasOwn(spec.values, reference.slice(7)), `Missing ${reference}.`);
   const affected = new Set();
@@ -382,7 +384,7 @@ export function impact(spec, ordered, reference) {
   return ordered.filter(node => affected.has(node.id)).map(node => node.id);
 }
 
-export function resolve(value, spec, addresses) {
+export function resolve(value: SpecValue, spec: ParsedSpec, addresses: ResolvedAddresses): JsonValue {
   if (Array.isArray(value)) return value.map(item => resolve(item, spec, addresses));
   if (isObject(value)) {
     if (Object.hasOwn(value, 'ref')) {

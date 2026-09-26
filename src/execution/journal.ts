@@ -3,11 +3,12 @@ import { mkdir, open, readFile, truncate } from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalJson } from '../identity.ts';
 import { validateJournalCreationProof } from '../verification/creation-proof.ts';
+import type { CurrentTransaction, IntentRecord, Journal, JournalPhase, JournalRecord, LiveTransaction, SignedRecord } from './types.ts';
 
 export const JOURNAL_FORMAT_VERSION = 1;
-export const PHASES = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
+export const PHASES: JournalPhase[] = ['intent', 'signed', 'broadcast-attempt', 'broadcast', 'receipt', 'verified', 'failed'];
 // A transaction in one of these phases may still change the chain or hold its signer's next nonce.
-export const LIVE_PHASES = new Set(['signed', 'broadcast-attempt', 'broadcast', 'receipt']);
+export const LIVE_PHASES: Set<JournalPhase> = new Set(['signed', 'broadcast-attempt', 'broadcast', 'receipt']);
 const SECRET_KEY = /^(private[_-]?key|secret[_-]?key|mnemonic|seed[_-]?phrase|passphrase)$/i;
 
 function validateFields(value, where = 'record', decoded = false, topLevel = true) {
@@ -42,7 +43,7 @@ async function syncDirectory(directory) {
 }
 
 // An unterminated last line is a write that never finished its sync, so no broadcast followed it. Recovery removes it.
-export async function openJournal(file) {
+export async function openJournal(file: string): Promise<Journal> {
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   let text = '';
   let created = false;
@@ -108,12 +109,12 @@ export async function openJournal(file) {
   };
 }
 
-export function latestRecord(records) {
+export function latestRecord(records: JournalRecord[]): JournalRecord | null {
   return records.at(-1) ?? null;
 }
 
 // The newest signed transaction for an action, with its latest phase. Only one transaction per action is live at a time.
-export function currentTransaction(records) {
+export function currentTransaction(records: JournalRecord[]): CurrentTransaction | null {
   const signed = records.filter(record => record.phase === 'signed').at(-1);
   if (!signed) return null;
   const later = records.filter(record => record.sequence > signed.sequence && record.transactionHash === signed.transactionHash);
@@ -121,7 +122,7 @@ export function currentTransaction(records) {
 }
 
 // Follow durable replacement links back to the original signature for this nonce.
-export function signedVariants(records, signed) {
+export function signedVariants(records: JournalRecord[], signed: SignedRecord): SignedRecord[] {
   const variants = [signed];
   const seen = new Set([signed.transactionHash?.toLowerCase()]);
   while (variants[0].replacesTransactionHash) {
@@ -142,7 +143,7 @@ export function signedVariants(records, signed) {
 
 // A retry starts a new attempt after a signed or terminal record. An unsigned
 // attempt may have failed, but two intents in one attempt are ambiguous.
-export function intentForSigned(records, signed) {
+export function intentForSigned(records: JournalRecord[], signed: SignedRecord): IntentRecord {
   const sameAction = records.filter(record => record.planHash === signed.planHash && record.actionId === signed.actionId &&
     record.chain.id === signed.chain.id && record.chain.genesisHash.toLowerCase() === signed.chain.genesisHash.toLowerCase() &&
     record.sequence < signed.sequence);
@@ -153,7 +154,7 @@ export function intentForSigned(records, signed) {
 }
 
 // Groups records by plan and action, including unresolved replacement attempts after a nonce race.
-export function liveTransactions(records) {
+export function liveTransactions(records: JournalRecord[]): LiveTransaction[] {
   const groups = new Map();
   for (const record of records) {
     const key = `${record.planHash}\u0000${record.actionId}`;

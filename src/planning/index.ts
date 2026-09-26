@@ -5,6 +5,7 @@ import { dependencyGraphs, dependencyMode, dependencyWarnings, executionOrder, g
 import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
 import { createSchedule } from '../scheduling/index.ts';
+import type { CreatePlanInput, Plan } from './types.ts';
 
 export { prepareResources, transactionFor } from './resources.ts';
 
@@ -131,7 +132,7 @@ function assertStateChain(state, chain) {
  * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null, signers = null, maxSpendWei = null }) {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const described = usesDependencyPlan(spec);

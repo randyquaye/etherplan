@@ -1,5 +1,7 @@
 // @ts-nocheck
 import { isAddress } from 'viem';
+import type { AbiParameter } from 'viem';
+import type { JsonValue } from '../types.ts';
 
 const HEX = /^0x[0-9a-fA-F]*$/;
 
@@ -28,7 +30,7 @@ function arrayType(type) {
  * Converts an ABI value to a JSON value that compares by meaning: addresses and byte strings are lowercase hex,
  * integers are decimal strings, and tuples are objects keyed by component name (arrays when components are unnamed).
  */
-export function normalizeAbiValue(parameter, value, label = parameter?.name || 'value') {
+export function normalizeAbiValue(parameter: AbiParameter, value: unknown, label: string = parameter?.name || 'value'): JsonValue {
   const type = parameter?.type;
   const array = typeof type === 'string' ? arrayType(type) : null;
   if (array) {
@@ -92,20 +94,20 @@ function abiArgument(parameter, value, label) {
 }
 
 /** Converts JSON values (decimal-string integers, hex strings) to the argument values that viem encodes. */
-export function abiArguments(parameters, values, label = 'argument') {
+export function abiArguments(parameters: readonly AbiParameter[], values: unknown, label = 'argument'): unknown[] {
   if (!Array.isArray(values) || values.length !== parameters.length) throw new Error(`Expected ${parameters.length} ${label}(s); received ${Array.isArray(values) ? values.length : 'none'}.`);
   return parameters.map((parameter, index) => abiArgument(parameter, values[index], `${label} ${parameter.name || index}`));
 }
 
 /** Normalizes a function result with its ABI outputs: one output gives one value, several give an array. */
-export function normalizeOutputs(outputs, value, label) {
+export function normalizeOutputs(outputs: readonly AbiParameter[], value: unknown, label: string): JsonValue {
   if (outputs.length === 1) return normalizeAbiValue(outputs[0], value, label);
   if (!Array.isArray(value) || value.length !== outputs.length) return fail(label, value, 'output list');
   return outputs.map((output, index) => normalizeAbiValue(output, value[index], `${label}[${index}]`));
 }
 
 /** Converts viem results to JSON: BigInt becomes a decimal string and hex strings become lowercase. */
-export function toJson(value) {
+export function toJson(value: unknown): JsonValue {
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'number') return Number.isSafeInteger(value) ? value.toString() : String(value);
   if (typeof value === 'string') return HEX.test(value) ? value.toLowerCase() : value;
@@ -114,7 +116,7 @@ export function toJson(value) {
   return value ?? null;
 }
 
-export function sameJson(left, right) {
+export function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
@@ -122,7 +124,7 @@ export function sameJson(left, right) {
  * Returns a short error message for reports. It removes RPC URLs and request bodies, because an RPC URL can contain
  * an access key and must not enter a plan or report.
  */
-export function safeError(error) {
+export function safeError(error: unknown): string {
   const text = String(error?.shortMessage ?? error?.message ?? error ?? 'Unknown error.').split('\n')[0];
   return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>').slice(0, 300);
 }

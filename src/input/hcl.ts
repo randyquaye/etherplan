@@ -4,6 +4,8 @@
 // accepts means the same thing to HCL. It rejects templates, heredocs, operators, function calls, and
 // other expressions instead of evaluating them. Every node records its file, line, and column.
 
+import type { HclDocument, Located } from './types.ts';
+
 const NUMBER = /[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
 const IDENTIFIER = /[\p{ID_Start}_][\p{ID_Continue}-]*/uy;
 const IDENTIFIER_START = /^[\p{ID_Start}_]/u;
@@ -14,7 +16,7 @@ const ESCAPES = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' };
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
 /** Throws an error that starts with the file, line, and column of a parsed node or token. */
-export function fail(node, message) {
+export function fail(node: Located, message: string): never {
   throw new Error(`${node.at.file}:${node.at.line}:${node.at.column}: ${message}`);
 }
 
@@ -321,6 +323,6 @@ class Parser {
  * Parses HCL text into a body: `attributes` maps each name to { name, value, at }, and `blocks` lists
  * { type, labels, body, at } in source order. Values are literal, list, object, or reference nodes.
  */
-export function parseHcl(file, text) {
+export function parseHcl(file: string, text: string): HclDocument {
   return new Parser(file, tokenize(file, text)).body('eof');
 }

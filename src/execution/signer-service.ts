@@ -1,8 +1,9 @@
 // @ts-nocheck
 import { jsonSafe } from './preflight.ts';
+import type { SignerProvider, SignerServiceOptions } from './types.ts';
 
 // A signing service owns its keys. Etherplan receives only addresses and signed envelopes.
-export function createSignerServiceProvider({ url, headers = {}, fetchImpl = globalThis.fetch, timeoutMs = 30_000 }) {
+export function createSignerServiceProvider({ url, headers = {}, fetchImpl = globalThis.fetch, timeoutMs = 30_000 }: SignerServiceOptions): SignerProvider {
   const endpoint = new URL(url.endsWith('/') ? url : `${url}/`);
   if (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(endpoint.hostname))) throw new Error('Signer service requires HTTPS outside loopback.');
   if (typeof fetchImpl !== 'function') throw new Error('Signer service needs fetch.');

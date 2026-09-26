@@ -2,6 +2,7 @@
 import { createPublicKey } from 'node:crypto';
 import { GetPublicKeyCommand, KMSClient, SignCommand } from '@aws-sdk/client-kms';
 import { getAddress, hexToBytes, keccak256, recoverAddress, serializeTransaction, toHex } from 'viem';
+import type { KmsSignerOptions, SignerProvider } from './types.ts';
 
 const CURVE_ORDER = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
 const HALF_ORDER = CURVE_ORDER / 2n;
@@ -54,7 +55,7 @@ function derSignature(bytes) {
 }
 
 /** Create a signer provider for role-to-KMS-key mappings. Keys must share one AWS region. */
-export async function createKmsSignerProvider({ keys, region, kms } = {}) {
+export async function createKmsSignerProvider({ keys, region, kms }: KmsSignerOptions = {} as KmsSignerOptions): Promise<SignerProvider> {
   if (!keys || Array.isArray(keys) || typeof keys !== 'object' || Object.keys(keys).length === 0 ||
     Object.entries(keys).some(([role, keyId]) => !role || typeof keyId !== 'string' || !keyId.trim())) {
     throw new Error('KMS signer needs a nonempty keys mapping from roles to KMS key IDs or ARNs.');

@@ -3,6 +3,9 @@ import { concatHex, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
+import type { Artifacts } from '../artifacts/types.ts';
+import type { OrderedNode } from '../spec/types.ts';
+import type { PlannedTransaction, PreparedResource, PreparedResources } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -26,7 +29,7 @@ function checks(value, spec, addresses) {
  * Contract addresses are known before dependent arguments and call targets are resolved.
  * Validates the resulting resources without reading the chain.
  */
-export function prepareResources(specInput, orderedInput, artifacts) {
+export function prepareResources(specInput: unknown, orderedInput: OrderedNode[] | null | undefined, artifacts: Artifacts): PreparedResources {
   const spec = parseSpec(specInput);
   const ordered = orderedInput ?? graph(spec);
   const describeDependencies = usesDependencyPlan(spec);
@@ -142,7 +145,7 @@ export function prepareResources(specInput, orderedInput, artifacts) {
   return { resources, addresses };
 }
 
-export function transactionFor(resource) {
+export function transactionFor(resource: PreparedResource): PlannedTransaction {
   if (resource.kind === 'contract' && resource.factory && resource.salt && resource.initcode) {
     return { to: resource.factory.address, data: concatHex([resource.salt, resource.initcode]), value: '0' };
   }

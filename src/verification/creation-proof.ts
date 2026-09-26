@@ -1,5 +1,7 @@
 // @ts-nocheck
 import { isAddress } from 'viem';
+import type { JournalRecord, StoredJournalRecord } from '../execution/types.ts';
+import type { CreationProof } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const BLOCK = /^(0|[1-9][0-9]*)$/;
@@ -9,7 +11,7 @@ function assert(condition, message) {
 }
 
 /** Validate the persisted creation facts without treating them as trusted evidence. */
-export function validateCreationProof(proof, label = 'Creation proof') {
+export function validateCreationProof(proof: unknown, label = 'Creation proof'): CreationProof {
   assert(proof && typeof proof === 'object' && !Array.isArray(proof), `${label} must be an object.`);
   const create2 = proof.kind === 'create2';
   const keys = ['chain', 'transactionHash', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : [])];
@@ -27,7 +29,7 @@ export function validateCreationProof(proof, label = 'Creation proof') {
   return proof;
 }
 
-export function validateJournalCreationProof(record, label) {
+export function validateJournalCreationProof(record: JournalRecord | StoredJournalRecord, label: string): void {
   if (record.creationProof === undefined) return;
   assert(record.phase === 'verified', `${label} has a creationProof outside verified.`);
   const proof = validateCreationProof(record.creationProof, `${label} creationProof`);

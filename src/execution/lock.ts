@@ -3,9 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { link, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { LocalLock, LocalLockHolder } from './types.ts';
 
 export class LockError extends Error {
-  constructor(message, holder) {
+  declare code: 'state-locked';
+  declare holder: LocalLockHolder | null | undefined;
+
+  constructor(message: string, holder: LocalLockHolder | null | undefined) {
     super(message);
     this.name = 'LockError';
     this.code = 'state-locked';
@@ -56,7 +60,7 @@ async function removeStale(file, holder) {
   await unlink(aside);
 }
 
-export async function acquireLock(file, { planHash }) {
+export async function acquireLock(file: string, { planHash }: { planHash: string | null }): Promise<LocalLock> {
   await mkdir(path.dirname(file), { recursive: true });
   const holder = { id: randomUUID(), pid: process.pid, host: os.hostname(), planHash, acquiredAt: new Date().toISOString() };
   let recovered = null;

@@ -5,6 +5,9 @@ import { simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
+import type { PreparedContract, PreparedResource } from '../planning/types.ts';
+import type { Client, Hash } from '../types.ts';
+import type { CreationVerification, VerificationResult, VerifyCreationOptions, VerifyOptions } from './types.ts';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.ts';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.ts';
@@ -348,7 +351,7 @@ async function verifyCall(resource, client, options) {
  * `options.blockNumber` anchors every read, `options.transactionHash` adds creation evidence, `options.simulate: false`
  * turns off the CREATE2 simulation, and `options.account` sets the simulated transaction origin.
  */
-export async function verifyResource(resource, client, options = {}) {
+export async function verifyResource(resource: PreparedResource, client: Client, options: VerifyOptions = {}): Promise<VerificationResult> {
   assert(resource && typeof resource.id === 'string' && typeof resource.address === 'string', 'Verification needs a prepared resource with id and address.');
   if (resource.kind === 'contract') return verifyContract(resource, client, options);
   if (resource.kind === 'external') return verifyExternal(resource, client, options);
@@ -357,7 +360,7 @@ export async function verifyResource(resource, client, options = {}) {
 }
 
 /** Check creation identity and the canonical receipt block; capture or revalidate an exact runtime anchor. */
-export async function verifyCreation(client, resource, transactionHash, options = {}) {
+export async function verifyCreation(client: Client, resource: PreparedContract, transactionHash: Hash, options: VerifyCreationOptions = {}): Promise<CreationVerification> {
   const result = { kind: null, transactionHash, address: resource.address, status: 'unverified', matched: false, exactRuntime: false, codeHash: null, initcodeHash: null, blockNumber: null, reasons: [] };
   const saved = options.creationProof ? validateCreationProof(options.creationProof) : null;
   if (saved && lower(saved.transactionHash) !== lower(transactionHash)) {

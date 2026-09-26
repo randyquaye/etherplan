@@ -5,11 +5,13 @@ import { bytesToHex, hexToBytes } from 'viem';
 import { hashJson } from '../identity.ts';
 import { jsonSafe } from './preflight.ts';
 import { validateJournalCreationProof } from '../verification/creation-proof.ts';
+import type { Address, ChainIdentity, DecimalString, Hash, ResourceId } from '../types.ts';
+import type { AcquireLeasesInput, DeploymentScope, DeploymentStatus, EncryptionContext, InspectDeploymentInput, Journal, Leases, LockScope, OpenStoredJournalInput, StoredJournalRecord } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SCOPE_PART = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 
-export function deploymentScope(input, chain) {
+export function deploymentScope(input: unknown, chain?: ChainIdentity | null): DeploymentScope {
   const scope = { project: input?.project, environment: input?.environment, chainId: input?.chainId ?? chain?.id, genesisHash: input?.genesisHash ?? chain?.genesisHash, label: input?.label };
   for (const field of ['project', 'environment', 'label']) {
     if (typeof scope[field] !== 'string' || !SCOPE_PART.test(scope[field])) throw new Error(`Deployment scope needs a safe ${field}.`);
@@ -20,11 +22,11 @@ export function deploymentScope(input, chain) {
   return scope;
 }
 
-export function scopeKey(scope) {
+export function scopeKey(scope: DeploymentScope): string {
   return [scope.project, scope.environment, scope.chainId, scope.genesisHash, scope.label].map(encodeURIComponent).join('/');
 }
 
-export function lockScopes(scope, addresses) {
+export function lockScopes(scope: DeploymentScope, addresses: string[]): LockScope[] {
   const base = { project: scope.project, environment: scope.environment, chainId: scope.chainId, genesisHash: scope.genesisHash };
   return [
     { ...base, kind: 'deployment', label: scope.label },
@@ -32,7 +34,7 @@ export function lockScopes(scope, addresses) {
   ];
 }
 
-export function encryptionContext(record) {
+export function encryptionContext(record: { planHash: Hash; chain: ChainIdentity; actionId: ResourceId; signer: Address; nonce: DecimalString | number }): EncryptionContext {
   return { planHash: record.planHash, chainId: record.chain.id, genesisHash: record.chain.genesisHash.toLowerCase(), actionId: record.actionId, signer: record.signer.toLowerCase(), nonce: String(record.nonce) };
 }
 
@@ -41,7 +43,7 @@ function recordHash(record) {
   return hashJson(fields);
 }
 
-export function validateJournal(records, scope) {
+export function validateJournal(records: StoredJournalRecord[], scope: DeploymentScope): void {
   let previousHash = null;
   for (const [index, record] of records.entries()) {
     if (record.formatVersion !== 2 || record.sequence !== index + 1 || record.previousHash !== previousHash || record.recordHash !== recordHash(record)) throw new Error(`Journal integrity failure at sequence ${index + 1}.`);
@@ -55,7 +57,7 @@ export function validateJournal(records, scope) {
   }
 }
 
-export async function openStoredJournal({ journalStore, journalCipher, scope, fence, assertHeld }) {
+export async function openStoredJournal({ journalStore, journalCipher, scope, fence, assertHeld }: OpenStoredJournalInput): Promise<Journal> {
   const persisted = [];
   for await (const record of journalStore.read(scope)) persisted.push(record);
   validateJournal(persisted, scope);
@@ -101,7 +103,7 @@ export async function openStoredJournal({ journalStore, journalCipher, scope, fe
   };
 }
 
-export async function acquireLeases({ lockProvider, scope, addresses, planHash, principal, ttlMs = 30_000, onRenew, onRenewFailure }) {
+export async function acquireLeases({ lockProvider, scope, addresses, planHash, principal, ttlMs = 30_000, onRenew, onRenewFailure }: AcquireLeasesInput): Promise<Leases> {
   if (!Number.isSafeInteger(ttlMs) || ttlMs < 3_000) throw new Error('Lock ttlMs must be at least 3000.');
   if (principal !== undefined && (typeof principal !== 'string' || principal.length === 0)) throw new Error('Applying principal must be a nonempty string.');
   const holder = { id: randomUUID(), principal: principal ?? `${os.userInfo().username}@${os.hostname()}`, host: os.hostname(), pid: process.pid, planHash, acquiredAt: new Date().toISOString() };
@@ -153,7 +155,7 @@ export async function acquireLeases({ lockProvider, scope, addresses, planHash, 
   };
 }
 
-export async function inspectDeployment({ scope: input, chain, planHash, journalStore, stateStore, lockProvider }) {
+export async function inspectDeployment({ scope: input, chain, planHash, journalStore, stateStore, lockProvider }: InspectDeploymentInput): Promise<DeploymentStatus> {
   const scope = deploymentScope(input, chain);
   const records = [];
   for await (const record of journalStore.read(scope)) records.push(record);

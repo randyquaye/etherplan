@@ -4,6 +4,8 @@ import path from 'node:path';
 import { parseSpec } from '../spec/index.ts';
 import { compileConfig, compileSpec, configOptions } from './compile.ts';
 import { parseHcl } from './hcl.ts';
+import type { ParsedSpec } from '../spec/types.ts';
+import type { CommandOptions, CompiledSpec, LoadedConfig } from './types.ts';
 
 function isEthp(file) {
   return path.extname(file) === '.ethp';
@@ -29,7 +31,7 @@ async function readOptional(file) {
 }
 
 /** Returns the explicit spec path, or the only .ethp file or spec.json in the directory. */
-export async function findSpecFile(explicit, directory = process.cwd()) {
+export async function findSpecFile(explicit: string | undefined, directory: string = process.cwd()): Promise<string> {
   if (explicit) return path.resolve(explicit);
   const entries = (await readdir(directory, { withFileTypes: true })).filter(entry => entry.isFile() || entry.isSymbolicLink());
   const ethp = entries.filter(entry => isEthp(entry.name)).map(entry => entry.name).sort();
@@ -39,7 +41,7 @@ export async function findSpecFile(explicit, directory = process.cwd()) {
 }
 
 /** Compiles an .ethp file and its optional .ethpvars file into an unvalidated JSON spec. */
-export async function compileSpecFile(specFile) {
+export async function compileSpecFile(specFile: string): Promise<CompiledSpec> {
   const varsFile = sibling(specFile, '.ethpvars');
   const [source, vars] = await Promise.all([readFile(specFile, 'utf8'), readOptional(varsFile)]);
   const variables = vars === null ? null : parseHcl(display(varsFile), vars);
@@ -47,7 +49,7 @@ export async function compileSpecFile(specFile) {
 }
 
 /** Loads a JSON spec, or compiles an .ethp spec, and validates it with parseSpec. Engine errors name the .ethp file. */
-export async function loadSpec(specFile) {
+export async function loadSpec(specFile: string): Promise<ParsedSpec> {
   if (!isEthp(specFile)) return parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
   const compiled = await compileSpecFile(specFile);
   try {
@@ -58,7 +60,7 @@ export async function loadSpec(specFile) {
 }
 
 /** Loads the .ethpconfig beside an .ethp spec. JSON specs and missing files have no config. */
-export async function loadConfig(specFile, commands) {
+export async function loadConfig(specFile: string, commands: CommandOptions): Promise<LoadedConfig | null> {
   if (!isEthp(specFile)) return null;
   const file = sibling(specFile, '.ethpconfig');
   const text = await readOptional(file);
@@ -70,7 +72,7 @@ export async function loadConfig(specFile, commands) {
  * Applies config under the explicit CLI options. An explicit --signer-module replaces configured
  * signer addresses. Returns the merged options and the names that came from config.
  */
-export function withConfig(options, config, command, accepted) {
+export function withConfig(options: Record<string, string | boolean>, config: LoadedConfig | null, command: string, accepted: string[]): { options: Record<string, string | boolean>; configured: string[] } {
   if (!config) return { options, configured: [] };
   const configured = configOptions(config, command, accepted);
   if (options['signer-module']) {

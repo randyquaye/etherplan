@@ -1,5 +1,7 @@
 // @ts-nocheck
 import { createHash } from 'node:crypto';
+import type { Hex } from '../types.ts';
+import type { MetadataTail } from './types.ts';
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const IPFS_CHUNK_SIZE = 256 * 1024;
@@ -55,7 +57,7 @@ function combineLinks(links) {
  * Returns the IPFS CIDv0 multihash (`0x1220...`) that solc embeds for the metadata string.
  * The chunk and link layout follows solc's `libsolutil/IpfsHash.cpp`.
  */
-export function ipfsMetadataHash(text) {
+export function ipfsMetadataHash(text: string): Hex {
   const data = Buffer.from(text, 'utf8');
   const count = Math.max(1, Math.ceil(data.length / IPFS_CHUNK_SIZE));
   let level = [];
@@ -76,7 +78,7 @@ export function ipfsMetadataHash(text) {
 }
 
 /** Encodes a `0x1220...` multihash as a base58 CIDv0 string (`Qm...`). */
-export function cidV0(multihashHex) {
+export function cidV0(multihashHex: string): string {
   const bytes = hexToBytes(multihashHex);
   let number = BigInt(bytesToHex(bytes));
   let out = '';
@@ -137,7 +139,7 @@ function decodeItem(bytes, offset) {
  * Reads the solc CBOR metadata tail of runtime or creation code.
  * Returns `null` when the code has no valid tail. The result records the byte offset where the tail starts.
  */
-export function decodeMetadataTail(code) {
+export function decodeMetadataTail(code: string): MetadataTail | null {
   const text = code.startsWith('0x') ? code.slice(2) : code;
   if (text.length < 4 || text.length % 2 !== 0 || !/^[0-9a-fA-F]{4}$/.test(text.slice(-4))) return null;
   const length = parseInt(text.slice(-4), 16);

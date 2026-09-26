@@ -3,6 +3,8 @@ import { keccak256, stringToHex } from 'viem';
 import { canonicalJson, hashJson } from '../identity.ts';
 import { immutableEntries, normalizeCode } from '../verification/bytecode.ts';
 import { decodeMetadataTail, ipfsMetadataHash } from '../verification/metadata.ts';
+import type { Abi } from '../types.ts';
+import type { NormalizedArtifact, NormalizeOptions } from './types.ts';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -12,7 +14,7 @@ function plainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function codeBody(object) {
+export function codeBody(object: unknown): string | null {
   return typeof object === 'string' ? object.replace(/^0x/i, '').toLowerCase() : null;
 }
 
@@ -85,7 +87,7 @@ function assertAbiParameter(parameter, label) {
   }
 }
 
-export function assertAbi(abi, label) {
+export function assertAbi(abi: unknown, label: string): asserts abi is Abi {
   assert(Array.isArray(abi), `${label} has an incomplete artifact: it has no ABI.`);
   const kinds = new Set(['function', 'constructor', 'event', 'error', 'fallback', 'receive']);
   for (const [index, item] of abi.entries()) {
@@ -288,7 +290,7 @@ function namesOf(raw, parsed, options, label) {
  * from the matching build-info file. The result is plain JSON; `artifactHash` covers every other field,
  * with top-level ABI entries sorted for hashing while the returned ABI keeps its original order.
  */
-export function normalizeArtifact(raw, id, options = {}) {
+export function normalizeArtifact(raw: unknown, id: string, options: NormalizeOptions = {}): NormalizedArtifact {
   const label = id ?? 'Artifact';
   assert(plainObject(raw), `${label} is not a JSON object.`);
   const compilerOutput = options.compilerOutput ?? null;

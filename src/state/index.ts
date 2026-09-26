@@ -5,6 +5,7 @@ import path from 'node:path';
 import { isAddress } from 'viem';
 import { canonicalJson, hashJson } from '../identity.ts';
 import { validateCreationProof } from '../verification/creation-proof.ts';
+import type { ImportResourceInput, RecordResourceInput, StateFile } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const RESOURCE_ID = /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/;
@@ -99,7 +100,7 @@ function validateResource(id, resource, chain) {
   resource.transactions.forEach((transaction, index) => assertHash(transaction, `${id} transactions[${index}]`));
 }
 
-export function validateState(state) {
+export function validateState(state: unknown): StateFile {
   assert(isObject(state), 'State must be an object.');
   assertNoSecrets(state);
   assert(Object.keys(state).every(key => key === 'formatVersion' || key === 'chain' || key === 'resources' || key === 'lastPlanHash'), 'State has unknown fields.');
@@ -112,7 +113,7 @@ export function validateState(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
-export async function readState(file) {
+export async function readState(file: string): Promise<StateFile | null> {
   let text;
   try {
     text = await readFile(file, 'utf8');
@@ -129,7 +130,7 @@ export async function readState(file) {
   return validateState(state);
 }
 
-export async function writeStateAtomic(file, stateInput) {
+export async function writeStateAtomic(file: string, stateInput: StateFile): Promise<void> {
   const state = validateState(stateInput);
   const directory = path.dirname(file);
   await mkdir(directory, { recursive: true });
@@ -184,7 +185,7 @@ function assertSameCode(existing, verification, id) {
  * inputs, and live code hash takes the new artifact; its provenance, transactions, and prior fields are kept, and the
  * previous artifact evidence is appended to `artifactRevisions`.
  */
-export function importResource({ resource, verification, state: stateInput, chain, creationTransactionHash = null, rebaseline = false }) {
+export function importResource({ resource, verification, state: stateInput, chain, creationTransactionHash = null, rebaseline = false }: ImportResourceInput): StateFile {
   assert(resource?.kind === 'contract', 'Only a contract resource can be imported.');
   assert(verification?.id === resource.id && verification.address?.toLowerCase() === resource.address.toLowerCase(), 'Verification identity does not match the imported resource.');
   assert(verification.status === 'verified', `Cannot import ${resource.id} without verified live evidence.`);
@@ -282,7 +283,7 @@ function mergeTransactions(previous = [], current = []) {
   return transactions;
 }
 
-export function recordResource({ resource, verification, state: stateInput, chain, transactions = [] }) {
+export function recordResource({ resource, verification, state: stateInput, chain, transactions = [] }: RecordResourceInput): StateFile {
   assert(['contract', 'call', 'external'].includes(resource?.kind), 'State can record only a prepared contract, call, or external resource.');
   assert(verification?.id === resource.id && verification.address?.toLowerCase() === resource.address.toLowerCase(), 'Verification identity does not match the recorded resource.');
   assert(verification.status === 'verified', `Cannot record ${resource.id} without a verified postcondition.`);

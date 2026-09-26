@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { isAddress } from 'viem';
+import type { ExecutionWaves, SchedulableResource, Schedule, ScheduleOptions, SchedulePlan } from './types.ts';
 
 // Factories whose runtime lets any account deploy, so the paying account cannot change the result.
 export const PERMISSIONLESS_FACTORY_CODE_HASHES = new Set([
@@ -12,13 +13,13 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-export function poolable(resource) {
+export function poolable(resource: SchedulableResource): boolean {
   return resource.kind === 'contract' && resource.action === 'deploy' && resource.senderIndependent === true &&
     (resource.signerRole ?? 'deployer') === 'deployer' &&
     PERMISSIONLESS_FACTORY_CODE_HASHES.has(resource.factory?.codeHash?.toLowerCase());
 }
 
-export function executionWaves(resources) {
+export function executionWaves(resources: SchedulableResource[]): ExecutionWaves {
   const satisfied = new Set(resources.filter(resource => resource.action === 'reuse').map(resource => resource.id));
   const remaining = new Map(resources.filter(resource => ['deploy', 'call'].includes(resource.action)).map(resource => [resource.id, resource]));
   const waves = [];
@@ -67,7 +68,7 @@ function pack(actions, pool, parallel, pipeline) {
   return batches.map(batch => batch.sort((a, b) => a.order - b.order));
 }
 
-export function createSchedule(plan, deployers, options = {}) {
+export function createSchedule(plan: SchedulePlan, deployers: string[], options: ScheduleOptions = {}): Schedule {
   const { owner = null, parallel = true, pipeline = false } = options;
   assert(plan && Array.isArray(plan.resources), 'Schedule needs a plan with resources[].');
   assert(Array.isArray(deployers) && deployers.length > 0, 'Supply at least one deployer address.');

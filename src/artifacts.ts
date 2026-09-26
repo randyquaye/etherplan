@@ -3,6 +3,8 @@ import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hashJson } from './identity.ts';
 import { assertAbi, codeBody, normalizeArtifact } from './artifacts/normalize.ts';
+import type { Artifacts, BuildContext } from './artifacts/types.ts';
+import type { ParsedSpec } from './spec/types.ts';
 
 export { assertAbi, normalizeArtifact };
 
@@ -79,7 +81,7 @@ function compilationTarget(raw) {
 }
 
 /** Finds the build-info compiler output and ASTs from the same compilation as an artifact file, or returns null. */
-export async function findBuildContext(file, raw, cache = new Map()) {
+export async function findBuildContext(file: string, raw: unknown, cache: Map<string, Promise<unknown>> = new Map()): Promise<BuildContext | null> {
   const directory = path.dirname(file);
   if (typeof raw._format === 'string' && raw._format.startsWith('hh-sol-artifact')) {
     const debugFile = file.replace(/\.json$/, '.dbg.json');
@@ -107,7 +109,7 @@ export async function findBuildContext(file, raw, cache = new Map()) {
 }
 
 /** Loads and normalizes every contract artifact named by a spec. Returns a Map keyed by contract ID. */
-export async function loadArtifacts(spec, specFile) {
+export async function loadArtifacts(spec: ParsedSpec, specFile: string): Promise<Artifacts> {
   const artifacts = new Map();
   const normalized = new Map();
   const cache = new Map();
@@ -141,7 +143,7 @@ function constant(value) {
 }
 
 /** Writes one optional viem TypeScript adapter per artifact. Planning and deployment do not need these files. */
-export async function generateAdapters(artifacts, outputDirectory) {
+export async function generateAdapters(artifacts: Artifacts, outputDirectory: string): Promise<void> {
   await mkdir(outputDirectory, { recursive: true });
   for (const [id, artifact] of [...artifacts].sort(([left], [right]) => left.localeCompare(right))) {
     assert(SAFE_ID.test(id), `Adapter ID ${id} is not a safe file name.`);

@@ -3,6 +3,10 @@ import { encodeAbiParameters, encodeDeployData, encodeFunctionData, isAddress } 
 import { assertAbi } from '../artifacts.ts';
 import { linkBytecode } from '../verification/bytecode.ts';
 import { abiArguments, normalizeOutputs } from '../verification/values.ts';
+import type { AbiFunction } from 'viem';
+import type { NormalizedArtifact } from '../artifacts/types.ts';
+import type { PreparedResource } from '../planning/types.ts';
+import type { Abi, Address, Hex, JsonValue } from '../types.ts';
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -17,7 +21,7 @@ function withContext(label, work) {
 }
 
 /** A name and argument count must identify exactly one ABI function. */
-export function abiFunction(abi, name, argumentCount, label) {
+export function abiFunction(abi: Abi | undefined, name: string, argumentCount: number, label: string): AbiFunction {
   assert(Array.isArray(abi), `${label} needs an ABI for ${name}.`);
   const matches = abi.filter(item => item?.type === 'function' && item.name === name && (item.inputs ?? []).length === argumentCount);
   assert(matches.length === 1, `${label} has ${matches.length === 0 ? 'no' : 'more than one'} ABI function ${name} with ${argumentCount} argument(s).`);
@@ -39,7 +43,7 @@ function selectedLibraries(references, libraries) {
 }
 
 /** Validate both creation and runtime links, including contracts already on-chain. */
-export function validateLibraries(artifact, libraries = {}, label = 'Contract') {
+export function validateLibraries(artifact: NormalizedArtifact, libraries: Record<string, Address> = {}, label = 'Contract'): void {
   return withContext(`${label} libraries`, () => {
     const creation = artifact.bytecode?.linkReferences ?? {};
     const runtime = artifact.deployedBytecode?.linkReferences ?? {};
@@ -51,7 +55,7 @@ export function validateLibraries(artifact, libraries = {}, label = 'Contract') 
   });
 }
 
-export function encodeConstructor(artifact, inputs, libraries = {}, label = 'Contract') {
+export function encodeConstructor(artifact: NormalizedArtifact, inputs: JsonValue[], libraries: Record<string, Address> = {}, label = 'Contract'): Hex {
   return withContext(`${label} constructor`, () => {
     const constructors = artifact.abi.filter(item => item?.type === 'constructor');
     assert(constructors.length <= 1, 'Artifact has more than one ABI constructor.');
@@ -62,7 +66,7 @@ export function encodeConstructor(artifact, inputs, libraries = {}, label = 'Con
   });
 }
 
-export function encodeMethod(abi, method, values, label) {
+export function encodeMethod(abi: Abi | undefined, method: string, values: JsonValue[], label: string): Hex {
   return withContext(`${label} method ${method}`, () => {
     const fn = abiFunction(abi, method, values.length, label);
     const args = encodedArguments(fn.inputs ?? [], values, 'argument');
@@ -85,7 +89,7 @@ function validateCheck(abi, check, label) {
 }
 
 /** Synchronous, chain-independent checks for every prepared resource. */
-export function validateResources(resources) {
+export function validateResources(resources: PreparedResource[]): PreparedResource[] {
   for (const resource of resources) {
     if (resource.kind === 'contract') {
       const artifact = resource.artifact;

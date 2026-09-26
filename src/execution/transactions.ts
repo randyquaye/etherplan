@@ -1,5 +1,8 @@
 // @ts-nocheck
 import { isAddress, isAddressEqual, keccak256, parseTransaction, recoverTransactionAddress } from 'viem';
+import type { PlannedResource } from '../planning/types.ts';
+import type { Address, Client, DecimalString, Hash, Hex } from '../types.ts';
+import type { BroadcastOutcome, EstimateGasInput, FeeOverride, IntentRecord, Receipt, ReceiptJson, ReceiptWait, SignedBytes, SignedRecord, SignerAccount, TransactionEnvelope, WaitForReceiptInput } from './types.ts';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -10,7 +13,7 @@ function toBigInt(value, name) {
   throw new Error(`${name} must be a non-negative integer.`);
 }
 
-export async function feesFor(client, override) {
+export async function feesFor(client: Client, override?: FeeOverride | null): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
   const fees = override ?? await client.estimateFeesPerGas();
   return {
     maxFeePerGas: toBigInt(fees.maxFeePerGas, 'maxFeePerGas'),
@@ -18,18 +21,18 @@ export async function feesFor(client, override) {
   };
 }
 
-export async function estimateGasLimit(client, { from, tx, gasMultiplier }) {
+export async function estimateGasLimit(client: Client, { from, tx, gasMultiplier }: EstimateGasInput): Promise<bigint> {
   const estimate = await client.estimateGas({ account: from, to: tx.to, data: tx.data, value: toBigInt(tx.value, 'value') });
   const scale = BigInt(Math.round(gasMultiplier * 1000));
   return (estimate * scale + 999n) / 1000n;
 }
 
-export function maximumCost(envelope) {
+export function maximumCost(envelope: Pick<TransactionEnvelope, 'gas' | 'maxFeePerGas' | 'value'>): bigint {
   return envelope.gas * envelope.maxFeePerGas + envelope.value;
 }
 
 // Signs with the supplied account, then decodes the bytes and recovers the sender, so a faulty signer cannot change the payload.
-export async function signEnvelope(signer, envelope) {
+export async function signEnvelope(signer: SignerAccount, envelope: TransactionEnvelope): Promise<SignedBytes> {
   const result = await signer.signTransaction({ type: 'eip1559', ...envelope });
   const rawTransaction = typeof result === 'string' ? result : result?.rawTransaction;
   if (typeof rawTransaction !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawTransaction)) throw new Error('Signer did not return a raw transaction.');
@@ -51,7 +54,7 @@ export async function signEnvelope(signer, envelope) {
 
 // Recovery must validate bytes from disk before resending them. The saved plan supplies
 // the payload, while the intent supplies the live nonce, gas and fee choices.
-export async function validateSignedTransaction(signed, intent, planned, chainId) {
+export async function validateSignedTransaction(signed: SignedRecord, intent: IntentRecord, planned: PlannedResource, chainId: number): Promise<bigint> {
   if (typeof signed.rawTransaction !== 'string' || !/^0x(?:[0-9a-fA-F]{2})+$/.test(signed.rawTransaction)) throw new Error('Saved signed transaction has malformed raw bytes.');
   if (typeof signed.transactionHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(signed.transactionHash) ||
     keccak256(signed.rawTransaction).toLowerCase() !== signed.transactionHash.toLowerCase()) throw new Error('Signed transaction hash differs from its raw bytes.');
@@ -99,7 +102,7 @@ function errorText(error) {
   return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{64,}/g, '[redacted hex]');
 }
 
-export async function broadcast(client, rawTransaction) {
+export async function broadcast(client: Client, rawTransaction: Hex): Promise<BroadcastOutcome> {
   try {
     await client.request({ method: 'eth_sendRawTransaction', params: [rawTransaction] });
     return { accepted: true };
@@ -112,7 +115,7 @@ export async function broadcast(client, rawTransaction) {
   }
 }
 
-export async function findReceipt(client, hash) {
+export async function findReceipt(client: Client, hash: Hash): Promise<Receipt | null> {
   try {
     return await client.getTransactionReceipt({ hash });
   } catch (error) {
@@ -121,7 +124,7 @@ export async function findReceipt(client, hash) {
   }
 }
 
-export async function findKnownReceipt(client, signedVariants) {
+export async function findKnownReceipt(client: Client, signedVariants: { transactionHash: Hash }[]): Promise<Receipt | null> {
   for (const signed of signedVariants) {
     const receipt = await findReceipt(client, signed.transactionHash);
     if (receipt) return receipt;
@@ -129,13 +132,13 @@ export async function findKnownReceipt(client, signedVariants) {
   return null;
 }
 
-export async function nonceConsumed(client, signer, nonce) {
+export async function nonceConsumed(client: Client, signer: Address, nonce: DecimalString | number | bigint): Promise<boolean> {
   const latest = await client.getTransactionCount({ address: signer, blockTag: 'latest' });
   return BigInt(latest) > BigInt(nonce);
 }
 
 // Waits until the transaction has a receipt, another transaction uses its nonce, or the timeout passes.
-export async function waitForReceipt(client, { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }) {
+export async function waitForReceipt(client: Client, { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }: WaitForReceiptInput): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
   const variants = signedVariants ?? [{ transactionHash: hash }];
   for (;;) {
@@ -150,7 +153,7 @@ export async function waitForReceipt(client, { hash, signedVariants, signer, non
   }
 }
 
-export function receiptJson(receipt) {
+export function receiptJson(receipt: Receipt): ReceiptJson {
   return {
     transactionHash: receipt.transactionHash,
     status: receipt.status,

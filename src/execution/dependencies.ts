@@ -13,7 +13,9 @@ const SOURCES = {
 };
 const OPTIONAL = new Set(['transactionFor', 'recordResource']);
 
-export async function loadDependencies(override = {}) {
+import type { ApplyDependencies } from './types.ts';
+
+export async function loadDependencies(override: Partial<ApplyDependencies> = {}): Promise<ApplyDependencies> {
   const modules = new Map();
   const loaded = {};
   for (const [name, [specifier, exported]] of Object.entries(SOURCES)) {

@@ -11,6 +11,8 @@ import { acquireLock } from './lock.ts';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.ts';
 import { checkFactory, jsonSafe, preflight } from './preflight.ts';
 import { broadcast, estimateGasLimit, feesFor, findKnownReceipt, findReceipt, maximumCost, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt } from './transactions.ts';
+import type { VerificationResult } from '../verification/types.ts';
+import type { ApplyInput, ApplyResult, VerificationSummary } from './types.ts';
 
 export { ApplyError } from './errors.ts';
 export { acquireLock, LockError } from './lock.ts';
@@ -55,7 +57,7 @@ async function report(ctx, type, fields = {}) {
   else await ctx.config.reporter?.emit(event);
 }
 
-export function summarizeVerification(verification) {
+export function summarizeVerification(verification: VerificationResult): VerificationSummary {
   return jsonSafe({
     status: verification.status,
     address: verification.address,
@@ -1063,7 +1065,7 @@ async function run(ctx) {
 }
 
 // Applies a pinned plan under one writer lock, with a durable journal record before every broadcast.
-export async function applyPlan({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }) {
+export async function applyPlan({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }: ApplyInput): Promise<ApplyResult> {
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
   if (options.replacementFees !== undefined && (!options.replacementFees ||
     ['maxFeePerGas', 'maxPriorityFeePerGas', 'maxCostWei'].some(field => !/^[0-9]+$/.test(String(options.replacementFees[field] ?? ''))))) {

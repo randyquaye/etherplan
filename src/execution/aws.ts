@@ -6,6 +6,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { hashJson, canonicalJson } from '../identity.ts';
 import { scopeKey } from './backends.ts';
+import type { AwsBackend, AwsBackendOptions } from './types.ts';
 
 const lockKey = scope => `LOCK#${[scope.project, scope.environment, scope.chainId, scope.genesisHash, scope.kind, scope.label ?? scope.address].map(encodeURIComponent).join('/')}`;
 const deploymentKey = scope => `DEPLOY#${scopeKey(scope)}`;
@@ -29,7 +30,7 @@ function checks(tableName, fence) {
   return requireFence(fence).map(item => ({ ConditionCheck: { ...item.ConditionCheck, TableName: tableName } }));
 }
 
-export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherplan', dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }), kms = new KMSClient({}), s3 = new S3Client({}) }) {
+export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherplan', dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } }), kms = new KMSClient({}), s3 = new S3Client({}) }: AwsBackendOptions): AwsBackend {
   if (!tableName || !kmsKeyId) throw new Error('AWS backend needs tableName and kmsKeyId.');
   const send = command => dynamodb.send(command);
 

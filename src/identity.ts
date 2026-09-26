@@ -1,7 +1,8 @@
 // @ts-nocheck
 import { keccak256, stringToHex } from 'viem';
+import type { Hash } from './types.ts';
 
-export function canonicalJson(value) {
+export function canonicalJson(value: unknown): string {
   function normalize(item) {
     if (item === null || typeof item === 'string' || typeof item === 'boolean') return item;
     if (typeof item === 'number' && Number.isFinite(item)) return item;
@@ -15,6 +16,6 @@ export function canonicalJson(value) {
   return JSON.stringify(normalize(value));
 }
 
-export function hashJson(value) {
+export function hashJson(value: unknown): Hash {
   return keccak256(stringToHex(canonicalJson(value)));
 }
