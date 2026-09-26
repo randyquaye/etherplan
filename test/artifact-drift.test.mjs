@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { keccak256 } from 'viem';
+import { normalizeArtifact } from '../src/artifacts.mjs';
 import { applyPlan } from '../src/execution/index.mjs';
 import { hashJson } from '../src/identity.mjs';
 import { createPlan, prepareResources } from '../src/planning/index.mjs';
@@ -124,6 +125,27 @@ test('an artifact-only rebuild of an unchanged CREATE2 deployment is reused, wit
   const unchanged = await planVault({ artifact: original, client, state });
   assert.equal(unchanged.action, 'reuse');
   assert.equal(unchanged.observation.stateComparison.artifactDrift, undefined);
+});
+
+test('a saved deployment does not drift when only top-level ABI order changes', async () => {
+  const raw = {
+    abi: [
+      { type: 'constructor', stateMutability: 'nonpayable', inputs: [{ name: 'destination', type: 'bytes32' }] },
+      { type: 'function', name: 'value', stateMutability: 'view', inputs: [], outputs: [{ name: '', type: 'uint256' }] },
+      { type: 'function', name: 'ping', stateMutability: 'view', inputs: [], outputs: [] },
+    ],
+    bytecode: { object: RUNTIME },
+    deployedBytecode: { object: RUNTIME, immutableReferences: {} },
+  };
+  const first = normalizeArtifact(raw, 'Vault');
+  const reordered = normalizeArtifact({ ...raw, abi: [...raw.abi].reverse() }, 'Vault reordered');
+  const client = mockChain();
+  const resource = prepared(vaultSpec(), first);
+  const state = recordResource({ resource, verification: await verifyResource(resource, client), state: null, chain: chainIdentity, transactions: [DEPLOY_TX] });
+  const plan = await createPlan({ spec: vaultSpec(), artifacts: new Map([['vault', reordered]]), client, state });
+  assert.equal(plan.resources[0].action, 'reuse');
+  assert.equal(plan.resources[0].observation.stateComparison.artifactMatches, true);
+  assert.equal(plan.resources[0].observation.stateComparison.artifactDrift, undefined);
 });
 
 test('artifact drift stays blocked for changed live code, runtime, checks, missing proof, or an import', async () => {

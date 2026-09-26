@@ -1,5 +1,5 @@
 import { keccak256, stringToHex } from 'viem';
-import { hashJson } from '../identity.mjs';
+import { canonicalJson, hashJson } from '../identity.mjs';
 import { immutableEntries, normalizeCode } from '../verification/bytecode.mjs';
 import { decodeMetadataTail, ipfsMetadataHash } from '../verification/metadata.mjs';
 
@@ -51,9 +51,15 @@ function sameReferences(left, right) {
   return hashJson(left) === hashJson(right);
 }
 
+function canonicalAbi(abi) {
+  return abi
+    .map(item => item.type === 'function' ? { ...item, outputs: item.outputs ?? [] } : item)
+    .map(canonicalJson)
+    .sort();
+}
+
 function sameAbi(left, right) {
-  const normalize = abi => abi.map(item => item.type === 'function' ? { ...item, outputs: item.outputs ?? [] } : item);
-  return hashJson(normalize(left)) === hashJson(normalize(right));
+  return hashJson(canonicalAbi(left)) === hashJson(canonicalAbi(right));
 }
 
 function assertAbiParameter(parameter, label) {
@@ -278,7 +284,8 @@ function namesOf(raw, parsed, options, label) {
  * Normalizes a Foundry, Hardhat 2, Hardhat 3, or solc standard-JSON contract artifact.
  * `options.sources` holds source-unit ASTs from the same compilation (an array, or solc `output.sources`), so each
  * immutable reference gets its variable name and public getter. `options.compilerOutput` is the solc contract output
- * from the matching build-info file. The result is plain JSON; `artifactHash` covers every other field.
+ * from the matching build-info file. The result is plain JSON; `artifactHash` covers every other field,
+ * with top-level ABI entries sorted for hashing while the returned ABI keeps its original order.
  */
 export function normalizeArtifact(raw, id, options = {}) {
   const label = id ?? 'Artifact';
@@ -317,5 +324,5 @@ export function normalizeArtifact(raw, id, options = {}) {
     immutables: namedImmutables(deployedBytecode.immutableReferences, units, abi, label),
     buildIdentity,
   };
-  return { ...normalized, artifactHash: hashJson(normalized) };
+  return { ...normalized, artifactHash: hashJson({ ...normalized, abi: canonicalAbi(abi) }) };
 }

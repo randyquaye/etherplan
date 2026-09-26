@@ -6,6 +6,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { hashJson } from '../src/identity.mjs';
 import { generateAdapters, loadArtifacts, normalizeArtifact } from '../src/artifacts.mjs';
+import { prepareResources } from '../src/planning/index.mjs';
 import { linkBytecode, linkPlaceholder } from '../src/verification/index.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -80,7 +81,8 @@ function staleAst() {
 test('a Foundry artifact normalizes to plain JSON with named immutables and a verified build identity', () => {
   const artifact = normalizeArtifact(foundry('Sample'), 'Sample');
   const { artifactHash, ...rest } = artifact;
-  assert.equal(artifactHash, hashJson(rest));
+  assert.match(artifactHash, /^0x[0-9a-f]{64}$/);
+  assert.notEqual(artifactHash, hashJson(rest));
   assert.equal(artifact.contractName, 'Sample');
   assert.equal(artifact.sourceName, 'src/Sample.sol');
   assert.deepEqual(artifact.immutables.map(({ name, visibility, getter }) => ({ name, visibility, getter })), [
@@ -97,6 +99,75 @@ test('a Foundry artifact normalizes to plain JSON with named immutables and a ve
   assert.equal(artifact.buildIdentity.compilationTarget, 'src/Sample.sol:Sample');
   assert.equal(JSON.stringify(artifact), JSON.stringify(JSON.parse(JSON.stringify(artifact))));
   assert.equal(normalizeArtifact(foundry('Sample'), 'again').artifactHash, artifactHash);
+});
+
+test('top-level ABI order preserves the original ABI and deployment identity', () => {
+  const raw = foundry('Sample');
+  const reordered = structuredClone(raw);
+  reordered.abi.reverse();
+  const first = normalizeArtifact(raw, 'Sample');
+  const second = normalizeArtifact(reordered, 'Sample reordered');
+  assert.deepEqual(first.abi, raw.abi);
+  assert.deepEqual(second.abi, reordered.abi);
+  assert.equal(second.artifactHash, first.artifactHash);
+
+  const withoutOutputs = foundry('Sample');
+  delete withoutOutputs.abi.find(item => item.name === 'bind').outputs;
+  assert.equal(normalizeArtifact(withoutOutputs, 'No empty outputs').artifactHash, first.artifactHash);
+
+  const spec = {
+    schema: 1,
+    chainId: 31337,
+    factory: { address: '0x4e59b44847b379578588920cA78FbF26c0B4956C', codeHash: `0x${'11'.repeat(32)}` },
+    contracts: [{ id: 'sample', artifact: 'Sample.json', salt: `0x${'22'.repeat(32)}`, args: ['0x0000000000000000000000000000000000000001', `0x${'33'.repeat(32)}`] }],
+  };
+  const originalResource = prepareResources(spec, undefined, new Map([['sample', first]])).resources[0];
+  const reorderedResource = prepareResources(spec, undefined, new Map([['sample', second]])).resources[0];
+  assert.equal(reorderedResource.initcode, originalResource.initcode);
+  assert.equal(reorderedResource.address, originalResource.address);
+});
+
+test('metadata and build-info compare ABI entries without relaxing parameter or entry checks', () => {
+  const raw = foundry('Sample');
+  raw.abi.reverse();
+  const compiler = compilerOutput('Sample');
+  assert.doesNotThrow(() => normalizeArtifact(raw, 'Metadata and build-info', { compilerOutput: compiler }));
+
+  const hardhat = hardhat2('Sample');
+  hardhat.abi.reverse();
+  assert.doesNotThrow(() => normalizeArtifact(hardhat, 'Build-info', { compilerOutput: compiler }));
+  const wrongBuildInfo = structuredClone(hardhat);
+  wrongBuildInfo.abi.find(item => item.type === 'constructor').inputs[0].type = 'uint256';
+  assert.throws(() => normalizeArtifact(wrongBuildInfo, 'Wrong build-info', { compilerOutput: compiler }), /ABI differs from its build-info compiler output/);
+
+  const changes = [
+    abi => { abi.find(item => item.type === 'constructor').inputs[0].type = 'uint256'; },
+    abi => { abi.find(item => item.type === 'constructor').inputs.reverse(); },
+    abi => { abi.pop(); },
+    abi => { abi.push(structuredClone(abi.find(item => item.type === 'function'))); },
+  ];
+  const noMetadata = foundry('Sample');
+  delete noMetadata.rawMetadata;
+  delete noMetadata.metadata;
+  const baselineHash = normalizeArtifact(noMetadata, 'Baseline').artifactHash;
+  for (const change of changes) {
+    const edited = structuredClone(raw);
+    change(edited.abi);
+    assert.throws(() => normalizeArtifact(edited, 'Edited'), /ABI differs from its compiler metadata/);
+    delete edited.rawMetadata;
+    delete edited.metadata;
+    assert.notEqual(normalizeArtifact(edited, 'Edited without metadata').artifactHash, baselineHash);
+  }
+});
+
+test('tuple component order remains part of ABI identity', () => {
+  const raw = foundry('Sample');
+  delete raw.rawMetadata;
+  delete raw.metadata;
+  raw.abi.push({ type: 'function', name: 'tupleValue', inputs: [{ name: 'value', type: 'tuple', components: [{ name: 'first', type: 'address' }, { name: 'second', type: 'uint256' }] }], outputs: [] });
+  const changed = structuredClone(raw);
+  changed.abi.at(-1).inputs[0].components.reverse();
+  assert.notEqual(normalizeArtifact(raw, 'Tuple').artifactHash, normalizeArtifact(changed, 'Reordered tuple').artifactHash);
 });
 
 test('Foundry, Hardhat 3, solc, and Hardhat 2 with build-info normalize to the same bytecode model', () => {
