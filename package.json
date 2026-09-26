@@ -5,7 +5,7 @@
   "license": "MIT",
   "type": "module",
   "files": [
-    "src/",
+    "dist/",
     "docs/production-backends.md"
   ],
   "repository": {
@@ -18,14 +18,22 @@
     "tag": "beta"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18.0"
   },
   "bin": {
-    "etherplan": "src/cli.mjs"
+    "etherplan": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "scripts": {
-    "test": "node --test test/*.test.mjs test/integration/*.test.mjs",
-    "check": "for file in src/*.mjs src/*/*.mjs test/*.mjs test/*/*.mjs; do node --check \"$file\" || exit; done"
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.ts test/integration/*.test.ts",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1140.0",
@@ -35,6 +43,8 @@
     "viem": "2.56.8"
   },
   "devDependencies": {
-    "@cdktn/hcl2json": "0.24.0"
+    "@cdktn/hcl2json": "0.24.0",
+    "@types/node": "^22.20.4",
+    "typescript": "7.0.2"
   }
 }

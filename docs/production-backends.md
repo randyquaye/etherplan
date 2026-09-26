@@ -13,7 +13,7 @@ Production applies require an explicit positive `confirmations` value in deploym
 ## Programmatic apply
 
 ```js
-import { applyPlan, createAwsBackend, createSignerServiceProvider } from './src/core.mjs';
+import { applyPlan, createAwsBackend, createSignerServiceProvider } from 'etherplan';
 
 const backend = createAwsBackend({
   tableName: 'etherplan-deployments',
@@ -59,9 +59,9 @@ The DynamoDB table has string partition key `PK` and string sort key `SK`. Enabl
 For an existing installation, stop all apply runners and reconcile every previously signed transaction to the chosen confirmation depth before upgrading all runners together. Older journal entries have no signer index entry; mixed-version runners cannot safely share a signer across labels. A custom remote `journalStore` must provide `signedForSigner(scope, address)` with consistent reads and write each signed entry atomically with its journal append under the signer fence.
 
 ```sh
-node src/cli.mjs plan --spec spec.json --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
-node src/cli.mjs apply --spec spec.json --plan plan.json --backend backend.json --signer-module signer.mjs
-node src/cli.mjs status --plan plan.json --backend backend.json
+etherplan plan --spec spec.json --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
+etherplan apply --spec spec.json --plan plan.json --backend backend.json --signer-module signer.mjs
+etherplan status --plan plan.json --backend backend.json
 ```
 
 A signer module exports `signerProvider` (and optionally `signerRoles`). It can use `createSignerServiceProvider`, a hardware wallet, or an organization-specific signer. `status` is read-only: it reports lock holder and expiry, active or abandoned lease state, plan hash, last journal phase, sequence, and state version without decrypting signed bytes.
@@ -73,7 +73,7 @@ A signer module exports `signerProvider` (and optionally `signerRoles`). It can 
 For example, save this as `signer.mjs` in a project that has Etherplan installed:
 
 ```js
-import { createKmsSignerProvider } from 'etherplan/src/core.mjs';
+import { createKmsSignerProvider } from 'etherplan';
 
 export const signerRoles = { deployer: ['deployer-a', 'deployer-b'] };
 export const signerProvider = await createKmsSignerProvider({
