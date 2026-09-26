@@ -1,6 +1,6 @@
 # Etherplan
 
-Etherplan is a command-line tool for desired EVM contract state. It reads a JSON specification and compiled Solidity artifacts, compares them with a chain, writes a reviewable plan, applies that saved plan, and verifies the result. The chain is the source of observed truth. A local state file records identity and provenance.
+Etherplan is a command-line tool for desired EVM contract state. It reads a JSON or HCL specification and compiled Solidity artifacts, compares them with a chain, writes a reviewable plan, applies that saved plan, and verifies the result. The chain is the source of observed truth. A local state file records identity and provenance.
 
 Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify existing contracts and explicit externals, link libraries, and run declared post-deployment calls. It does not destroy contracts, mutate immutables in place, infer an upgrade policy, or deploy L2 contracts.
 
@@ -30,6 +30,78 @@ Mark owner-only configuration calls with `"ownerOnly": true`. A call with method
 
 See [the neutral state fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/state-fixture.json) for the schema and [the parallel fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/parallel-lab.json) for dependent CREATE2 contracts. These are local test inputs, not network deployment recommendations. Keep signer secrets out of the specification.
 
+## Write the spec in HCL
+
+Etherplan also reads a Terraform-style `.ethp` file. It compiles `main.ethp`, and `main.ethpvars` from the same directory, into a `schema: 2` JSON spec, then validates, plans, hashes, and applies that spec exactly as it would the JSON. [The lab fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.ethp) and [its JSON form](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.json) show a full example.
+
+```hcl
+chain_id = 31337
+
+resource "contract" "registry" {
+  artifact = "Registry.json"
+  salt     = "0x…"
+  args     = [var.owner]
+}
+
+resource "contract" "portal" {
+  artifact = "Portal.json"
+  salt     = "0x…"
+  args     = [contracts.registry.address, "86400"]
+  after    = [contracts.registry]
+}
+
+resource "check" "portalRefs" {
+  target   = contracts.portal
+  REGISTRY = contracts.registry.address
+}
+
+resource "call" "setOwner" {
+  target = contracts.portal
+  method = "setOwner"
+  args   = [var.owner]
+}
+
+resource "check" "setOwnerResult" {
+  target = calls.setOwner
+  getter = "owner"
+  before = var.previous_owner
+  equals = var.owner
+}
+```
+
+`main.ethpvars` holds literal assignments, such as `owner = "0x…"`. Each `var.owner` compiles to `{ "ref": "values.owner" }`, and `contracts.registry.address` and `externals.name.address` compile to the same references as JSON. A missing or unused variable is an error. The vars file cannot reference contracts or set `chain_id`, which must be a literal in the `.ethp` file. Because the variables are part of the compiled spec, editing them after `plan` makes a saved-plan apply stop with `stale-spec`.
+
+Etherplan reads a subset of HCL syntax and does not evaluate HCL expressions. A file can contain attributes, blocks, comments, quoted strings, whole numbers, `true`, `false`, `null`, lists, objects, and references. `target` and `after` take resources such as `contracts.registry`, `externals.token`, or `calls.setOwner`. Heredocs, string templates, arithmetic, functions, conditionals, `for` expressions, and index expressions are errors that name the file, line, and column. Write `var.owner`, not `"${var.owner}"`. A number is a whole number within JavaScript's safe range (±9007199254740991), with no decimal point or exponent; quote larger integers, such as wei amounts, as decimal strings: `"1000000000000000000"`.
+
+Resource types are `contract`, `external`, `call`, and `check`. Attributes are snake_case: `code_hash`, `signer_role`, `sender_independent`, `owner_only`, and `transfers_ownership` in resources, and `chain_id`, `dependency_mode`, and `execution_assumptions` at the top level. Other names, such as `artifact`, `args`, `salt`, `method`, `libraries`, and `abi`, match the JSON fields. A top-level `factory` block with `address` and `code_hash` sets the CREATE2 factory. `args` are positional. A deployable contract or a call needs `args`, even `[]`. Block order has no effect: contracts and calls are sorted by ID, so the spec hash does not depend on the order of blocks in the file.
+
+The compiled spec uses split dependencies. A reference such as `contracts.registry.address` resolves the predicted address but does not wait for the deployment; `after = [contracts.registry]` waits for the verified contract. Set `dependency_mode = "compatibility"` to make every reference an execution barrier. An entry in `execution_assumptions` names its consumer and reference directly: `{ consumer = contracts.portal, location = "args[0]", reference = contracts.registry.address, reason = "…" }`.
+
+A check block is not a resource. A block that targets a contract or external lists getters and their expected values, and folds into that resource's `checks`. Several blocks can target one resource, but each getter can appear only once. For a getter named `target`, `getter`, `args`, `before`, `equals`, or `after`, write `getter = "target"` and `equals = …` instead. Each call needs exactly one check block that targets it, with `getter`, optional getter `args`, `before`, and `equals`; these become the call's `check` and `before`.
+
+Run `etherplan compile --spec main.ethp` to print the canonical JSON spec that the other commands use. `spec.json` remains supported.
+
+### Config defaults
+
+`main.ethpconfig`, beside `main.ethp`, sets defaults for command-line options:
+
+```hcl
+defaults {
+  state   = ".etherplan/state.json"
+  backend = "backend.json"
+}
+
+command "plan" {
+  out       = "plan.json"
+  pipeline  = true
+  deployers = ["0x…"]
+}
+```
+
+Config can set `state`, `journal`, `backend`, `out`, `deployers`, `owner`, `parallel`, and `pipeline`, and a command block can set only the options that command accepts. `out` goes in a command block, because it names a plan file for `plan` and a directory for `adapters`. A flag on the command line overrides the command block, which overrides `defaults`. An explicit `--signer-module` replaces configured deployers and owner. Paths in config are relative to the config file; paths given as flags stay relative to the working directory. A flag cannot turn off a boolean that config sets; set `parallel = false` in that command's block instead. Commands print the options they took from config on stderr.
+
+Config never sets `--plan`, `--max-spend-wei`, `--signer-module`, `--id`, `--creation-tx`, or `--rebaseline`, so `apply` without `--plan` still creates a fresh plan and asks for approval. Keep signer keys in the environment. Config options are not part of the spec hash; settings that a saved plan pins, such as signers and `parallel`, must still match it. JSON specs do not read a config file.
+
 ## Validate, plan, apply, and verify
 
 Run offline validation in CI without an RPC URL or signer keys:
@@ -40,7 +112,7 @@ etherplan impact --spec path/to/spec.json --value owner
 etherplan validate --spec path/to/spec.json
 ```
 
-When the working directory contains `spec.json`, you can omit `--spec` for any command. For example, run `etherplan validate` from that directory. An explicit `--spec` path takes precedence.
+When the working directory contains `spec.json` or one `.ethp` file, you can omit `--spec` for any command. For example, run `etherplan validate` from that directory. Etherplan stops if the directory has both, or more than one `.ethp` file. An explicit `--spec` path takes precedence.
 
 `validate` checks the complete spec, dependency graph, artifacts, declared source and contract names, ABI getters and expected values, constructor arguments, linked libraries, and every call method and argument. Declared `source` and `name` must exactly match identities present in the artifact; missing identities are errors. An external with checks must provide an ABI. Validation checks all declarations even when the desired chain state might already be satisfied.
 
@@ -54,7 +126,7 @@ etherplan plan --spec path/to/spec.json --deployers 0xYourDeployer --owner 0xYou
 
 | Command | Structural checks | Artifact and ABI checks | Live-chain checks |
 | --- | --- | --- | --- |
-| `graph`, `impact` | Yes | No | No |
+| `graph`, `impact`, `compile` | Yes | No | No |
 | `validate`, `adapters` | Yes | Yes | No |
 | `plan`, `schedule`, `verify`, `import`, `apply` | Yes | Yes | Yes |
 

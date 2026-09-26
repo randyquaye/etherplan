@@ -12,6 +12,7 @@ import { createAwsBackend } from './execution/aws.mjs';
 import { deploymentScope, inspectDeployment } from './execution/backends.mjs';
 import { checkPlanIdentity } from './execution/preflight.mjs';
 import { hashJson } from './identity.mjs';
+import { findSpecFile, loadConfig, loadSpec, withConfig } from './input/project.mjs';
 import { createPlan, prepareResources, transactionFor } from './planning/index.mjs';
 import { createSchedule } from './scheduling/index.mjs';
 import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.mjs';
@@ -20,6 +21,7 @@ import { verifyResource } from './verification/index.mjs';
 
 const COMMANDS = {
   validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec'] },
+  compile: { description: 'Print the canonical JSON spec for a .json or .ethp spec.', options: ['spec'] },
   graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec'] },
   impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value'] },
   plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'] },
@@ -31,7 +33,7 @@ const COMMANDS = {
   status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
 };
 const OPTION_HELP = {
-  spec: 'Specification file (default: ./spec.json)',
+  spec: 'Specification file, .json or .ethp (default: the only .ethp file or spec.json here)',
   value: 'Value name for impact',
   out: 'Output path',
   plan: 'Saved plan file',
@@ -53,6 +55,7 @@ const OPTION_HELP = {
 };
 const VALUE_OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei']);
 const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline']);
+const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([, details]) => details.options.includes('spec')).map(([name, details]) => [name, details.options]));
 
 class UsageError extends Error {}
 
@@ -101,6 +104,10 @@ function validateOptions(command, options) {
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
   }
+}
+
+// Checks option combinations after .ethpconfig options are merged in.
+function validateCombination(command, options) {
   if (command === 'plan') {
     if (options['signer-module'] && (options.deployers || options.owner)) throw new UsageError('plan --signer-module supplies signer addresses; omit --deployers and --owner.');
     if (options.pipeline && !options.deployers && !options['signer-module']) throw new UsageError('A pipeline plan needs --deployers <address,address> or --signer-module.');
@@ -255,9 +262,18 @@ async function run(command, options) {
     print(await inspectDeployment({ ...backend, chain: plan.chain, planHash: plan.planHash }));
     return;
   }
-  const specFile = path.resolve(options.spec ?? 'spec.json');
-  const spec = parseSpec(JSON.parse(await readFile(specFile, 'utf8')));
+  const specFile = await findSpecFile(options.spec);
+  const config = await loadConfig(specFile, SPEC_COMMANDS);
+  const merged = withConfig(options, config, command, COMMANDS[command].options);
+  if (merged.configured.length) process.stderr.write(`Using ${merged.configured.map(name => `--${name}`).join(', ')} from ${config.file}.\n`);
+  options = merged.options;
+  validateCombination(command, options);
+  const spec = await loadSpec(specFile);
   const ordered = graph(spec);
+  if (command === 'compile') {
+    print(spec);
+    return;
+  }
   if (command === 'graph') {
     print(usesDependencyPlan(spec)
       ? { ...dependencyGraphs(ordered), warnings: dependencyWarnings(spec, ordered) }
