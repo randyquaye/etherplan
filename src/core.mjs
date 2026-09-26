@@ -8,3 +8,4 @@ export { applyPlan, acquireLock, openJournal } from './execution/index.mjs';
 export { acquireLeases, deploymentScope, encryptionContext, inspectDeployment, lockScopes, openStoredJournal, scopeKey, validateJournal } from './execution/backends.mjs';
 export { createAwsBackend } from './execution/aws.mjs';
 export { createSignerServiceProvider } from './execution/signer-service.mjs';
+export { createKmsSignerProvider } from './execution/kms-signer.mjs';

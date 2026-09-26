@@ -22,7 +22,7 @@ const COMMANDS = {
   validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec'] },
   graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec'] },
   impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value'] },
-  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'backend', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'] },
+  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'] },
   apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'] },
   verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend'] },
   schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline'] },
@@ -38,7 +38,7 @@ const OPTION_HELP = {
   state: 'State file (default: .etherplan/state.json beside the spec)',
   journal: 'Journal file (default: journal.jsonl beside the state file)',
   backend: 'Production backend config file',
-  'signer-module': 'External signer module for production apply',
+  'signer-module': 'Signer module for plan or apply',
   id: 'Contract resource ID, for example contract:registry',
   'creation-tx': 'Creation transaction hash used as import proof',
   rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
@@ -69,7 +69,7 @@ function usage(command) {
   const environment = ['plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
     ? '\n\nRequires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
-    ? ' Apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
+    ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
   return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 
@@ -102,8 +102,9 @@ function validateOptions(command, options) {
     throw new UsageError('import needs --id contract:<name>.');
   }
   if (command === 'plan') {
-    if (options.pipeline && !options.deployers) throw new UsageError('A pipeline plan needs --deployers <address,address>.');
-    if (options.parallel && !options.deployers) throw new UsageError('plan --parallel needs --deployers <address,address>.');
+    if (options['signer-module'] && (options.deployers || options.owner)) throw new UsageError('plan --signer-module supplies signer addresses; omit --deployers and --owner.');
+    if (options.pipeline && !options.deployers && !options['signer-module']) throw new UsageError('A pipeline plan needs --deployers <address,address> or --signer-module.');
+    if (options.parallel && !options.deployers && !options['signer-module']) throw new UsageError('plan --parallel needs --deployers <address,address> or --signer-module.');
     if (options.owner && !options.deployers) throw new UsageError('plan --owner needs --deployers <address,address>.');
   }
   if (command === 'apply' && options.pipeline && options.parallel) {
@@ -298,9 +299,9 @@ async function run(command, options) {
     if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
     if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
     if (options.plan && options['max-spend-wei']) throw new Error('A saved plan already pins maxSpendWei; omit --max-spend-wei.');
+    const signerSource = options['signer-module'] ? await signerFromModule(options['signer-module']) : { signers: signersFromEnvironment() };
     let plan;
     let planningBackend;
-    let signerSource;
     if (options.plan) {
       plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
     } else {
@@ -312,8 +313,7 @@ async function run(command, options) {
         state = (await planningBackend.stateStore.read(planningBackend.scope))?.value ?? null;
       } else state = await readState(stateFile);
       if (!options['max-spend-wei']) throw new Error('Fresh apply needs --max-spend-wei <amount>.');
-      signerSource = options.backend ? await signerFromModule(options['signer-module']) : { signers: signersFromEnvironment() };
-      const addresses = options.backend ? await addressesFromModule(signerSource, spec.calls.length > 0) : {
+      const addresses = signerSource.signerProvider ? await addressesFromModule(signerSource, spec.calls.length > 0) : {
         deployers: signerSource.signers.deployer.map(account => account.address), owner: signerSource.signers.owner?.address ?? null,
       };
       plan = await createPlan({ spec, artifacts, client, state, signers: { ...addresses, parallel: options.parallel ?? false }, maxSpendWei: options['max-spend-wei'] });
@@ -329,11 +329,11 @@ async function run(command, options) {
     if (options.backend) {
       const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...(signerSource ?? await signerFromModule(options['signer-module'])), parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
+      print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...signerSource, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
       return;
     }
     const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
-    print(await applyPlan({ plan, spec, artifacts, client, signers: signerSource?.signers ?? signersFromEnvironment(), stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
+    print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
     return;
   }
   let plan;
@@ -349,17 +349,22 @@ async function run(command, options) {
       backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
       state = (await backend.stateStore.read(backend.scope))?.value ?? null;
     } else state = await readState(stateFile);
+    const moduleAddresses = command === 'plan' && options['signer-module']
+      ? await addressesFromModule(await signerFromModule(options['signer-module']), spec.calls.length > 0) : null;
+    const deployers = moduleAddresses?.deployers ?? options.deployers?.split(',');
+    const owner = moduleAddresses?.owner ?? options.owner ?? null;
     const pipeline = options.pipeline ? {
-      deployers: options.deployers?.split(',') ?? [], owner: options.owner ?? null, parallel: options.parallel ?? false,
+      deployers: deployers ?? [], owner, parallel: options.parallel ?? false,
     } : null;
-    const signers = command === 'plan' && !pipeline && options.deployers ? {
-      deployers: options.deployers.split(','), owner: options.owner ?? null, parallel: options.parallel ?? false,
+    const signers = command === 'plan' && !pipeline && deployers ? {
+      deployers, owner, parallel: options.parallel ?? false,
     } : null;
     plan = await createPlan({ spec, artifacts, client, state, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
   }
   if (command === 'plan') {
-    if (plan.resources.some(resource => ['deploy', 'call'].includes(resource.action)) && (!options.deployers || !options['max-spend-wei'])) {
-      throw new Error('A write plan needs --deployers <address,address> and --max-spend-wei <amount>.');
+    if (plan.resources.some(resource => ['deploy', 'call'].includes(resource.action)) &&
+      ((!options.deployers && !options['signer-module']) || !options['max-spend-wei'])) {
+      throw new Error('A write plan needs --deployers <address,address> or --signer-module, and --max-spend-wei <amount>.');
     }
     if (backend?.planStore) await backend.planStore.put(backend.scope, plan);
     if (options.out !== '-') await writeJsonAtomic(path.resolve(options.out ?? 'plan.json'), plan);
