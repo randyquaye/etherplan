@@ -1,24 +1,25 @@
-// @ts-nocheck
 import { concatHex, encodeAbiParameters, encodeDeployData, keccak256 } from 'viem';
 import { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, immutableEntries, linkBytecode, linkedLibraries } from './bytecode.ts';
 import { simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
-import type { PreparedContract, PreparedResource } from '../planning/types.ts';
-import type { Client, Hash } from '../types.ts';
-import type { CreationVerification, VerificationResult, VerifyCreationOptions, VerifyOptions } from './types.ts';
+import type { AbiFunction } from 'viem';
+import type { NormalizedArtifact, NamedImmutable } from '../artifacts/types.ts';
+import type { DeployableContract, PreparedCall, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource } from '../planning/types.ts';
+import type { Address, Client, Hash, Hex, JsonValue } from '../types.ts';
+import type { BindingCheck, CreationProof, CreationVerification, Proof, ProofMethod, RuntimeComparison, RuntimeDifference, VerificationResult, VerifyCreationOptions, VerifyOptions } from './types.ts';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.ts';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.ts';
 export { PROBE_ADDRESS, PROBE_CODE, simulateCreate, simulateCreate2 } from './simulate.ts';
 export { abiArguments, normalizeAbiValue, normalizeOutputs, safeError } from './values.ts';
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function blockOf(value) {
+function blockOf(value: VerifyOptions['blockNumber']): bigint | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === 'bigint') return value;
   if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
@@ -26,19 +27,19 @@ function blockOf(value) {
   throw new Error(`Invalid block number ${String(value)}.`);
 }
 
-function at(blockNumber) {
+function at(blockNumber: bigint | undefined): { blockNumber?: bigint } {
   return blockNumber === undefined ? {} : { blockNumber };
 }
 
-function hasCode(code) {
+function hasCode(code: unknown): code is Hex {
   return typeof code === 'string' && code !== '0x' && code.length > 2;
 }
 
-function lower(hex) {
-  return typeof hex === 'string' ? hex.toLowerCase() : hex;
+function lower<T extends string | null | undefined>(hex: T): T {
+  return (typeof hex === 'string' ? hex.toLowerCase() : hex) as T;
 }
 
-function newResult(resource) {
+function newResult(resource: PreparedResource): VerificationResult {
   return {
     id: resource.id,
     address: resource.address,
@@ -52,21 +53,21 @@ function newResult(resource) {
   };
 }
 
-function finish(result) {
+function finish(result: VerificationResult): VerificationResult {
   result.status = result.reasons.length > 0 ? 'conflict' : result.missingProofs.length > 0 ? 'unverified' : 'verified';
   if (result.status !== 'verified') delete result.creationProof;
   return result;
 }
 
-async function readFunction(client, { address, fn, args, blockNumber }) {
+async function readFunction(client: Client, { address, fn, args, blockNumber }: { address: Address; fn: AbiFunction; args: JsonValue[]; blockNumber: bigint | undefined }): Promise<unknown> {
   return client.readContract({ address, abi: [fn], functionName: fn.name, args: abiArguments(fn.inputs ?? [], args), ...at(blockNumber) });
 }
 
-async function getterProof(client, resource, check, abi, blockNumber) {
+async function getterProof(client: Client, resource: PreparedResource, check: PreparedCheck & { args?: JsonValue[] }, abi: NormalizedArtifact['abi'] | undefined, blockNumber: bigint | undefined): Promise<{ proof: Proof; fn: AbiFunction }> {
   const args = check.args ?? [];
   const fn = abiFunction(abi, check.functionName, args.length, resource.id);
   const expected = normalizeOutputs(fn.outputs ?? [], check.expected, `${resource.id} expected ${check.functionName}`);
-  const proof = { name: check.functionName, method: 'getter', expected, actual: null, matched: false };
+  const proof: Proof = { name: check.functionName, method: 'getter', expected, actual: null, matched: false };
   if (args.length > 0) proof.args = args;
   try {
     proof.actual = normalizeOutputs(fn.outputs ?? [], await readFunction(client, { address: resource.address, fn, args, blockNumber }), `${resource.id} ${check.functionName}`);
@@ -77,18 +78,19 @@ async function getterProof(client, resource, check, abi, blockNumber) {
   return { proof, fn };
 }
 
-function describe(value) {
+function describe(value: JsonValue): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
-function recordGetter(result, proof) {
+function recordGetter(result: VerificationResult, proof: Proof): void {
   result.proofs.push(proof);
   if (proof.error) result.reasons.push(`Getter ${proof.name} read failed: ${proof.error}`);
   else if (!proof.matched) result.reasons.push(`Getter ${proof.name} returned ${describe(proof.actual)}; expected ${describe(proof.expected)}.`);
 }
 
-function librariesFor(resource, artifact) {
-  const declared = resource.libraries ?? resource.inputs?.libraries ?? {};
+function librariesFor(resource: PreparedContract, artifact: NormalizedArtifact): Record<string, Address> {
+  const legacy = resource as PreparedContract & { inputs: JsonValue[] & { libraries?: Record<string, Address> } };
+  const declared = resource.libraries ?? legacy.inputs?.libraries ?? {};
   const creationLinks = artifact.bytecode?.linkReferences ?? {};
   const fromInitcode = resource.initcode && Object.keys(creationLinks).length > 0 ? linkedLibraries(resource.initcode, creationLinks) : {};
   for (const [key, address] of Object.entries(fromInitcode)) {
@@ -101,7 +103,7 @@ function librariesFor(resource, artifact) {
  * Returns the resource initcode, or derives it from the artifact, `inputs`, and `libraries` for an imported contract.
  * Returns null when the inputs cannot encode the constructor.
  */
-function initcodeFor(resource) {
+function initcodeFor(resource: PreparedContract): Hex | null {
   if (resource.initcode) return resource.initcode;
   const artifact = resource.artifact;
   if (!artifact?.bytecode?.object || !Array.isArray(resource.inputs)) return null;
@@ -114,7 +116,7 @@ function initcodeFor(resource) {
   }
 }
 
-function expectedRuntime(resource, artifact) {
+function expectedRuntime(resource: PreparedContract, artifact: NormalizedArtifact): Hex {
   const links = artifact.deployedBytecode.linkReferences ?? {};
   const libraries = librariesFor(resource, artifact);
   const used = new Set(Object.entries(links).flatMap(([file, names]) => Object.keys(names).map(name => `${file}:${name}`)));
@@ -122,7 +124,7 @@ function expectedRuntime(resource, artifact) {
   return hasLibraryGuard(runtime) ? fillLibraryGuard(runtime, resource.address) : runtime;
 }
 
-function mismatchReason(difference) {
+function mismatchReason(difference: RuntimeDifference): string {
   if (difference.reason === 'length') return `Live runtime is ${difference.liveBytes} bytes; the artifact runtime is ${difference.expectedBytes} bytes.`;
   if (difference.region === 'metadata') {
     return `Live runtime differs from the artifact only in its CBOR metadata, so it comes from a different build (metadata hash ${difference.expectedMetadataHash} expected, ${difference.liveMetadataHash} live).`;
@@ -132,25 +134,26 @@ function mismatchReason(difference) {
   return `Live runtime differs from the artifact at byte ${difference.offset}.`;
 }
 
-function immutableLabel(info, id) {
+function immutableLabel(info: NamedImmutable | undefined, id: string): string {
   return info?.name ? `${info.name} (AST ${id})` : `AST ${id}`;
 }
 
-async function creationEvidence(result, resource, client, transactionHash, options, code) {
+async function creationEvidence(result: VerificationResult, resource: PreparedContract, client: Client, transactionHash: Hash, options: VerifyOptions, code: Hex): Promise<ProofMethod | null> {
   const creation = await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
   const method = creation.kind === 'create2' ? 'create2-transaction' : 'create-transaction';
   result.proofs.push({ name: 'creation', method, expected: creation.initcodeHash ?? null, actual: transactionHash, matched: creation.status === 'verified' });
   const { proof, ...evidence } = creation;
-  result.evidence.creation = evidence;
-  if (creation.status === 'verified') result.creationProof = creation.proof;
+  if (result.evidence) result.evidence.creation = evidence;
+  if (creation.status === 'verified' && creation.proof) result.creationProof = creation.proof;
   if (creation.status === 'conflict') result.reasons.push(...creation.reasons);
   return creation.status === 'verified' ? method : null;
 }
 
-async function simulationEvidence(result, resource, client, options, code, comparison, covered) {
+async function simulationEvidence(result: VerificationResult, resource: DeployableContract, client: Client, options: VerifyOptions, code: Hex, comparison: Exclude<RuntimeComparison, { mode: 'mismatch' }>, covered: Map<string, ProofMethod>): Promise<ProofMethod | null> {
   const { factory, salt, initcode } = resource;
+  const blockNumber = blockOf(options.blockNumber);
   assert(lower(create2Address(factory.address, salt, initcode)) === lower(resource.address), `${resource.id} address is not the CREATE2 address of its factory, salt, and initcode.`);
-  const factoryCode = await client.getCode({ address: factory.address, ...at(options.blockNumber) });
+  const factoryCode = await client.getCode({ address: factory.address, ...at(blockNumber) });
   const factoryHash = hasCode(factoryCode) ? keccak256(factoryCode) : null;
   const factoryMatched = factoryHash === lower(factory.codeHash);
   result.proofs.push({ name: 'factory', method: 'code-hash', expected: lower(factory.codeHash), actual: factoryHash, matched: factoryMatched });
@@ -160,11 +163,12 @@ async function simulationEvidence(result, resource, client, options, code, compa
   }
   let runtime;
   try {
-    runtime = await simulateCreate2(client, { factory: factory.address, salt, initcode, address: resource.address, blockNumber: options.blockNumber, account: options.account });
+    runtime = await simulateCreate2(client, { factory: factory.address, salt, initcode, address: resource.address, ...(blockNumber === undefined ? {} : { blockNumber }), ...(options.account ? { account: options.account } : {}) });
   } catch (error) {
-    const proof = { name: 'runtime', method: 'create2-simulation', expected: null, actual: result.codeHash, matched: false, error: safeError(error) };
+    const reason = safeError(error);
+    const proof: Proof = { name: 'runtime', method: 'create2-simulation', expected: null, actual: result.codeHash, matched: false, error: reason };
     result.proofs.push(proof);
-    result.evidence.simulation = { error: proof.error };
+    if (result.evidence) result.evidence.simulation = { error: reason };
     return null;
   }
   const simulatedHash = keccak256(runtime);
@@ -173,12 +177,13 @@ async function simulationEvidence(result, resource, client, options, code, compa
   if (matched) return 'create2-simulation';
   const references = resource.artifact.deployedBytecode.immutableReferences ?? {};
   const simulated = compareRuntime(code, runtime, references);
-  result.evidence.simulation = { runtimeHash: simulatedHash, sameOutsideImmutables: simulated.mode !== 'mismatch', differingImmutables: [] };
+  const simulation = { runtimeHash: simulatedHash, sameOutsideImmutables: simulated.mode !== 'mismatch', differingImmutables: [] as { id: string; simulated: Hex }[] };
+  if (result.evidence) result.evidence.simulation = simulation;
   if (simulated.mode === 'mismatch') return null;
   for (const entry of simulated.immutables) {
     const live = comparison.immutables.find(item => item.id === entry.id);
     if (live && entry.consistent && live.value === entry.value) covered.set(entry.id, 'create2-simulation');
-    else result.evidence.simulation.differingImmutables.push({ id: entry.id, simulated: entry.value });
+    else simulation.differingImmutables.push({ id: entry.id, simulated: entry.value });
   }
   return null;
 }
@@ -188,7 +193,11 @@ async function simulationEvidence(result, resource, client, options, code, compa
  * `finish` turns mismatches into conflict, missing proof into unverified, and complete
  * matching evidence into verified.
  */
-async function verifyContract(resource, client, options) {
+function isDeployable(resource: PreparedContract): resource is DeployableContract {
+  return Boolean(resource.salt && resource.factory && resource.initcode && resource.initcodeHash);
+}
+
+async function verifyContract(resource: PreparedContract, client: Client, options: VerifyOptions): Promise<VerificationResult> {
   const result = newResult(resource);
   const artifact = resource.artifact;
   assert(typeof artifact?.deployedBytecode?.object === 'string', `${resource.id} needs a normalized artifact.`);
@@ -206,12 +215,12 @@ async function verifyContract(resource, client, options) {
   result.evidence = { expectedSkeletonHash: comparison.expectedSkeletonHash, liveSkeletonHash: comparison.liveSkeletonHash, immutables: [] };
 
   if (comparison.mode === 'mismatch') {
-    if (comparison.difference.region === 'code' && hasLibraryGuard(artifact.deployedBytecode.object) && comparison.difference.offset >= 1 && comparison.difference.offset <= 20) {
+    if (comparison.difference.reason === 'content' && comparison.difference.region === 'code' && hasLibraryGuard(artifact.deployedBytecode.object) && comparison.difference.offset >= 1 && comparison.difference.offset <= 20) {
       comparison.difference.region = 'library-guard';
     }
     result.codeComparison = { mode: 'mismatch', matched: false };
     result.proofs.push({ name: 'runtime', method: immutableCount > 0 ? 'masked-runtime' : 'artifact-runtime', expected: comparison.expectedSkeletonHash, actual: comparison.liveSkeletonHash, matched: false });
-    if (comparison.difference.region === 'metadata') {
+    if (comparison.difference.reason === 'content' && comparison.difference.region === 'metadata') {
       result.proofs.push({ name: 'metadata', method: 'cbor-metadata', expected: comparison.difference.expectedMetadataHash, actual: comparison.difference.liveMetadataHash, matched: false });
     }
     result.evidence.difference = comparison.difference;
@@ -219,7 +228,7 @@ async function verifyContract(resource, client, options) {
     return finish(result);
   }
 
-  let exact = null;
+  let exact: ProofMethod | null = null;
   if (immutableCount === 0) {
     result.codeComparison = { mode: 'exact', matched: true };
     result.proofs.push({ name: 'runtime', method: 'artifact-runtime', expected: keccak256(expected), actual: result.codeHash, matched: true });
@@ -233,7 +242,7 @@ async function verifyContract(resource, client, options) {
     if (!entry.consistent) result.reasons.push(`Immutable ${immutableLabel(info.get(entry.id), entry.id)} holds different values at its code ranges.`);
   }
 
-  const expectedCodeHash = resource.expectedCodeHash ?? resource.codeHash ?? null;
+  const expectedCodeHash = resource.expectedCodeHash ?? (resource as PreparedContract & { codeHash?: Hash }).codeHash ?? null;
   if (expectedCodeHash) {
     const matched = lower(expectedCodeHash) === result.codeHash;
     result.proofs.push({ name: 'runtime', method: 'expected-code-hash', expected: lower(expectedCodeHash), actual: result.codeHash, matched });
@@ -243,14 +252,13 @@ async function verifyContract(resource, client, options) {
 
   const transactionHash = options.transactionHash ?? options.creationProof?.transactionHash;
   if (transactionHash) {
-    const creationMethod = await creationEvidence(result, resource, client, transactionHash, { ...options, blockNumber }, code);
+    const creationMethod = await creationEvidence(result, resource, client, transactionHash, { ...options, ...at(blockNumber) }, code);
     exact ??= creationMethod;
   }
 
-  const covered = new Map();
-  const deployable = Boolean(resource.salt && resource.factory && resource.initcode);
-  if (!exact && deployable && options.simulate !== false) {
-    exact = await simulationEvidence(result, resource, client, { ...options, blockNumber }, code, comparison, covered);
+  const covered = new Map<string, ProofMethod>();
+  if (!exact && isDeployable(resource) && options.simulate !== false) {
+    exact = await simulationEvidence(result, resource, client, { ...options, ...at(blockNumber) }, code, comparison, covered);
   }
 
   const byGetter = new Map((artifact.immutables ?? []).filter(item => item.getter).map(item => [item.getter, item]));
@@ -261,7 +269,9 @@ async function verifyContract(resource, client, options) {
     if (!immutable || (fn.inputs ?? []).length !== 0 || (fn.outputs ?? []).length !== 1) continue;
     const live = comparison.immutables.find(item => item.id === immutable.id);
     if (!live) continue;
-    const expectedWord = encodeAbiParameters([fn.outputs[0]], abiArguments([fn.outputs[0]], [proof.expected]));
+    const output = fn.outputs[0];
+    assert(output, `${resource.id} getter has no output.`);
+    const expectedWord = encodeAbiParameters([output], abiArguments([output], [proof.expected]) as [unknown]);
     const matched = expectedWord === live.value && live.consistent;
     result.proofs.push({ name: `immutable:${immutable.name}`, method: 'immutable-word', expected: expectedWord, actual: live.value, matched });
     if (matched) covered.set(immutable.id, 'immutable-word');
@@ -280,7 +290,7 @@ async function verifyContract(resource, client, options) {
   return finish(result);
 }
 
-async function verifyExternal(resource, client, options) {
+async function verifyExternal(resource: PreparedExternal, client: Client, options: VerifyOptions): Promise<VerificationResult> {
   const result = newResult(resource);
   const blockNumber = blockOf(options.blockNumber);
   const code = await client.getCode({ address: resource.address, ...at(blockNumber) });
@@ -289,7 +299,7 @@ async function verifyExternal(resource, client, options) {
     return finish(result);
   }
   result.codeHash = keccak256(code);
-  const expected = resource.expectedCodeHash ?? resource.codeHash ?? null;
+  const expected = resource.expectedCodeHash ?? (resource as PreparedExternal & { codeHash?: Hash }).codeHash ?? null;
   if (expected) {
     const matched = lower(expected) === result.codeHash;
     result.codeComparison = { mode: matched ? 'exact' : 'mismatch', matched };
@@ -300,12 +310,12 @@ async function verifyExternal(resource, client, options) {
     result.missingProofs.push('External has no expected code hash; code presence alone does not prove its identity.');
   }
   const checks = resource.checks ?? [];
-  const abi = resource.abi ?? resource.artifact?.abi;
+  const abi = resource.abi ?? (resource as PreparedExternal & { artifact?: NormalizedArtifact }).artifact?.abi;
   for (const check of checks) recordGetter(result, (await getterProof(client, resource, check, abi, blockNumber)).proof);
   return finish(result);
 }
 
-async function verifyCall(resource, client, options) {
+async function verifyCall(resource: PreparedCall, client: Client, options: VerifyOptions): Promise<VerificationResult> {
   const result = newResult(resource);
   const blockNumber = blockOf(options.blockNumber);
   const after = resource.after;
@@ -313,12 +323,12 @@ async function verifyCall(resource, client, options) {
   assert(after?.functionName && Object.hasOwn(after, 'expected'), `${resource.id} needs after.functionName and after.expected.`);
   assert(before && Object.hasOwn(before, 'expected'), `${resource.id} needs before.expected.`);
   assert(!before.functionName || before.functionName === after.functionName, `${resource.id} reads different functions before and after the call.`);
-  const abi = resource.abi ?? resource.targetArtifact?.abi ?? resource.artifact?.abi;
+  const abi = resource.abi ?? resource.targetArtifact?.abi ?? (resource as PreparedCall & { artifact?: NormalizedArtifact }).artifact?.abi;
   const args = after.args ?? [];
   const fn = abiFunction(abi, after.functionName, args.length, resource.id);
   const expectedAfter = normalizeOutputs(fn.outputs ?? [], after.expected, `${resource.id} after.expected`);
   const expectedBefore = normalizeOutputs(fn.outputs ?? [], before.expected, `${resource.id} before.expected`);
-  const binding = { name: resource.id, functionName: after.functionName, expectedBefore, expectedAfter, actual: null, observed: 'read-failed' };
+  const binding: BindingCheck = { name: resource.id, functionName: after.functionName, expectedBefore, expectedAfter, actual: null, observed: 'read-failed' };
   if (args.length > 0) binding.args = args;
   result.bindingChecks.push(binding);
 
@@ -356,12 +366,12 @@ export async function verifyResource(resource: PreparedResource, client: Client,
   if (resource.kind === 'contract') return verifyContract(resource, client, options);
   if (resource.kind === 'external') return verifyExternal(resource, client, options);
   if (resource.kind === 'call') return verifyCall(resource, client, options);
-  throw new Error(`${resource.id} has unknown kind ${resource.kind}.`);
+  throw new Error(`${(resource as PreparedResource).id} has unknown kind ${(resource as PreparedResource).kind}.`);
 }
 
 /** Check creation identity and the canonical receipt block; capture or revalidate an exact runtime anchor. */
 export async function verifyCreation(client: Client, resource: PreparedContract, transactionHash: Hash, options: VerifyCreationOptions = {}): Promise<CreationVerification> {
-  const result = { kind: null, transactionHash, address: resource.address, status: 'unverified', matched: false, exactRuntime: false, codeHash: null, initcodeHash: null, blockNumber: null, reasons: [] };
+  const result: CreationVerification = { kind: null, transactionHash, address: resource.address, status: 'unverified', matched: false, exactRuntime: false, codeHash: null, initcodeHash: null, blockNumber: null, reasons: [] };
   const saved = options.creationProof ? validateCreationProof(options.creationProof) : null;
   if (saved && lower(saved.transactionHash) !== lower(transactionHash)) {
     result.reasons.push('Saved creation proof names a different transaction.');
@@ -390,8 +400,8 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.reasons.push('Creation transaction failed.');
     return result;
   }
-  let chain;
-  let block;
+  let chain: { id: number; genesisHash: Hash | null };
+  let block: Awaited<ReturnType<Client['getBlock']>>;
   try {
     chain = { id: await client.getChainId(), genesisHash: (await client.getBlock({ blockNumber: 0n })).hash };
     block = await client.getBlock({ blockNumber: receipt.blockNumber });
@@ -428,7 +438,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
   }
   result.codeHash = keccak256(live);
   const input = lower(transaction.input);
-  let kind;
+  let kind: 'create' | 'create2';
   if (transaction.to === null || transaction.to === undefined) {
     kind = result.kind = 'create';
     if (lower(receipt.contractAddress) !== lower(resource.address)) {
@@ -443,6 +453,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.matched = true;
   } else if (resource.factory && lower(transaction.to) === lower(resource.factory.address)) {
     kind = result.kind = 'create2';
+    assert(resource.salt, `${resource.id} needs a CREATE2 salt.`);
     if (input !== lower(concatHex([resource.salt, initcode]))) {
       result.reasons.push('The factory transaction sent a different salt or initcode.');
       return result;
@@ -456,35 +467,42 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.reasons.push('The transaction is neither a direct CREATE nor a call to the resource CREATE2 factory.');
     return result;
   }
-  const proof = {
+  assert(chain.genesisHash && result.blockNumber && result.initcodeHash && result.codeHash, 'Creation proof is missing chain or runtime identity.');
+  const base = {
     chain: { id: chain.id, genesisHash: lower(chain.genesisHash) }, transactionHash: lower(transactionHash),
     blockNumber: result.blockNumber, blockHash: lower(receipt.blockHash), address: lower(resource.address),
-    kind, initcodeHash: result.initcodeHash, codeHash: result.codeHash,
-    ...(kind === 'create2' ? { factory: { address: lower(resource.factory.address), codeHash: lower(resource.factory.codeHash) }, salt: lower(resource.salt) } : {}),
+    initcodeHash: result.initcodeHash, codeHash: result.codeHash,
   };
+  const proof: CreationProof = kind === 'create2' ? {
+    ...base, kind, factory: {
+      address: lower(resource.factory!.address), codeHash: lower(resource.factory!.codeHash),
+    }, salt: lower(resource.salt!),
+  } : { ...base, kind };
   if (kind === 'create2') {
+    const factory = resource.factory;
+    assert(factory, `${resource.id} needs a CREATE2 factory.`);
     let currentFactory;
     let receiptFactory;
     try {
-      currentFactory = await client.getCode({ address: resource.factory.address, ...at(blockOf(options.blockNumber)) });
-      if (!saved) receiptFactory = await client.getCode({ address: resource.factory.address, blockNumber: receipt.blockNumber });
+      currentFactory = await client.getCode({ address: factory.address, ...at(blockOf(options.blockNumber)) });
+      if (!saved) receiptFactory = await client.getCode({ address: factory.address, blockNumber: receipt.blockNumber });
     } catch (error) {
       result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
       return result;
     }
-    if (!hasCode(currentFactory) || keccak256(currentFactory) !== proof.factory.codeHash ||
-      (!saved && (!hasCode(receiptFactory) || keccak256(receiptFactory) !== proof.factory.codeHash))) {
+    if (!hasCode(currentFactory) || keccak256(currentFactory) !== (proof as Extract<CreationProof, { kind: 'create2' }>).factory.codeHash ||
+      (!saved && (!hasCode(receiptFactory) || keccak256(receiptFactory) !== (proof as Extract<CreationProof, { kind: 'create2' }>).factory.codeHash))) {
       result.reasons.push('CREATE2 factory code differs from its declared hash.');
       return result;
     }
   }
   if (saved) {
-    const same = (left, right) => lower(left) === lower(right);
+    const same = (left: string | null | undefined, right: string | null | undefined) => lower(left) === lower(right);
     if (saved.chain.id !== proof.chain.id || !same(saved.chain.genesisHash, proof.chain.genesisHash) ||
       saved.blockNumber !== proof.blockNumber || !same(saved.blockHash, proof.blockHash) ||
       !same(saved.address, proof.address) || saved.kind !== proof.kind ||
       !same(saved.initcodeHash, proof.initcodeHash) || !same(saved.codeHash, proof.codeHash) ||
-      (kind === 'create2' && (!same(saved.factory.address, proof.factory.address) || !same(saved.factory.codeHash, proof.factory.codeHash) || !same(saved.salt, proof.salt)))) {
+      (kind === 'create2' && saved.kind === 'create2' && proof.kind === 'create2' && (!same(saved.factory.address, proof.factory.address) || !same(saved.factory.codeHash, proof.factory.codeHash) || !same(saved.salt, proof.salt)))) {
       result.reasons.push('Saved creation proof differs from canonical deployment identity or current runtime.');
       return result;
     }
@@ -510,7 +528,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     return result;
   }
   try {
-    const runtime = await simulateCreate2(client, { factory: resource.factory.address, salt: resource.salt, initcode, address: resource.address, blockNumber: receipt.blockNumber, account: transaction.from });
+    const runtime = await simulateCreate2(client, { factory: resource.factory!.address, salt: resource.salt!, initcode, address: resource.address, blockNumber: receipt.blockNumber, account: transaction.from });
     result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
     result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)}`);
