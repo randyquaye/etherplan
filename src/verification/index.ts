@@ -8,7 +8,7 @@ import type { AbiFunction } from 'viem';
 import type { NormalizedArtifact, NamedImmutable } from '../artifacts/types.ts';
 import type { DeployableContract, PreparedCall, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource } from '../planning/types.ts';
 import type { Address, Client, Hash, Hex, JsonValue } from '../types.ts';
-import type { BindingCheck, CreationProof, CreationVerification, Proof, ProofMethod, RuntimeComparison, RuntimeDifference, VerificationResult, VerifyCreationOptions, VerifyOptions } from './types.ts';
+import type { BindingCheck, CreationEvidence, CreationProof, CreationVerification, Proof, ProofMethod, RuntimeComparison, RuntimeDifference, SimulationEvidence, VerificationEvidence, VerificationResult, VerificationStatus, VerifyCreationOptions, VerifyOptions } from './types.ts';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.ts';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.ts';
@@ -53,8 +53,14 @@ function newResult(resource: PreparedResource): VerificationResult {
   };
 }
 
+function statusFor({ reasons, missingProofs }: Pick<VerificationResult, 'reasons' | 'missingProofs'>): VerificationStatus {
+  if (reasons.length > 0) return 'conflict';
+  if (missingProofs.length > 0) return 'unverified';
+  return 'verified';
+}
+
 function finish(result: VerificationResult): VerificationResult {
-  result.status = result.reasons.length > 0 ? 'conflict' : result.missingProofs.length > 0 ? 'unverified' : 'verified';
+  result.status = statusFor(result);
   if (result.status !== 'verified') delete result.creationProof;
   return result;
 }
@@ -142,7 +148,7 @@ async function creationEvidence(result: VerificationResult, resource: PreparedCo
   const creation = await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
   const method = creation.kind === 'create2' ? 'create2-transaction' : 'create-transaction';
   result.proofs.push({ name: 'creation', method, expected: creation.initcodeHash ?? null, actual: transactionHash, matched: creation.status === 'verified' });
-  const { proof, ...evidence } = creation;
+  const { proof, ...evidence }: CreationEvidence & { proof?: CreationProof } = creation;
   if (result.evidence) result.evidence.creation = evidence;
   if (creation.status === 'verified' && creation.proof) result.creationProof = creation.proof;
   if (creation.status === 'conflict') result.reasons.push(...creation.reasons);
@@ -177,7 +183,7 @@ async function simulationEvidence(result: VerificationResult, resource: Deployab
   if (matched) return 'create2-simulation';
   const references = resource.artifact.deployedBytecode.immutableReferences ?? {};
   const simulated = compareRuntime(code, runtime, references);
-  const simulation = { runtimeHash: simulatedHash, sameOutsideImmutables: simulated.mode !== 'mismatch', differingImmutables: [] as { id: string; simulated: Hex }[] };
+  const simulation: SimulationEvidence = { runtimeHash: simulatedHash, sameOutsideImmutables: simulated.mode !== 'mismatch', differingImmutables: [] };
   if (result.evidence) result.evidence.simulation = simulation;
   if (simulated.mode === 'mismatch') return null;
   for (const entry of simulated.immutables) {
@@ -212,7 +218,8 @@ async function verifyContract(resource: PreparedContract, client: Client, option
   const immutableCount = immutableEntries(references).length;
   const expected = expectedRuntime(resource, artifact);
   const comparison = compareRuntime(expected, code, references, artifact.deployedBytecode.linkReferences ?? {});
-  result.evidence = { expectedSkeletonHash: comparison.expectedSkeletonHash, liveSkeletonHash: comparison.liveSkeletonHash, immutables: [] };
+  const evidence: VerificationEvidence = { expectedSkeletonHash: comparison.expectedSkeletonHash, liveSkeletonHash: comparison.liveSkeletonHash, immutables: [] };
+  result.evidence = evidence;
 
   if (comparison.mode === 'mismatch') {
     if (comparison.difference.reason === 'content' && comparison.difference.region === 'code' && hasLibraryGuard(artifact.deployedBytecode.object) && comparison.difference.offset >= 1 && comparison.difference.offset <= 20) {
@@ -223,7 +230,7 @@ async function verifyContract(resource: PreparedContract, client: Client, option
     if (comparison.difference.reason === 'content' && comparison.difference.region === 'metadata') {
       result.proofs.push({ name: 'metadata', method: 'cbor-metadata', expected: comparison.difference.expectedMetadataHash, actual: comparison.difference.liveMetadataHash, matched: false });
     }
-    result.evidence.difference = comparison.difference;
+    evidence.difference = comparison.difference;
     result.reasons.push(mismatchReason(comparison.difference));
     return finish(result);
   }
@@ -282,7 +289,7 @@ async function verifyContract(resource: PreparedContract, client: Client, option
   for (const entry of comparison.immutables) {
     const item = info.get(entry.id);
     const provenBy = exact ?? covered.get(entry.id) ?? null;
-    result.evidence.immutables.push({ id: entry.id, name: item?.name ?? null, value: entry.value, provenBy });
+    evidence.immutables.push({ id: entry.id, name: item?.name ?? null, value: entry.value, provenBy });
     if (provenBy) continue;
     const hint = item?.getter ? `declare a check on ${item.getter}()` : 'supply an expected code hash or creation evidence';
     result.missingProofs.push(`Immutable ${immutableLabel(item, entry.id)} at runtime byte ${entry.ranges.map(range => range.start).join(', ')} has no value proof; ${hint}.`);

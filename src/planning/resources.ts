@@ -3,9 +3,9 @@ import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
 import type { Artifacts } from '../artifacts/types.ts';
-import type { DependencyEdge, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks } from '../spec/types.ts';
+import type { DependencyEdge, Factory, OrderedCallNode, OrderedContractNode, OrderedExternalNode, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks } from '../spec/types.ts';
 import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
-import type { PlannedTransaction, PreparedBinding, PreparedCallCheck, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource, PreparedResources } from './types.ts';
+import type { PlannedTransaction, PreparedBinding, PreparedCall, PreparedCallCheck, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource, PreparedResources } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -24,6 +24,111 @@ function checks(value: SpecChecks | undefined, spec: ParsedSpec, addresses: Reso
     .map(([functionName, expected]) => ({ functionName, expected: resolve(expected, spec, addresses) }));
 }
 
+function dependencyFields(node: OrderedNode, describeDependencies: boolean): { resolutionDependencies?: ResourceId[]; executionEdges?: DependencyEdge[] } {
+  return describeDependencies ? {
+    resolutionDependencies: [...node.resolutionDependencies],
+    executionEdges: node.executionEdges,
+  } : {};
+}
+
+function buildExternal(node: OrderedExternalNode, spec: ParsedSpec, addresses: ResolvedAddresses, describeDependencies: boolean): PreparedExternal {
+  const item = node.item;
+  const resource: PreparedExternal = {
+    id: node.id,
+    kind: 'external',
+    dependencies: [...node.dependencies].sort(),
+    ...dependencyFields(node, describeDependencies),
+    address: item.address,
+    expectedCodeHash: item.codeHash ?? null,
+    checks: checks(item.checks, spec, addresses),
+  };
+  if (item.abi) resource.abi = item.abi;
+  return resource;
+}
+
+function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: ResolvedAddresses, artifacts: Artifacts, describeDependencies: boolean): PreparedContract {
+  const item = node.item;
+  const artifact = artifacts.get(item.id);
+  assert(artifact, `Missing artifact for contract:${item.id}.`);
+  assert(typeof artifact.artifactHash === 'string' && HASH.test(artifact.artifactHash), `contract:${item.id} needs a normalized artifactHash.`);
+  const inputs = resolve(item.args ?? [], spec, addresses);
+  // validateLibraries (through encodeConstructor and validateResources) checks that every value is an address.
+  const libraries = resolve(item.libraries ?? {}, spec, addresses) as Record<string, Address>;
+  let address: JsonValue;
+  let deployment: { initcode: Hex; salt: Hash; factory: Factory } | undefined;
+  if (item.address !== undefined) {
+    address = resolve(item.address, spec, addresses);
+  } else {
+    // parseSpec guarantees `salt` and `factory` for a contract without an address.
+    const initcode = encodeConstructor(artifact, inputs, libraries, node.id);
+    deployment = { initcode, salt: item.salt!, factory: spec.factory! };
+    address = create2Address(deployment.factory.address, deployment.salt, initcode);
+  }
+  assert(typeof address === 'string' && isAddress(address), `contract:${item.id} has an invalid resolved address.`);
+  assert(!Object.values(addresses).some(existing => existing.toLowerCase() === address.toLowerCase()), `contract:${item.id} resolves to a duplicate contract address.`);
+  addresses[item.id] = address;
+
+  const resource: PreparedContract = {
+    id: node.id,
+    kind: 'contract',
+    dependencies: [...node.dependencies].sort(),
+    ...dependencyFields(node, describeDependencies),
+    address,
+    artifact,
+    artifactHash: artifact.artifactHash,
+    inputs,
+    inputsHash: hashJson(inputs),
+    checks: checks(item.checks, spec, addresses),
+    signerRole: item.signerRole ?? 'deployer',
+    senderIndependent: item.senderIndependent ?? false,
+  };
+  if (Object.keys(libraries).length > 0) resource.libraries = libraries;
+  if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
+  if (deployment !== undefined) {
+    resource.initcode = deployment.initcode;
+    resource.initcodeHash = keccak256(deployment.initcode);
+    resource.salt = deployment.salt;
+    resource.factory = { ...deployment.factory };
+  }
+  return resource;
+}
+
+function buildCall(node: OrderedCallNode, spec: ParsedSpec, addresses: ResolvedAddresses, contracts: Map<string, PreparedContract>, describeDependencies: boolean): PreparedCall {
+  const item = node.item;
+  const target = contracts.get(item.target);
+  assert(target, `${node.id} has unresolved target contract:${item.target}.`);
+  const checkArgs = resolve(item.check.args, spec, addresses);
+  const after: PreparedBinding = {
+    functionName: item.check.function,
+    args: checkArgs,
+    expected: resolve(item.check.equals, spec, addresses),
+  };
+  const before: PreparedBinding = {
+    functionName: item.check.function,
+    args: checkArgs,
+    expected: resolve(item.before.equals, spec, addresses),
+  };
+  const check: PreparedCallCheck = { functionName: item.check.function, args: checkArgs };
+  const resource: PreparedCall = {
+    id: node.id,
+    kind: 'call',
+    dependencies: [...node.dependencies].sort(),
+    ...dependencyFields(node, describeDependencies),
+    address: target.address,
+    targetId: target.id,
+    targetArtifact: target.artifact,
+    abi: target.artifact.abi,
+    method: item.method,
+    args: resolve(item.args, spec, addresses),
+    check,
+    before,
+    after,
+    signerRole: item.signerRole ?? 'owner',
+    ...(describeDependencies ? { ownerOnly: item.ownerOnly ?? false, transfersOwnership: item.transfersOwnership || item.method === 'transferOwnership' } : {}),
+  };
+  return resource;
+}
+
 /**
  * Resolves the spec in resolution order into concrete contracts, externals, and calls.
  * Contract addresses are known before dependent arguments and call targets are resolved.
@@ -33,10 +138,6 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
   const spec = parseSpec(specInput);
   const ordered = orderedInput ?? graph(spec);
   const describeDependencies = usesDependencyPlan(spec);
-  const dependencyFields = (node: OrderedNode): { resolutionDependencies?: ResourceId[]; executionEdges?: DependencyEdge[] } => describeDependencies ? {
-    resolutionDependencies: [...node.resolutionDependencies],
-    executionEdges: node.executionEdges,
-  } : {};
   assert(artifacts instanceof Map, 'Artifacts must be a Map keyed by contract ID.');
   const addresses: ResolvedAddresses = {};
   const resources: PreparedResource[] = [];
@@ -44,102 +145,14 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
 
   for (const node of ordered) {
     if (node.kind === 'external') {
-      const item = node.item;
-      const resource: PreparedExternal = {
-        id: node.id,
-        kind: 'external',
-        dependencies: [...node.dependencies].sort(),
-        ...dependencyFields(node),
-        address: item.address,
-        expectedCodeHash: item.codeHash ?? null,
-        checks: checks(item.checks, spec, addresses),
-      };
-      if (item.abi) resource.abi = item.abi;
+      resources.push(buildExternal(node, spec, addresses, describeDependencies));
+    } else if (node.kind === 'contract') {
+      const resource = buildContract(node, spec, addresses, artifacts, describeDependencies);
+      contracts.set(node.item.id, resource);
       resources.push(resource);
-      continue;
+    } else {
+      resources.push(buildCall(node, spec, addresses, contracts, describeDependencies));
     }
-
-    if (node.kind === 'contract') {
-      const item = node.item;
-      const artifact = artifacts.get(item.id);
-      assert(artifact, `Missing artifact for contract:${item.id}.`);
-      assert(typeof artifact.artifactHash === 'string' && HASH.test(artifact.artifactHash), `contract:${item.id} needs a normalized artifactHash.`);
-      const inputs = resolve(item.args ?? [], spec, addresses);
-      // validateLibraries (through encodeConstructor and validateResources) checks that every value is an address.
-      const libraries = resolve(item.libraries ?? {}, spec, addresses) as Record<string, Address>;
-      let address: JsonValue;
-      let deployment: { initcode: Hex; salt: Hash; factory: Factory } | undefined;
-      if (item.address !== undefined) {
-        address = resolve(item.address, spec, addresses);
-      } else {
-        // parseSpec guarantees `salt` and `factory` for a contract without an address.
-        const initcode = encodeConstructor(artifact, inputs, libraries, node.id);
-        deployment = { initcode, salt: item.salt!, factory: spec.factory! };
-        address = create2Address(deployment.factory.address, deployment.salt, initcode);
-      }
-      assert(typeof address === 'string' && isAddress(address), `contract:${item.id} has an invalid resolved address.`);
-      assert(!Object.values(addresses).some(existing => existing.toLowerCase() === address.toLowerCase()), `contract:${item.id} resolves to a duplicate contract address.`);
-      addresses[item.id] = address;
-
-      const resource: PreparedContract = {
-        id: node.id,
-        kind: 'contract',
-        dependencies: [...node.dependencies].sort(),
-        ...dependencyFields(node),
-        address,
-        artifact,
-        artifactHash: artifact.artifactHash,
-        inputs,
-        inputsHash: hashJson(inputs),
-        checks: checks(item.checks, spec, addresses),
-        signerRole: item.signerRole ?? 'deployer',
-        senderIndependent: item.senderIndependent ?? false,
-      };
-      if (Object.keys(libraries).length > 0) resource.libraries = libraries;
-      if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
-      if (deployment !== undefined) {
-        resource.initcode = deployment.initcode;
-        resource.initcodeHash = keccak256(deployment.initcode);
-        resource.salt = deployment.salt;
-        resource.factory = { ...deployment.factory };
-      }
-      contracts.set(item.id, resource);
-      resources.push(resource);
-      continue;
-    }
-
-    const item = node.item;
-    const target = contracts.get(item.target);
-    assert(target, `${node.id} has unresolved target contract:${item.target}.`);
-    const checkArgs = resolve(item.check.args, spec, addresses);
-    const after: PreparedBinding = {
-      functionName: item.check.function,
-      args: checkArgs,
-      expected: resolve(item.check.equals, spec, addresses),
-    };
-    const before: PreparedBinding = {
-      functionName: item.check.function,
-      args: checkArgs,
-      expected: resolve(item.before.equals, spec, addresses),
-    };
-    const check: PreparedCallCheck = { functionName: item.check.function, args: checkArgs };
-    resources.push({
-      id: node.id,
-      kind: 'call',
-      dependencies: [...node.dependencies].sort(),
-      ...dependencyFields(node),
-      address: target.address,
-      targetId: target.id,
-      targetArtifact: target.artifact,
-      abi: target.artifact.abi,
-      method: item.method,
-      args: resolve(item.args, spec, addresses),
-      check,
-      before,
-      after,
-      signerRole: item.signerRole ?? 'owner',
-      ...(describeDependencies ? { ownerOnly: item.ownerOnly ?? false, transfersOwnership: item.transfersOwnership || item.method === 'transferOwnership' } : {}),
-    });
   }
 
   validateResources(resources);
