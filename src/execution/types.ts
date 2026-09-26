@@ -750,12 +750,13 @@ export interface ApplyResult {
   lockRecovered: LocalLockHolder | null;
   journal: { file: string | null; tornTailRemoved: boolean };
   state: StateWriteResult;
-  stoppedAt?: { code: ApplyErrorCode; actionId?: ResourceId; message: string; retryable: boolean };
+  /** Ordinary errors may lack an apply code and retry policy. */
+  stoppedAt?: { code?: ApplyErrorCode; actionId?: ResourceId; message: string; retryable?: boolean };
 }
 
 /**
- * The apply state applyPlan builds and `run` extends. `prepared`, `stateSnapshot`, and `schedule` are set by `run`.
- * Phase 4 restructures this; Phase 2 only names it.
+ * The apply state applyPlan builds and `run` extends. The collections and state snapshot start empty;
+ * `run` fills them during preflight. Phase 4 moves this construction into its own module.
  */
 export interface ApplyContext {
   plan: Plan;
@@ -781,8 +782,9 @@ export interface ApplyContext {
   outcomes: Map<ResourceId, ResourceOutcome>;
   timings: ApplyTimings;
   state: StateWriteResult;
-  prepared?: Map<ResourceId, PreparedAction>;
-  stateSnapshot?: StateFile | null;
+  prepared: Map<ResourceId, PreparedAction>;
+  preflightComplete: boolean;
+  stateSnapshot: StateFile | null;
   schedule?: Schedule;
 }
 

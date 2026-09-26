@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
@@ -11,8 +10,12 @@ import { acquireLock } from './lock.ts';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.ts';
 import { checkFactory, jsonSafe, preflight } from './preflight.ts';
 import { broadcast, estimateGasLimit, feesFor, findKnownReceipt, findReceipt, maximumCost, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt } from './transactions.ts';
+import type { Plan, PlannedResource, PlannedTransaction, PreparedResource } from '../planning/types.ts';
+import type { ScheduleEntry, ScheduleWave } from '../scheduling/types.ts';
+import type { StateFile } from '../state/types.ts';
+import type { Address, Client, Hash, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
-import type { ApplyInput, ApplyResult, VerificationSummary } from './types.ts';
+import type { ApplyConfig, ApplyContext, ApplyInput, ApplyResult, BroadcastOutcome, FailedFields, FailureCode, IntentRecord, JournalPhaseFields, JournalRecord, JournalRecordInput, PreparedAction, Receipt, ReceiptFields, ReceiptJson, ReportEvent, ReportEventType, ResourceOutcome, ResourceOutcomeSummary, SignerAccount, SignerAuthorization, SignerLanes, SignerProvider, SignerRoles, Signers, SignedRecord, SignedBytes, StateWriteResult, TransactionEnvelope, VerifiedFields, VerificationSummary } from './types.ts';
 
 export { ApplyError } from './errors.ts';
 export { acquireLock, LockError } from './lock.ts';
@@ -20,13 +23,46 @@ export { openJournal } from './journal.ts';
 export { acquireLeases, deploymentScope, encryptionContext, lockScopes, openStoredJournal, scopeKey, validateJournal } from './backends.ts';
 
 const DEFAULTS = { pollIntervalMs: 250, receiptTimeoutMs: 120_000, gasMultiplier: 1.2, fees: null, budgets: {}, hooks: {}, dependencies: {} };
-const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const pause = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
-function roleOf(resource) {
-  return resource.signerRole ?? (resource.kind === 'call' ? 'owner' : 'deployer');
+function transactionFor(item: PreparedAction): PlannedTransaction {
+  const transaction = item.planned.tx;
+  if (!transaction) throw new ApplyError('plan-format', `Action ${item.planned.id} has no planned transaction.`, { actionId: item.planned.id });
+  return transaction;
 }
 
-function lanesFrom(signers, parallel) {
+interface ResumeJob {
+  item: PreparedAction;
+  entry: ScheduleEntry;
+  signer: SignerAccount;
+  intent: IntentRecord;
+  signed: SignedRecord | null;
+  signedIntent: IntentRecord | null;
+  variants: SignedRecord[];
+  records: JournalRecord[];
+  receipt: Receipt | null;
+  completed: boolean;
+}
+
+type CostEnvelope = Omit<TransactionEnvelope, 'nonce'> & { nonce?: number };
+interface FundedJob {
+  item: PreparedAction;
+  entry: ScheduleEntry;
+  signer: SignerAccount;
+  envelope: CostEnvelope;
+  cost: bigint;
+}
+type SignedBatchJob = FundedJob & { signed: SignedRecord };
+type PipelineBatchJob = SignedBatchJob & { intent: IntentRecord; signedIntent: IntentRecord; variants: SignedRecord[] };
+type ActivePipelineJob = PipelineBatchJob | (ResumeJob & { signed: SignedRecord });
+type CommitmentLedger = Map<string, Map<string, { cost: bigint; reservationId?: string }[]>>;
+type PipelineAttempt = { receipt?: Receipt; accepted?: boolean; error?: unknown };
+
+function roleOf(resource: PlannedResource | PreparedResource): string {
+  return ('signerRole' in resource ? resource.signerRole : null) ?? (resource.kind === 'call' ? 'owner' : 'deployer');
+}
+
+function lanesFrom(signers: Signers | undefined, parallel: boolean): SignerLanes {
   if (!signers || !Array.isArray(signers.deployer) || signers.deployer.length === 0) throw new ApplyError('signer', 'Apply needs signers.deployer with at least one account.');
   const accounts = [...signers.deployer, ...(signers.owner ? [signers.owner] : [])];
   for (const account of accounts) {
@@ -34,15 +70,15 @@ function lanesFrom(signers, parallel) {
   }
   const deployers = signers.deployer.map(account => account.address.toLowerCase());
   if (new Set(deployers).size !== deployers.length) throw new ApplyError('signer', 'Deployer accounts must be distinct.');
-  const byAddress = new Map(accounts.map(account => [account.address.toLowerCase(), account]));
-  return { pool: parallel ? signers.deployer : [signers.deployer[0]], owner: signers.owner ?? null, byAddress };
+  const byAddress = new Map(accounts.map((account): [string, SignerAccount] => [account.address.toLowerCase(), account]));
+  return { pool: parallel ? signers.deployer : [signers.deployer[0]!], owner: signers.owner ?? null, byAddress };
 }
 
-async function signersFromProvider(provider, roles, plan, control) {
+async function signersFromProvider(provider: SignerProvider, roles: SignerRoles | undefined, plan: Plan, control: SignerAuthorization & { assertHeld: (() => Promise<void>) | null }): Promise<Signers> {
   if (typeof provider?.address !== 'function' || typeof provider?.signTransaction !== 'function') throw new ApplyError('signer', 'Signer provider needs address(role) and signTransaction(role, request).');
   const deployerRoles = roles?.deployer ?? ['deployer'];
   if (!Array.isArray(deployerRoles) || deployerRoles.length === 0 || deployerRoles.some(role => typeof role !== 'string')) throw new ApplyError('signer', 'signerRoles.deployer must be a nonempty role list.');
-  const account = async role => ({ address: await provider.address(role), async signTransaction(request) {
+  const account = async (role: string): Promise<SignerAccount> => ({ address: await provider.address(role), async signTransaction(request) {
     await control.assertHeld?.();
     return provider.signTransaction(role, request, { scope: control.scope, fence: control.fence });
   } });
@@ -51,8 +87,8 @@ async function signersFromProvider(provider, roles, plan, control) {
   return { deployer, ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}) };
 }
 
-async function report(ctx, type, fields = {}) {
-  const event = jsonSafe({ type, at: new Date().toISOString(), planHash: ctx.plan.planHash, chain: ctx.plan.chain, scope: ctx.scope, principal: ctx.principal, ...fields });
+async function report(ctx: ApplyContext, type: ReportEventType, fields: Record<string, unknown> = {}): Promise<void> {
+  const event = jsonSafe({ type, at: new Date().toISOString(), planHash: ctx.plan.planHash, chain: ctx.plan.chain, scope: ctx.scope, principal: ctx.principal, ...fields }) as ReportEvent;
   if (typeof ctx.config.reporter === 'function') await ctx.config.reporter(event);
   else await ctx.config.reporter?.emit(event);
 }
@@ -70,62 +106,69 @@ export function summarizeVerification(verification: VerificationResult): Verific
   });
 }
 
-async function append(ctx, actionId, fields, identity = ctx.plan) {
+async function append<T extends JournalPhaseFields>(ctx: ApplyContext, actionId: ResourceId, fields: T, identity: Pick<Plan, 'planHash' | 'chain'> = ctx.plan): Promise<JournalRecord & T> {
   await ctx.lock.assertHeld?.();
   const started = Date.now();
-  const record = await ctx.journal.append({ ...jsonSafe(fields), planHash: identity.planHash, chain: identity.chain, actionId, ...(ctx.remote ? { principal: ctx.principal } : {}) });
-  await report(ctx, record.phase === 'failed' ? 'terminal-failure' : record.phase, { actionId, sequence: record.sequence, transactionHash: record.transactionHash, signer: record.signer, nonce: record.nonce, journalAppendLatencyMs: Date.now() - started, ...(record.phase === 'broadcast' ? { rebroadcast: record.rebroadcast } : {}) });
+  const record = await ctx.journal.append({ ...jsonSafe(fields), planHash: identity.planHash, chain: identity.chain, actionId, ...(ctx.remote && ctx.principal ? { principal: ctx.principal } : {}) } as unknown as JournalRecordInput);
+  await report(ctx, record.phase === 'failed' ? 'terminal-failure' : record.phase, { actionId, sequence: record.sequence,
+    transactionHash: 'transactionHash' in record ? record.transactionHash : undefined,
+    signer: 'signer' in record ? record.signer : undefined,
+    nonce: 'nonce' in record ? record.nonce : undefined,
+    journalAppendLatencyMs: Date.now() - started, ...(record.phase === 'broadcast' ? { rebroadcast: record.rebroadcast } : {}) });
   await ctx.config.hooks.afterRecord?.(record);
-  return record;
+  return record as JournalRecord & T;
 }
 
-async function fail(ctx, item, code, reason, { retryable = false, evidence, ...fields } = {}) {
-  await append(ctx, item.planned.id, { phase: 'failed', code, reason, retryable, ...fields, ...(evidence === undefined ? {} : { evidence }) });
+async function fail(ctx: ApplyContext, item: PreparedAction, code: FailureCode, reason: string, { retryable = false, evidence, ...fields }: Omit<Partial<Omit<FailedFields, 'phase' | 'code' | 'reason'>>, 'evidence'> & { evidence?: unknown } = {}): Promise<never> {
+  await append(ctx, item.planned.id, { phase: 'failed', code, reason, retryable, ...fields, ...(evidence === undefined ? {} : { evidence: jsonSafe(evidence) as import('../types.ts').JsonValue }) });
   ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: 'failed',
     code, reason, retryable, ...fields });
   throw new ApplyError(code, reason, { actionId: item.planned.id, evidence, retryable });
 }
 
-async function verify(ctx, item, options = {}) {
+async function verify(ctx: ApplyContext, item: PreparedAction, options: import('../verification/types.ts').VerifyOptions = {}): Promise<VerificationResult> {
   const id = item.planned.id;
-  const saved = options.creationProof ?? ctx.outcomes.get(id)?.verification?.creationProof ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
+  const outcome = ctx.outcomes.get(id);
+  const saved = options.creationProof ?? (outcome && 'verification' in outcome ? outcome.verification.creationProof : undefined) ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
   const transactionHash = options.transactionHash ?? saved?.transactionHash ?? ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ?? ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
   const creationProof = saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined;
   return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
-async function markVerified(ctx, item, verification, fields) {
+async function markVerified(ctx: ApplyContext, item: PreparedAction, verification: VerificationResult, fields: Pick<VerifiedFields, 'outcome'> & Partial<Pick<VerifiedFields, 'transactionHash' | 'blockNumber' | 'revertedTransaction' | 'unsentTransaction'>>): Promise<void> {
   const { planned } = item;
   await append(ctx, planned.id, { phase: 'verified', address: planned.address, codeHash: verification.codeHash, proofHash: hashJson(jsonSafe(verification)), verification: summarizeVerification(verification), ...(verification.creationProof ? { creationProof: verification.creationProof } : {}), ...fields });
-  ctx.outcomes.set(planned.id, { id: planned.id, action: planned.action, outcome: fields.outcome, address: planned.address, transactionHash: fields.transactionHash, verification });
+  ctx.outcomes.set(planned.id, { id: planned.id, action: planned.action, outcome: fields.outcome, address: planned.address,
+    ...(fields.transactionHash ? { transactionHash: fields.transactionHash } : {}), verification });
 }
 
 // Reads the chain before a write: a satisfied postcondition needs no transaction, a failed precondition is a conflict.
-async function precondition(ctx, item) {
+async function precondition(ctx: ApplyContext, item: PreparedAction): Promise<{ satisfied: boolean; verification?: VerificationResult }> {
   const { planned } = item;
-  if (planned.action === 'deploy') {
+  if (planned.action === 'deploy' && planned.kind === 'contract') {
+    if (!planned.factory) throw new ApplyError('plan-format', `Action ${planned.id} has no CREATE2 factory.`, { actionId: planned.id });
     await checkFactory(ctx.client, planned.factory);
     const code = await ctx.client.getCode({ address: planned.address });
     if (!code || code === '0x') return { satisfied: false };
     const verification = await verify(ctx, item);
     if (verification.status === 'verified') return { satisfied: true, verification };
-    await fail(ctx, item, verification.status === 'unverified' ? 'unverified' : 'conflict', `The target address already has code, and it is ${verification.status}.`, { evidence: summarizeVerification(verification) });
+    return fail(ctx, item, verification.status === 'unverified' ? 'unverified' : 'conflict', `The target address already has code, and it is ${verification.status}.`, { evidence: summarizeVerification(verification) });
   }
   const verification = await verify(ctx, item);
   const observed = (verification.bindingChecks ?? []).map(check => check.observed);
   if (verification.status === 'verified' && observed.length > 0 && observed.every(state => state === 'after')) return { satisfied: true, verification };
   if (observed.length > 0 && observed.every(state => state === 'before')) return { satisfied: false, verification };
-  await fail(ctx, item, 'conflict', 'The binding has neither its allowed before value nor its desired value.', { evidence: summarizeVerification(verification) });
+  return fail(ctx, item, 'conflict', 'The binding has neither its allowed before value nor its desired value.', { evidence: summarizeVerification(verification) });
 }
 
-async function recordReceipt(ctx, item, signed, receipt) {
+async function recordReceipt(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, receipt: Receipt): Promise<void> {
   const latest = latestRecord(ctx.journal.forAction(ctx.plan.planHash, item.planned.id));
   const json = receiptJson(receipt);
   if (latest?.phase === 'receipt' && latest.receipt?.blockHash === json.blockHash.toLowerCase()) return;
   await append(ctx, item.planned.id, { phase: 'receipt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, receipt: json });
 }
 
-async function stableReceipt(ctx, transactionHash, receipt, actionId, wait = false) {
+async function stableReceipt(ctx: ApplyContext, transactionHash: Hash, receipt: Receipt | ReceiptJson, actionId: ResourceId, wait = false): Promise<Receipt> {
   const deadline = Date.now() + ctx.config.receiptTimeoutMs;
   for (;;) {
     const current = await findReceipt(ctx.client, transactionHash);
@@ -141,21 +184,21 @@ async function stableReceipt(ctx, transactionHash, receipt, actionId, wait = fal
   }
 }
 
-async function revalidateVerified(ctx) {
+async function revalidateVerified(ctx: ApplyContext): Promise<void> {
   for (const item of ctx.prepared.values()) {
     const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
     const latest = records.at(-1);
     if (latest?.phase !== 'verified') continue;
     const hash = latest.transactionHash ?? latest.revertedTransaction;
     if (!hash) continue;
-    const receipt = records.filter(record => record.phase === 'receipt' && record.transactionHash === hash).at(-1)?.receipt;
+    const receipt = records.filter((record): record is JournalRecord & import('./types.ts').ReceiptFields => record.phase === 'receipt' && record.transactionHash === hash).at(-1)?.receipt;
     if (!receipt) throw new ApplyError('journal', `Verified action ${item.planned.id} has no receipt.`, { actionId: item.planned.id });
     await stableReceipt(ctx, hash, receipt, item.planned.id);
   }
 }
 
-async function assertSignerHistory(ctx, addresses) {
-  if (!ctx.remote) return;
+async function assertSignerHistory(ctx: ApplyContext, addresses: Address[]): Promise<void> {
+  if (!ctx.remote || !ctx.journalStore || !ctx.scope) return;
   for (const address of new Set(addresses.map(value => value.toLowerCase()))) {
     for await (const signed of ctx.journalStore.signedForSigner(ctx.scope, address)) {
       if (signed.label === ctx.scope.label && signed.planHash === ctx.plan.planHash) continue;
@@ -167,7 +210,7 @@ async function assertSignerHistory(ctx, addresses) {
 }
 
 // A receipt does not complete an action. The postcondition must verify at the receipt block, and that block must still be canonical.
-async function finish(ctx, item, signed, receipt) {
+async function finish(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, receipt: Receipt): Promise<void> {
   const transactionHash = signed.transactionHash;
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id, true);
   if (receipt.status !== 'success') {
@@ -185,23 +228,23 @@ async function finish(ctx, item, signed, receipt) {
   if (verification.status !== 'verified') {
     await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.`, { transactionHash, evidence: summarizeVerification(verification) });
   }
-  await markVerified(ctx, item, verification, { outcome: 'applied', transactionHash, blockNumber: receipt.blockNumber });
+  await markVerified(ctx, item, verification, { outcome: 'applied', transactionHash, blockNumber: String(receipt.blockNumber) });
 }
 
-async function awaitReceipt(ctx, item, signed, variants = [signed]) {
+async function awaitReceipt(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, variants: SignedRecord[] = [signed]): Promise<Receipt> {
   const started = Date.now();
   const waited = await waitForReceipt(ctx.client, { signedVariants: variants, signer: signed.signer, nonce: signed.nonce, pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: ctx.config.receiptTimeoutMs });
-  if (waited.dead) {
-    await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
+  if ('dead' in waited) {
+    return fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
   }
-  if (waited.timeout) {
+  if ('timeout' in waited) {
     throw new ApplyError('receipt-timeout', `No receipt for ${signed.transactionHash} after ${ctx.config.receiptTimeoutMs} ms. Rerun to resume or provide reviewed replacement fees.`, { actionId: item.planned.id, retryable: true });
   }
   await report(ctx, 'receipt-observed', { actionId: item.planned.id, transactionHash: waited.receipt.transactionHash, receiptLatencyMs: Date.now() - started });
   return waited.receipt;
 }
 
-async function send(ctx, item, signed, { rebroadcast = false, variants = [signed] } = {}) {
+async function send(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, { rebroadcast = false, variants = [signed] }: { rebroadcast?: boolean; variants?: SignedRecord[] } = {}): Promise<Receipt> {
   await ctx.lock.assertHeld?.();
   await append(ctx, item.planned.id, { phase: 'broadcast-attempt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast });
   await ctx.lock.assertHeld?.();
@@ -222,22 +265,23 @@ async function send(ctx, item, signed, { rebroadcast = false, variants = [signed
   return awaitReceipt(ctx, item, signed, variants);
 }
 
-function matchingVariant(variants, receipt) {
+function matchingVariant(variants: SignedRecord[], receipt: Receipt): SignedRecord {
   const signed = variants.find(entry => entry.transactionHash.toLowerCase() === receipt.transactionHash.toLowerCase());
   if (!signed) throw new Error('Receipt is not for a journaled transaction.');
   return signed;
 }
 
-async function replaceSigned(ctx, item, signed, variants) {
+async function replaceSigned(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, variants: SignedRecord[]): Promise<SignedRecord> {
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const pending = records.at(-1);
   const orphan = pending?.phase === 'intent' && pending.replacement && pending.replacesTransactionHash?.toLowerCase() === signed.transactionHash.toLowerCase();
   const requested = ctx.config.replacementFees;
   if (!orphan && !requested) return signed;
   const oldIntent = intentForSigned(ctx.journal.records, signed);
+  const tx = transactionFor(item);
   if (orphan && (pending.signer?.toLowerCase() !== signed.signer.toLowerCase() || pending.nonce !== signed.nonce ||
-    pending.to?.toLowerCase() !== item.planned.tx.to.toLowerCase() || String(pending.value) !== String(item.planned.tx.value) ||
-    pending.dataHash?.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase() ||
+    pending.to?.toLowerCase() !== tx.to.toLowerCase() || String(pending.value) !== String(tx.value) ||
+    pending.dataHash?.toLowerCase() !== keccak256(tx.data).toLowerCase() ||
     String(pending.gas) !== String(oldIntent.gas) || pending.reservationId !== oldIntent.reservationId)) {
     throw new ApplyError('journal', 'Saved replacement intent differs from the reserved transaction.', { actionId: item.planned.id });
   }
@@ -245,12 +289,12 @@ async function replaceSigned(ctx, item, signed, variants) {
     : await feesFor(ctx.client, requested);
   if (!orphan && signed.replacement && fees.maxFeePerGas === BigInt(oldIntent.maxFeePerGas) &&
     fees.maxPriorityFeePerGas === BigInt(oldIntent.maxPriorityFeePerGas)) return signed;
-  const minimum = value => (BigInt(value) * 110n + 99n) / 100n || 1n;
+  const minimum = (value: string) => (BigInt(value) * 110n + 99n) / 100n || 1n;
   if (fees.maxFeePerGas < minimum(oldIntent.maxFeePerGas) || fees.maxPriorityFeePerGas < minimum(oldIntent.maxPriorityFeePerGas) ||
     fees.maxPriorityFeePerGas > fees.maxFeePerGas) throw new ApplyError('replacement-fees', 'Replacement fees must raise both caps by at least 10% and keep priority fee within the maximum fee.', { actionId: item.planned.id });
-  const envelope = { type: 'eip1559', chainId: ctx.plan.chain.id, nonce: Number(signed.nonce), to: item.planned.tx.to,
-    data: item.planned.tx.data, value: BigInt(item.planned.tx.value), gas: BigInt(oldIntent.gas), ...fees };
-  const ceiling = BigInt(orphan ? pending.maxCostWei : requested.maxCostWei);
+  const envelope: TransactionEnvelope = { chainId: ctx.plan.chain.id, nonce: Number(signed.nonce), to: tx.to,
+    data: tx.data, value: BigInt(tx.value), gas: BigInt(oldIntent.gas), ...fees };
+  const ceiling = BigInt(orphan ? pending.maxCostWei! : requested!.maxCostWei);
   const cost = maximumCost(envelope);
   if (cost > ceiling) throw new ApplyError('replacement-budget', `Replacement can cost ${cost} wei, above the reviewed ${ceiling} wei ceiling.`, { actionId: item.planned.id });
   const signer = ctx.lanes.byAddress.get(signed.signer.toLowerCase());
@@ -265,29 +309,30 @@ async function replaceSigned(ctx, item, signed, variants) {
       throw new ApplyError('budget-exceeded', `Replacement would exceed signer ${signed.signer}'s ${budget} wei budget.`, { actionId: item.planned.id, retryable: true });
     }
   }
-  let intent = pending;
-  if (!orphan) {
+  let intent: IntentRecord;
+  if (orphan && pending?.phase === 'intent') intent = pending;
+  else {
     intent = await append(ctx, item.planned.id, { phase: 'intent', replacement: true, replacesTransactionHash: signed.transactionHash,
       maxCostWei: String(ceiling), signer: signed.signer, nonce: signed.nonce, to: envelope.to,
       value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas),
       maxFeePerGas: String(fees.maxFeePerGas), maxPriorityFeePerGas: String(fees.maxPriorityFeePerGas),
-      ...Object.fromEntries(['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId']
+      ...Object.fromEntries((['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId'] as const)
         .filter(field => oldIntent[field] !== undefined).map(field => [field, oldIntent[field]])) });
   }
-  let bytes;
+  let bytes: SignedBytes;
   try { bytes = await signWithLease(ctx, item.planned.id, signer, envelope); }
-  catch (error) { throw new ApplyError('signer', error.message, { actionId: item.planned.id, retryable: true }); }
+  catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: item.planned.id, retryable: true }); }
   const { formatVersion, planHash, chain, actionId, sequence, at, ...intentFields } = intent;
   const replacement = await append(ctx, item.planned.id, { ...intentFields, phase: 'signed', ...bytes });
   await validateSignedTransaction(replacement, intent, item.planned, ctx.plan.chain.id);
   variants.push(replacement);
-  ctx.sent.push({ actionId: item.planned.id, wave: intent.wave, signer: signed.signer.toLowerCase(), nonce: signed.nonce,
-    transactionHash: replacement.transactionHash.toLowerCase() });
+  ctx.sent.push({ actionId: item.planned.id, ...(intent.wave === undefined ? {} : { wave: intent.wave }), signer: signed.signer.toLowerCase(), nonce: signed.nonce,
+    transactionHash: replacement.transactionHash.toLowerCase() as Hash });
   return replacement;
 }
 
 // Resolves every signed variant at a reserved nonce before resending or replacing it.
-async function settle(ctx, item, signed) {
+async function settle(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord): Promise<void> {
   await report(ctx, 'recovery', { actionId: item.planned.id, transactionHash: signed.transactionHash });
   const variants = signedVariants(ctx.journal.forAction(ctx.plan.planHash, item.planned.id), signed);
   let receipt = await findKnownReceipt(ctx.client, variants);
@@ -299,7 +344,7 @@ async function settle(ctx, item, signed) {
   }
   if (!receipt) {
     const observed = await precondition(ctx, item);
-    if (observed.satisfied) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
+    if (observed.satisfied && observed.verification) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
     await checkExecutionDependencies(ctx, [{ item }], false);
     signed = await replaceSigned(ctx, item, signed, variants);
     receipt = await findKnownReceipt(ctx.client, variants);
@@ -311,7 +356,7 @@ async function settle(ctx, item, signed) {
 }
 
 // Another plan's transaction can hold a signer's next nonce. Record its fate, or stop if it may still be sent.
-async function settleForeign(ctx, signed) {
+async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<JournalRecord> {
   const identity = { planHash: signed.planHash, chain: signed.chain };
   const variants = signedVariants(ctx.journal.forAction(signed.planHash, signed.actionId), signed);
   let receipt = await findKnownReceipt(ctx.client, variants);
@@ -328,7 +373,7 @@ async function settleForeign(ctx, signed) {
     transactionHash: mined.transactionHash, receipt: receiptJson(receipt) }, identity);
 }
 
-async function settleJournal(ctx) {
+async function settleJournal(ctx: ApplyContext): Promise<void> {
   const { id, genesisHash } = ctx.plan.chain;
   const records = ctx.journal.records.filter(record => record.chain.id === id && record.chain.genesisHash.toLowerCase() === genesisHash.toLowerCase());
   for (const { latest, signed } of liveTransactions(records)) {
@@ -347,14 +392,15 @@ async function settleJournal(ctx) {
         for (const [index, variant] of variants.entries()) {
           const intent = intentForSigned(records, variant);
           await validateSignedTransaction(variant, intent, item.planned, id);
-          if (index && (intent.replacesTransactionHash?.toLowerCase() !== variants[index - 1].transactionHash.toLowerCase() ||
-            BigInt(intent.maxFeePerGas) <= BigInt(intentForSigned(records, variants[index - 1]).maxFeePerGas) ||
-            BigInt(intent.maxPriorityFeePerGas) <= BigInt(intentForSigned(records, variants[index - 1]).maxPriorityFeePerGas))) {
+          const previous = variants[index - 1];
+          if (previous && (intent.replacesTransactionHash?.toLowerCase() !== previous.transactionHash.toLowerCase() ||
+            BigInt(intent.maxFeePerGas) <= BigInt(intentForSigned(records, previous).maxFeePerGas) ||
+            BigInt(intent.maxPriorityFeePerGas) <= BigInt(intentForSigned(records, previous).maxPriorityFeePerGas))) {
             throw new Error('Signed replacement does not raise fees for its predecessor.');
           }
         }
       } catch (error) {
-        throw new ApplyError('journal', `${latest.actionId}: ${error.message}`, { actionId: latest.actionId });
+        throw new ApplyError('journal', `${latest.actionId}: ${error instanceof Error ? error.message : String(error)}`, { actionId: latest.actionId });
       }
     }
   }
@@ -372,11 +418,12 @@ async function settleJournal(ctx) {
 
 // A signed reservation commits the entire wave. Older journals have no attempt ID,
 // but their complete intent set immediately precedes the first signature.
-function pipelineAttempt(ctx, wave) {
+function pipelineAttempt(ctx: ApplyContext, wave: ScheduleWave): { intents: IntentRecord[]; attemptId: string | null } | null {
   const actions = new Set(wave.batches.flat().map(entry => entry.id));
-  const records = ctx.journal.records.filter(record => record.planHash === ctx.plan.planHash && actions.has(record.actionId) &&
-    record.reservationId && !record.replacement && ['intent', 'signed'].includes(record.phase));
-  const signatures = records.filter(record => record.phase === 'signed');
+  const records = ctx.journal.records.filter((record): record is IntentRecord | SignedRecord =>
+    record.planHash === ctx.plan.planHash && actions.has(record.actionId) &&
+    (record.phase === 'intent' || record.phase === 'signed') && Boolean(record.reservationId) && !record.replacement);
+  const signatures = records.filter((record): record is SignedRecord => record.phase === 'signed');
   if (!signatures.length) return null;
   if (records.some(record => record.wave !== wave.wave || record.chain.id !== ctx.plan.chain.id ||
     record.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
@@ -384,10 +431,11 @@ function pipelineAttempt(ctx, wave) {
   }
   const ids = new Set(signatures.map(record => record.waveAttemptId ?? null));
   if (ids.size !== 1) throw new ApplyError('journal', `Wave ${wave.wave} has signatures from multiple attempts.`);
-  const [attemptId] = ids;
+  const attemptId = ids.values().next().value ?? null;
+  const firstSignature = signatures[0]!;
   const intents = attemptId
-    ? records.filter(record => record.phase === 'intent' && record.waveAttemptId === attemptId)
-    : records.filter(record => record.phase === 'intent' && !record.waveAttemptId && record.sequence < signatures[0].sequence).slice(-wave.batches.flat().length);
+    ? records.filter((record): record is IntentRecord => record.phase === 'intent' && record.waveAttemptId === attemptId)
+    : records.filter((record): record is IntentRecord => record.phase === 'intent' && !record.waveAttemptId && record.sequence < firstSignature.sequence).slice(-wave.batches.flat().length);
   if (intents.length !== wave.batches.flat().length || signatures.some(record => !intents.some(intent =>
     intent.actionId === record.actionId && intent.reservationId === record.reservationId))) {
     throw new ApplyError('journal', `Wave ${wave.wave} has an incomplete or ambiguous signed attempt.`);
@@ -395,63 +443,65 @@ function pipelineAttempt(ctx, wave) {
   return { intents, attemptId };
 }
 
-async function resumePipelineWave(ctx, wave) {
+async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave): Promise<boolean> {
   const attempt = pipelineAttempt(ctx, wave);
   if (!attempt) return false;
   const { intents, attemptId } = attempt;
   const entries = wave.batches.flat();
-  const byAction = new Map();
+  const byAction = new Map<ResourceId, IntentRecord>();
   for (const intent of intents) {
     if (byAction.has(intent.actionId)) throw new ApplyError('journal', `Wave ${wave.wave} has duplicate intents for ${intent.actionId}.`);
     byAction.set(intent.actionId, intent);
   }
-  const groups = new Map();
-  const jobs = [];
+  const groups = new Map<string, ResumeJob[]>();
+  const jobs: ResumeJob[] = [];
   for (const entry of entries) {
     const intent = byAction.get(entry.id);
     const item = ctx.prepared.get(entry.id);
     const signer = ctx.lanes.byAddress.get(entry.signer);
+    const tx = item ? transactionFor(item) : null;
     if (!intent || !item || !signer || intent.signer?.toLowerCase() !== entry.signer ||
-      intent.nonceOffset !== entry.nonceOffset || intent.to?.toLowerCase() !== item.planned.tx.to.toLowerCase() ||
-      intent.value !== item.planned.tx.value || intent.dataHash?.toLowerCase() !== keccak256(item.planned.tx.data).toLowerCase() ||
+      typeof entry.nonceOffset !== 'number' || intent.nonceOffset !== entry.nonceOffset || intent.to?.toLowerCase() !== tx?.to.toLowerCase() ||
+      intent.value !== tx?.value || intent.dataHash?.toLowerCase() !== (tx ? keccak256(tx.data).toLowerCase() : null) ||
       !/^[0-9]+$/.test(String(intent.nonce)) || !/^[0-9]+$/.test(String(intent.gas)) ||
       !/^[0-9]+$/.test(String(intent.maxFeePerGas)) || !/^[0-9]+$/.test(String(intent.maxPriorityFeePerGas)) ||
       !Number.isSafeInteger(Number(intent.nonce)) ||
       !intent.reservationId) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid intent for ${entry.id}.`, { actionId: entry.id });
     const group = groups.get(entry.signer) ?? [];
-    if (group.length && (intent.reservationId !== group[0].intent.reservationId ||
-      BigInt(intent.nonce) !== BigInt(group[0].intent.nonce) + BigInt(entry.nonceOffset))) {
+    if (group.length && (intent.reservationId !== group[0]!.intent.reservationId ||
+      BigInt(intent.nonce) !== BigInt(group[0]!.intent.nonce) + BigInt(entry.nonceOffset))) {
       throw new ApplyError('journal', `Wave ${wave.wave} has inconsistent nonces or reservations for ${entry.signer}.`);
     }
     const actionRecords = ctx.journal.forAction(ctx.plan.planHash, entry.id);
     const nextIntent = actionRecords.find(record => record.phase === 'intent' && !record.replacement && record.sequence > intent.sequence);
     const history = actionRecords.filter(record => record.sequence >= intent.sequence && (!nextIntent || record.sequence < nextIntent.sequence));
-    const signatures = history.filter(record => record.phase === 'signed' && !record.replacement);
+    const signatures = history.filter((record): record is SignedRecord => record.phase === 'signed' && !record.replacement);
     if (signatures.length > 1 || signatures.some(record => record.reservationId !== intent.reservationId || (record.waveAttemptId ?? null) !== attemptId)) {
       throw new ApplyError('journal', `Wave ${wave.wave} has duplicate or mismatched signatures for ${entry.id}.`, { actionId: entry.id });
     }
     const original = signatures[0];
-    const signed = original ? history.filter(record => record.phase === 'signed').at(-1) : null;
+    const signed = original ? history.filter((record): record is SignedRecord => record.phase === 'signed').at(-1) ?? null : null;
     const variants = signed ? signedVariants(history, signed) : [];
     const signedIntent = signed ? intentForSigned(ctx.journal.records, signed) : null;
     if (signed) {
-      try { await validateSignedTransaction(signed, signedIntent, item.planned, ctx.plan.chain.id); }
-      catch (error) { throw new ApplyError('journal', error.message, { actionId: entry.id }); }
+      try { await validateSignedTransaction(signed, signedIntent ?? intent, item.planned, ctx.plan.chain.id); }
+      catch (error) { throw new ApplyError('journal', error instanceof Error ? error.message : String(error), { actionId: entry.id }); }
     }
-    const job = { item, entry, signer, intent, signed, signedIntent, variants, records: history };
+    const job: ResumeJob = { item, entry, signer, intent, signed, signedIntent, variants, records: history, receipt: null, completed: false };
     group.push(job);
     groups.set(entry.signer, group);
     jobs.push(job);
   }
   if (byAction.size !== entries.length) throw new ApplyError('journal', `Wave ${wave.wave} has intents outside its saved schedule.`);
   for (const group of groups.values()) {
-    if (group[0].entry.nonceOffset !== 0) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid first nonce offset.`);
+    if (group[0]?.entry.nonceOffset !== 0) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid first nonce offset.`);
   }
-  if (new Set([...groups.values()].map(group => group[0].intent.reservationId)).size !== groups.size) {
+  if (new Set([...groups.values()].map(group => group[0]!.intent.reservationId)).size !== groups.size) {
     throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
-  const conflict = jobs.find(job => job.records.at(-1)?.phase === 'failed' && !job.records.at(-1).retryable);
-  if (conflict) throw new ApplyError(conflict.records.at(-1).code, conflict.records.at(-1).reason, { actionId: conflict.item.planned.id });
+  const conflict = jobs.find(job => { const last = job.records.at(-1); return last?.phase === 'failed' && !last.retryable; });
+  const failure = conflict?.records.at(-1);
+  if (conflict && failure?.phase === 'failed') throw new ApplyError(failure.code, failure.reason, { actionId: conflict.item.planned.id });
 
   // Check every signer and precondition before adding any signature or broadcast.
   for (const job of jobs) job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
@@ -464,87 +514,96 @@ async function resumePipelineWave(ctx, wave) {
   }
   for (const [address, group] of groups) {
     const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address, blockTag: 'pending' }),
+      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'latest' }),
+      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'pending' }),
     ]);
-    const base = BigInt(group[0].intent.nonce);
-    if (BigInt(latest) < base || BigInt(pending) < BigInt(latest)) throw new ApplyError('nonce-conflict', `Signer ${address} no longer has the reserved nonce sequence.`, { actionId: group[0].item.planned.id });
+    const first = group[0]!;
+    const base = BigInt(first.intent.nonce);
+    if (BigInt(latest) < base || BigInt(pending) < BigInt(latest)) throw new ApplyError('nonce-conflict', `Signer ${address} no longer has the reserved nonce sequence.`, { actionId: first.item.planned.id });
     for (const job of group) {
       if (BigInt(job.intent.nonce) < BigInt(latest) && !job.receipt) {
-        if (job.signed) await pipelineConflict(ctx, job);
+        if (job.signed) await pipelineConflict(ctx, { item: job.item, signed: job.signed });
         throw new ApplyError('nonce-conflict', `Signer ${address} consumed unsigned reserved nonce ${job.intent.nonce}.`, { actionId: job.item.planned.id });
       }
     }
     for (let nonce = BigInt(latest); nonce < BigInt(pending); nonce++) {
       const job = group.find(entry => BigInt(entry.intent.nonce) === nonce);
-      if (!job?.signed) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: group[0].item.planned.id });
+      if (!job?.signed) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: first.item.planned.id });
       let known = false;
       for (const variant of job.variants) {
         try { known ||= Boolean(await ctx.client.getTransaction({ hash: variant.transactionHash })); }
-        catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+        catch (error) { if (!(error instanceof Error) || error.name !== 'TransactionNotFoundError') throw error; }
       }
       if (!known) throw new ApplyError('nonce-conflict', `Signer ${address} has an unknown pending transaction at nonce ${nonce}.`, { actionId: job.item.planned.id });
     }
     const unmined = group.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
     if (!unmined.length) continue;
     const required = unmined.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
-    const balance = await ctx.client.getBalance({ address });
-    if (balance < required) throw new ApplyError('insufficient-funds', `Signer ${address} has ${balance} wei; the reserved group can cost ${required} wei.`, { actionId: unmined[0].item.planned.id, retryable: true });
+    const balance = await ctx.client.getBalance({ address: address as Address });
+    if (balance < required) throw new ApplyError('insufficient-funds', `Signer ${address} has ${balance} wei; the reserved group can cost ${required} wei.`, { actionId: unmined[0]!.item.planned.id, retryable: true });
     const budget = budgetFor(ctx, address);
     const reserved = group.reduce((sum, job) => sum + BigInt(job.intent.gas) * BigInt(job.intent.maxFeePerGas) + BigInt(job.intent.value), 0n);
-    const spent = signedSpend(await commitments(ctx), address, group[0].intent.reservationId);
+    const spent = signedSpend(await commitments(ctx), address, first.intent.reservationId);
     if (spent + reserved > budget) {
-      throw new ApplyError('budget-exceeded', `Signer ${address} has ${spent} wei committed; ${reserved} wei for reservation ${group[0].intent.reservationId} would exceed its ${budget} wei budget.`, { actionId: unmined[0].item.planned.id, retryable: true });
+      throw new ApplyError('budget-exceeded', `Signer ${address} has ${spent} wei committed; ${reserved} wei for reservation ${first.intent.reservationId} would exceed its ${budget} wei budget.`, { actionId: unmined[0]!.item.planned.id, retryable: true });
     }
   }
   for (const job of jobs.filter(entry => entry.receipt && entry.records.at(-1)?.phase !== 'verified')) {
-    const mined = matchingVariant(job.variants, job.receipt);
-    await recordReceipt(ctx, job.item, mined, job.receipt);
-    await finish(ctx, job.item, mined, job.receipt);
+    const receipt = job.receipt;
+    if (!receipt) continue;
+    const mined = matchingVariant(job.variants, receipt);
+    await recordReceipt(ctx, job.item, mined, receipt);
+    await finish(ctx, job.item, mined, receipt);
     await decide(ctx, job.item);
     job.completed = true;
   }
   await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address));
   for (const job of jobs.filter(entry => !entry.signed)) {
     const { intent, item, signer } = job;
-    const envelope = { chainId: ctx.plan.chain.id, to: item.planned.tx.to, data: item.planned.tx.data, value: BigInt(intent.value),
+    const tx = transactionFor(item);
+    const envelope: TransactionEnvelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(intent.value),
       gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
-    let signed;
+    let signed: SignedBytes;
     try { signed = await signWithLease(ctx, item.planned.id, signer, envelope); }
-    catch (error) { throw new ApplyError('signer', error.message, { actionId: item.planned.id, retryable: true }); }
-    job.signed = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId, attemptId), phase: 'signed', ...signed });
+    catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: item.planned.id, retryable: true }); }
+    const signedRecord = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId!, attemptId), phase: 'signed', ...signed });
+    job.signed = signedRecord;
     job.signedIntent = intent;
-    job.variants = [job.signed];
-    ctx.sent.push({ actionId: item.planned.id, wave: wave.wave, signer: job.entry.signer, nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() });
+    job.variants = [signedRecord];
+    ctx.sent.push({ actionId: item.planned.id, wave: wave.wave, signer: job.entry.signer, nonce: intent.nonce, transactionHash: signed.transactionHash.toLowerCase() as Hash });
   }
   const active = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.completed);
+  const signedActive: (ResumeJob & { signed: SignedRecord })[] = [];
   for (const job of active) {
-    job.signed = await replaceSigned(ctx, job.item, job.signed, job.variants);
-    job.signedIntent = intentForSigned(ctx.journal.records, job.signed);
+    if (!job.signed) throw new ApplyError('journal', `Wave ${wave.wave} has an unsigned active action ${job.item.planned.id}.`, { actionId: job.item.planned.id });
+    const signed = await replaceSigned(ctx, job.item, job.signed, job.variants);
+    job.signed = signed;
+    job.signedIntent = intentForSigned(ctx.journal.records, signed);
+    signedActive.push({ ...job, signed });
   }
-  for (const job of active) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: job.intent.reservationId });
-  if (active.length) await settlePipelineBatch(ctx, active, { rebroadcast: true });
+  for (const job of signedActive) await report(ctx, 'recovery', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, reservationId: job.intent.reservationId });
+  if (signedActive.length) await settlePipelineBatch(ctx, signedActive, { rebroadcast: true });
   for (const job of jobs) await decide(ctx, job.item);
   return true;
 }
 
-const lower = value => typeof value === 'string' ? value.toLowerCase() : value ?? null;
+const lower = (value: string | null | undefined): string | null => typeof value === 'string' ? value.toLowerCase() : value ?? null;
 
 // A plan accepts a rebuilt artifact against one saved record. Under the lock, state must still hold that record, or
 // this rebaseline of it, and the live code must still be the code that record describes.
-function checkArtifactDrift(ctx, item, verification) {
+function checkArtifactDrift(ctx: ApplyContext, item: PreparedAction, verification: VerificationResult): { previousArtifactHash: Hash; artifactHash: Hash } | null {
   const drift = item.planned.observation?.stateComparison?.artifactDrift;
   if (!drift) return null;
   const { id } = item.planned;
-  if (drift.accepted !== true || lower(drift.artifactHash) !== lower(item.planned.artifactHash)) {
+  if (item.planned.kind !== 'contract' || drift.accepted !== true || lower(drift.artifactHash) !== lower(item.planned.artifactHash)) {
     throw new ApplyError('plan-not-applicable', `${id} is reused without an accepted artifact drift for its planned artifact.`, { actionId: id });
   }
   const record = ctx.stateSnapshot?.resources?.[id];
   const saved = record ? { address: record.address, initcodeHash: record.initcodeHash ?? null, inputsHash: record.inputsHash, salt: record.salt ?? null, codeHash: record.codeHash ?? null } : null;
-  if (!saved || hashJson(jsonSafe(saved)) !== hashJson(jsonSafe(drift.baseline)) ||
+  if (!saved || !record || hashJson(jsonSafe(saved)) !== hashJson(jsonSafe(drift.baseline)) ||
     ![lower(drift.previousArtifactHash), lower(drift.artifactHash)].includes(lower(record.artifactHash))) {
     throw new ApplyError('stale-state', `The saved state for ${id} changed after the plan accepted its artifact drift. Create a new plan.`, {
-      actionId: id, evidence: { expected: { ...drift.baseline, artifactHash: drift.previousArtifactHash }, actual: saved && { ...saved, artifactHash: record.artifactHash } },
+      actionId: id, evidence: { expected: { ...drift.baseline, artifactHash: drift.previousArtifactHash }, actual: saved && { ...saved, artifactHash: record?.artifactHash } },
     });
   }
   if (lower(verification.codeHash) !== lower(drift.baseline.codeHash)) {
@@ -553,7 +612,7 @@ function checkArtifactDrift(ctx, item, verification) {
   return { previousArtifactHash: drift.previousArtifactHash, artifactHash: drift.artifactHash };
 }
 
-async function recheckReused(ctx) {
+async function recheckReused(ctx: ApplyContext): Promise<void> {
   for (const item of ctx.prepared.values()) {
     if (item.planned.action !== 'reuse') continue;
     const verification = await verify(ctx, item);
@@ -566,7 +625,7 @@ async function recheckReused(ctx) {
 }
 
 // Returns the item if it needs a new transaction.
-async function decide(ctx, item) {
+async function decide(ctx: ApplyContext, item: PreparedAction): Promise<PreparedAction | null> {
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const latest = latestRecord(records);
   if (latest?.phase === 'verified') {
@@ -574,7 +633,8 @@ async function decide(ctx, item) {
     if (verification.status !== 'verified') {
       await fail(ctx, item, 'drift', `The action verified earlier but is now ${verification.status}.`, { evidence: summarizeVerification(verification) });
     }
-    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: latest.outcome, address: item.planned.address, transactionHash: latest.transactionHash, verification, resumed: true });
+    ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: latest.outcome, address: item.planned.address,
+      ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), verification, resumed: true });
     return null;
   }
   if (latest?.phase === 'failed' && !latest.retryable) {
@@ -583,39 +643,47 @@ async function decide(ctx, item) {
   if (latest && LIVE_PHASES.has(latest.phase)) throw new ApplyError('journal', `Action has an unsettled ${latest.phase} record.`, { actionId: item.planned.id });
   const observed = await precondition(ctx, item);
   if (observed.satisfied) {
+    if (!observed.verification) throw new ApplyError('unverified', `Action ${item.planned.id} has no verification.`, { actionId: item.planned.id });
     await markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied' });
     return null;
   }
   return item;
 }
 
-async function prepareBatch(ctx, batch) {
-  const work = [];
+async function prepareBatch(ctx: ApplyContext, batch: ScheduleEntry[]): Promise<FundedJob[]> {
+  const candidates: { item: PreparedAction; entry: ScheduleEntry; signer: SignerAccount }[] = [];
   for (const entry of batch) {
     const item = ctx.prepared.get(entry.id);
-    if (await decide(ctx, item)) work.push({ item, entry, signer: ctx.lanes.byAddress.get(entry.signer) });
+    if (!item) throw new ApplyError('schedule', `Schedule names missing action ${entry.id}.`, { actionId: entry.id });
+    if (await decide(ctx, item)) {
+      const signer = ctx.lanes.byAddress.get(entry.signer);
+      if (!signer) throw new ApplyError('signer', `Signer ${entry.signer} is unavailable.`, { actionId: entry.id });
+      candidates.push({ item, entry, signer });
+    }
   }
-  if (work.length === 0) return work;
+  if (candidates.length === 0) return [];
 
   const fees = await feesFor(ctx.client, ctx.config.fees);
-  for (const job of work) {
-    const { tx } = job.item.planned;
-    let gas;
+  const work: FundedJob[] = [];
+  for (const job of candidates) {
+    const tx = transactionFor(job.item);
+    let gas: bigint;
     try {
       gas = await estimateGasLimit(ctx.client, { from: job.signer.address, tx, gasMultiplier: ctx.config.gasMultiplier });
     } catch (error) {
-      await fail(ctx, job.item, 'estimate-failed', `Gas estimation failed: ${error.shortMessage ?? error.message}`, { retryable: true, signer: job.signer.address });
+      const message = error instanceof Error ? ('shortMessage' in error ? error.shortMessage : error.message) : String(error);
+      return fail(ctx, job.item, 'estimate-failed', `Gas estimation failed: ${message}`, { retryable: true, signer: job.signer.address });
     }
-    job.envelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(tx.value), gas, ...fees };
-    job.cost = maximumCost(job.envelope);
+    const envelope: CostEnvelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(tx.value), gas, ...fees };
+    work.push({ ...job, envelope, cost: maximumCost(envelope as TransactionEnvelope) });
   }
   return work;
 }
 
 // Count every durable signature, including mined and failed transactions. A nonce
 // can only spend once, so replacements contribute their largest possible cost.
-async function commitments(ctx) {
-  const bySigner = new Map();
+async function commitments(ctx: ApplyContext): Promise<CommitmentLedger> {
+  const bySigner: CommitmentLedger = new Map();
   for (const record of ctx.journal.records) {
     if (record.planHash !== ctx.plan.planHash || record.phase !== 'signed') continue;
     const planned = ctx.prepared.get(record.actionId)?.planned;
@@ -630,44 +698,46 @@ async function commitments(ctx) {
       if (!planned) throw new Error('Signed transaction has no matching plan action.');
       const cost = await validateSignedTransaction(record, intent, planned, ctx.plan.chain.id);
       const signer = record.signer.toLowerCase();
-      const nonces = bySigner.get(signer) ?? new Map();
+      const nonces = bySigner.get(signer) ?? new Map<string, { cost: bigint; reservationId?: string }[]>();
       const nonce = BigInt(record.nonce).toString();
       const variants = nonces.get(nonce) ?? [];
-      variants.push({ cost, reservationId: record.reservationId });
+      variants.push({ cost, ...(record.reservationId ? { reservationId: record.reservationId } : {}) });
       nonces.set(nonce, variants);
       bySigner.set(signer, nonces);
     } catch (error) {
-      throw new ApplyError('journal', `${record.actionId}: ${error.message}`, { actionId: record.actionId });
+      throw new ApplyError('journal', `${record.actionId}: ${error instanceof Error ? error.message : String(error)}`, { actionId: record.actionId });
     }
   }
   return bySigner;
 }
 
-function signedSpend(commitments, signer, exceptReservation = null) {
+function signedSpend(commitments: CommitmentLedger, signer: string, exceptReservation: string | null = null): bigint {
   return [...(commitments.get(signer)?.values() ?? [])].reduce((sum, variants) => {
     const costs = variants.filter(entry => entry.reservationId !== exceptReservation).map(entry => entry.cost);
     return sum + (costs.length ? costs.reduce((max, cost) => cost > max ? cost : max) : 0n);
   }, 0n);
 }
 
-function budgetFor(ctx, signer) {
+function budgetFor(ctx: ApplyContext, signer: string): bigint {
+  if (!ctx.plan.maxSpendWei) throw new ApplyError('plan-policy', 'The saved plan needs a maxSpendWei ceiling.');
   const approved = BigInt(ctx.plan.maxSpendWei);
   const supplied = ctx.config.budgets[signer];
   return supplied === undefined || approved < BigInt(supplied) ? approved : BigInt(supplied);
 }
 
 // Check the whole batch before signing any transaction in it.
-async function checkBatchFunding(ctx, work) {
-  const shortfalls = [];
+async function checkBatchFunding(ctx: ApplyContext, work: FundedJob[]): Promise<void> {
+  const shortfalls: { job: FundedJob; code: FailureCode; reason: string; balanceWei?: bigint; requiredWei: bigint; budgetWei?: bigint; spentWei?: bigint }[] = [];
   const ledger = await commitments(ctx);
-  const groups = new Map();
+  const groups = new Map<string, FundedJob[]>();
   for (const job of work) {
     const lane = job.signer.address.toLowerCase();
-    if (!groups.has(lane)) groups.set(lane, []);
-    groups.get(lane).push(job);
+    const group = groups.get(lane) ?? [];
+    group.push(job);
+    groups.set(lane, group);
   }
   for (const [lane, jobs] of groups) {
-    const job = jobs[0];
+    const job = jobs[0]!;
     const required = jobs.reduce((sum, entry) => sum + entry.cost, 0n);
     const balance = await ctx.client.getBalance({ address: job.signer.address });
     const spent = signedSpend(ledger, lane);
@@ -677,28 +747,30 @@ async function checkBatchFunding(ctx, work) {
   }
   if (shortfalls.length) {
     for (const { job, code, reason, ...evidence } of shortfalls) {
-      await append(ctx, job.item.planned.id, { phase: 'failed', code, reason, retryable: true, signer: job.signer.address, evidence });
+      await append(ctx, job.item.planned.id, { phase: 'failed', code, reason, retryable: true, signer: job.signer.address, evidence: jsonSafe(evidence) as import('../types.ts').JsonValue });
     }
-    const [first] = shortfalls;
+    const first = shortfalls[0]!;
     throw new ApplyError(first.code, `${first.reason} No transaction in this batch was signed.`, { actionId: first.job.item.planned.id, retryable: true, evidence: shortfalls.map(({ job, code, reason }) => ({ id: job.item.planned.id, code, reason })) });
   }
 }
 
-async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
-  const checked = new Map();
+async function checkExecutionDependencies(ctx: ApplyContext, work: { item: PreparedAction }[], requireCompleted = true): Promise<void> {
+  const checked = new Map<ResourceId, VerificationResult>();
   for (const { item } of work) {
     for (const id of item.planned.dependencies) {
       const dependency = ctx.prepared.get(id);
-      if (!dependency || (requireCompleted && !ctx.outcomes.get(id)?.verification)) {
+      const outcome = ctx.outcomes.get(id);
+      if (!dependency || (requireCompleted && !(outcome && 'verification' in outcome))) {
         throw new ApplyError('dependency', `${item.planned.id} needs completed dependency ${id} before signing.`, { actionId: item.planned.id });
       }
       if (!checked.has(id)) {
         const evidence = ctx.journal.forAction(ctx.plan.planHash, id)
-          .filter(record => ['receipt', 'verified'].includes(record.phase) && record.transactionHash).at(-1);
-        const transactionHash = ctx.outcomes.get(id)?.transactionHash ?? evidence?.transactionHash;
+          .filter((record): record is JournalRecord & (import('./types.ts').ReceiptFields | VerifiedFields) =>
+            (record.phase === 'receipt' || record.phase === 'verified') && Boolean(record.transactionHash)).at(-1);
+        const transactionHash = outcome && 'transactionHash' in outcome ? outcome.transactionHash : evidence?.transactionHash;
         checked.set(id, await verify(ctx, dependency, transactionHash ? { transactionHash } : {}));
       }
-      const verification = checked.get(id);
+      const verification = checked.get(id)!;
       if (verification.status !== 'verified') {
         throw new ApplyError('dependency', `${item.planned.id} needs verified dependency ${id}; it is now ${verification.status}.`, {
           actionId: item.planned.id, evidence: { dependency: id, verification: summarizeVerification(verification) },
@@ -709,7 +781,7 @@ async function checkExecutionDependencies(ctx, work, requireCompleted = true) {
 }
 
 // A lost lease stops the next signature.
-async function signWithLease(ctx, actionId, signer, envelope) {
+async function signWithLease(ctx: ApplyContext, actionId: ResourceId, signer: SignerAccount, envelope: TransactionEnvelope): Promise<SignedBytes> {
   await ctx.lock.assertHeld?.();
   const started = Date.now();
   const signed = await signEnvelope(signer, envelope);
@@ -717,7 +789,7 @@ async function signWithLease(ctx, actionId, signer, envelope) {
   return signed;
 }
 
-async function signBatch(ctx, wave, work) {
+async function signBatch(ctx: ApplyContext, wave: number, work: FundedJob[]): Promise<SignedBatchJob[]> {
   await checkExecutionDependencies(ctx, work);
   await assertSignerHistory(ctx, work.map(job => job.signer.address));
   // Read every signer's nonce and reject pending transactions before recording any intent.
@@ -732,44 +804,52 @@ async function signBatch(ctx, wave, work) {
     job.envelope.nonce = latest;
   }
 
+  const signedWork: SignedBatchJob[] = [];
   for (const job of work) {
-    const { envelope, item, entry } = job;
+    const { item, entry } = job;
+    const nonce = job.envelope.nonce;
+    if (nonce === undefined) throw new ApplyError('nonce-race', `Signer ${job.signer.address} has no reserved nonce.`, { actionId: item.planned.id });
+    const envelope: TransactionEnvelope = { ...job.envelope, nonce };
     await ctx.lock.assertHeld?.();
-    await append(ctx, item.planned.id, { phase: 'intent', wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: envelope.value, dataHash: keccak256(envelope.data), gas: envelope.gas, maxFeePerGas: envelope.maxFeePerGas, maxPriorityFeePerGas: envelope.maxPriorityFeePerGas });
-    let signed;
+    await append(ctx, item.planned.id, { phase: 'intent', wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas), maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) });
+    let signed: SignedBytes;
     try {
       signed = await signWithLease(ctx, item.planned.id, job.signer, envelope);
     } catch (error) {
-      await fail(ctx, item, 'signer', error.message, { retryable: true, signer: job.signer.address });
+      return fail(ctx, item, 'signer', error instanceof Error ? error.message : String(error), { retryable: true, signer: job.signer.address });
     }
-    job.signed = await append(ctx, item.planned.id, { phase: 'signed', signer: job.signer.address, nonce: String(envelope.nonce), ...signed });
-    ctx.sent.push({ actionId: item.planned.id, wave, signer: job.signer.address.toLowerCase(), nonce: String(envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() });
+    const signedRecord = await append(ctx, item.planned.id, { phase: 'signed', signer: job.signer.address, nonce: String(envelope.nonce), ...signed });
+    signedWork.push({ ...job, signed: signedRecord });
+    ctx.sent.push({ actionId: item.planned.id, wave, signer: job.signer.address.toLowerCase(), nonce: String(envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() as Hash });
   }
+  return signedWork;
 }
 
-function intentFields(job, wave, reservationId, waveAttemptId = null) {
+function intentFields(job: { envelope: CostEnvelope; entry: ScheduleEntry; signer: SignerAccount }, wave: number, reservationId: string, waveAttemptId: string | null = null): import('./types.ts').IntentFields {
   const { envelope, entry } = job;
+  if (envelope.nonce === undefined) throw new ApplyError('nonce-conflict', `Signer ${job.signer.address} has no reserved pipeline nonce.`, { actionId: entry.id });
   return { phase: 'intent', wave, reservationId, ...(waveAttemptId ? { waveAttemptId } : {}), signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled,
-    nonceOffset: entry.nonceOffset, nonce: String(envelope.nonce), to: envelope.to, value: envelope.value,
-    dataHash: keccak256(envelope.data), gas: envelope.gas, maxFeePerGas: envelope.maxFeePerGas,
-    maxPriorityFeePerGas: envelope.maxPriorityFeePerGas };
+    ...(entry.nonceOffset === undefined ? {} : { nonceOffset: entry.nonceOffset }), nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value),
+    dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas),
+    maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) };
 }
 
-async function signPipelineBatch(ctx, wave, work) {
+async function signPipelineBatch(ctx: ApplyContext, wave: number, work: FundedJob[]): Promise<PipelineBatchJob[]> {
   await checkExecutionDependencies(ctx, work);
   await assertSignerHistory(ctx, work.map(job => job.signer.address));
-  const groups = new Map();
+  const groups = new Map<string, FundedJob[]>();
   for (const job of work) {
     const signer = job.signer.address.toLowerCase();
-    if (!groups.has(signer)) groups.set(signer, []);
-    groups.get(signer).push(job);
+    const group = groups.get(signer) ?? [];
+    group.push(job);
+    groups.set(signer, group);
   }
   for (const [signer, jobs] of groups) {
     const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: signer, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: signer, blockTag: 'pending' }),
+      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'latest' }),
+      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'pending' }),
     ]);
-    if (pending !== latest) await fail(ctx, jobs[0].item, 'nonce-conflict', `Signer ${signer} has unknown pending transactions.`, { signer, nonce: String(latest) });
+    if (pending !== latest) return fail(ctx, jobs[0]!.item, 'nonce-conflict', `Signer ${signer} has unknown pending transactions.`, { signer: signer as Address, nonce: String(latest) });
     for (const [offset, job] of jobs.entries()) {
       if (job.entry.nonceOffset !== offset) throw new ApplyError('stale-pipeline', `Wave ${wave} has an already satisfied action before ${job.item.planned.id}; create a new pipeline plan.`, { actionId: job.item.planned.id });
       job.envelope.nonce = latest + offset;
@@ -777,24 +857,28 @@ async function signPipelineBatch(ctx, wave, work) {
   }
   // Every intent is durable before any signature. Partial intent groups can be discarded on restart.
   const waveAttemptId = randomUUID();
+  const intents = new Map<FundedJob, IntentRecord>();
   for (const jobs of groups.values()) {
     const reservationId = randomUUID();
-    for (const job of jobs) job.intent = await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId, waveAttemptId));
+    for (const job of jobs) intents.set(job, await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId, waveAttemptId)));
   }
   // The lock remains held and no broadcast starts until every signed record is synced.
+  const signedWork: PipelineBatchJob[] = [];
   for (const job of work) {
-    let signed;
-    try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, job.envelope); }
-    catch (error) { throw new ApplyError('signer', error.message, { actionId: job.item.planned.id, retryable: true }); }
-    job.signed = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, job.intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
-    job.signedIntent = job.intent;
-    job.variants = [job.signed];
+    const intent = intents.get(job);
+    if (!intent?.reservationId || job.envelope.nonce === undefined) throw new ApplyError('journal', `Wave ${wave} has no durable intent for ${job.item.planned.id}.`, { actionId: job.item.planned.id });
+    let signed: SignedBytes;
+    try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, { ...job.envelope, nonce: job.envelope.nonce }); }
+    catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: job.item.planned.id, retryable: true }); }
+    const signedRecord = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
+    signedWork.push({ ...job, intent, signedIntent: intent, signed: signedRecord, variants: [signedRecord] });
     const signer = job.signer.address.toLowerCase();
-    ctx.sent.push({ actionId: job.item.planned.id, wave, signer, nonce: String(job.envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() });
+    ctx.sent.push({ actionId: job.item.planned.id, wave, signer, nonce: String(job.envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() as Hash });
   }
+  return signedWork;
 }
 
-async function settleBatch(ctx, work) {
+async function settleBatch(ctx: ApplyContext, work: SignedBatchJob[]): Promise<void> {
   // Every signed job gets a chance to settle before a batch error is reported.
   const settled = await Promise.allSettled(work.map(async job => {
     const receipt = await send(ctx, job.item, job.signed);
@@ -805,13 +889,13 @@ async function settleBatch(ctx, work) {
   if (rejected) throw rejected.reason;
 }
 
-async function pipelineConflict(ctx, job) {
+async function pipelineConflict(ctx: ApplyContext, job: { item: PreparedAction; signed: SignedRecord }): Promise<never> {
   const { signer, nonce, transactionHash } = job.signed;
-  await fail(ctx, job.item, 'nonce-conflict', `Signer ${signer} nonce ${nonce} for ${job.item.planned.id} was consumed by an unknown transaction; expected ${transactionHash}.`,
+  return fail(ctx, job.item, 'nonce-conflict', `Signer ${signer} nonce ${nonce} for ${job.item.planned.id} was consumed by an unknown transaction; expected ${transactionHash}.`,
     { signer, nonce, transactionHash });
 }
 
-async function preparePipelineBroadcast(ctx, job) {
+async function preparePipelineBroadcast(ctx: ApplyContext, job: ActivePipelineJob): Promise<PipelineAttempt> {
   const { signed } = job;
   let receipt = await findKnownReceipt(ctx.client, job.variants);
   if (receipt) return { receipt };
@@ -828,7 +912,7 @@ async function preparePipelineBroadcast(ctx, job) {
       let knownTransaction = false;
       for (const variant of job.variants) {
         try { knownTransaction ||= Boolean(await ctx.client.getTransaction({ hash: variant.transactionHash })); }
-        catch (error) { if (error.name !== 'TransactionNotFoundError') throw error; }
+        catch (error) { if (!(error instanceof Error) || error.name !== 'TransactionNotFoundError') throw error; }
       }
       if (!knownTransaction) await pipelineConflict(ctx, job);
     }
@@ -836,21 +920,21 @@ async function preparePipelineBroadcast(ctx, job) {
   return {};
 }
 
-async function transactionKnown(client, hash) {
+async function transactionKnown(client: Client, hash: Hash): Promise<boolean> {
   try { return Boolean(await client.getTransaction({ hash })); }
   catch (error) {
-    if (error.name === 'TransactionNotFoundError') return false;
+    if (error instanceof Error && error.name === 'TransactionNotFoundError') return false;
     throw error;
   }
 }
 
-async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
+async function recordPipelineBroadcast(ctx: ApplyContext, job: ActivePipelineJob, sent: BroadcastOutcome, rebroadcast: boolean): Promise<PipelineAttempt> {
   const { signed } = job;
-  await append(ctx, job.item.planned.id, { phase: 'broadcast-attempt', reservationId: signed.reservationId, signer: signed.signer,
+  await append(ctx, job.item.planned.id, { phase: 'broadcast-attempt', ...(signed.reservationId ? { reservationId: signed.reservationId } : {}), signer: signed.signer,
     nonce: signed.nonce, transactionHash: signed.transactionHash, accepted: sent.accepted,
-    ...(sent.error ? { error: sent.error } : {}), rebroadcast });
+    ...(!sent.accepted && sent.error ? { error: sent.error } : {}), rebroadcast });
   if (sent.accepted) {
-    await append(ctx, job.item.planned.id, { phase: 'broadcast', reservationId: signed.reservationId, signer: signed.signer,
+    await append(ctx, job.item.planned.id, { phase: 'broadcast', ...(signed.reservationId ? { reservationId: signed.reservationId } : {}), signer: signed.signer,
       nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast, ...(sent.known ? { known: true } : {}) });
     if (rebroadcast) ctx.rebroadcasts.push({ actionId: job.item.planned.id, transactionHash: signed.transactionHash });
   } else if (sent.nonceTooLow) {
@@ -862,24 +946,24 @@ async function recordPipelineBroadcast(ctx, job, sent, rebroadcast) {
 }
 
 // Starts the raw request before its first await, so a group's requests begin in nonce order.
-async function sendPipelineTransaction(ctx, job, rebroadcast) {
+async function sendPipelineTransaction(ctx: ApplyContext, job: ActivePipelineJob, rebroadcast: boolean): Promise<PipelineAttempt> {
   const started = Date.now();
   const sent = await broadcast(ctx.client, job.signed.rawTransaction);
   await report(ctx, 'broadcast-result', { actionId: job.item.planned.id, transactionHash: job.signed.transactionHash, rebroadcast, accepted: sent.accepted, broadcastLatencyMs: Date.now() - started });
   return recordPipelineBroadcast(ctx, job, sent, rebroadcast);
 }
 
-async function attemptPipelineBroadcast(ctx, job, rebroadcast) {
+async function attemptPipelineBroadcast(ctx: ApplyContext, job: ActivePipelineJob, rebroadcast: boolean): Promise<PipelineAttempt> {
   const prepared = await preparePipelineBroadcast(ctx, job);
   if (prepared.receipt) return prepared;
   await ctx.lock.assertHeld?.();
   return sendPipelineTransaction(ctx, job, rebroadcast);
 }
 
-async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
+async function settlePipelineBatch(ctx: ApplyContext, work: ActivePipelineJob[], { rebroadcast = false }: { rebroadcast?: boolean } = {}): Promise<void> {
   for (const job of work) {
     try { await validateSignedTransaction(job.signed, job.signedIntent ?? job.intent, job.item.planned, ctx.plan.chain.id); }
-    catch (error) { throw new ApplyError('journal', `${job.item.planned.id}: ${error.message}`, { actionId: job.item.planned.id }); }
+    catch (error) { throw new ApplyError('journal', `${job.item.planned.id}: ${error instanceof Error ? error.message : String(error)}`, { actionId: job.item.planned.id }); }
   }
   const submitStart = Date.now();
   // Reconcile the complete group first. Then initiate all raw requests in plan
@@ -888,13 +972,13 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
   // One lease check covers the group, so no await separates its first requests.
   await ctx.lock.assertHeld?.();
   const firstAttempts = await Promise.all(work.map(async (job, index) => {
-    if (prepared[index].receipt) return prepared[index];
+    if (prepared[index]?.receipt) return prepared[index]!;
     try { return await sendPipelineTransaction(ctx, job, rebroadcast); }
     catch (error) { return { error }; }
   }));
   ctx.timings.submitMs += Date.now() - submitStart;
   const settled = await Promise.allSettled(work.map(async (job, index) => {
-    let attempt = firstAttempts[index];
+    let attempt: PipelineAttempt = firstAttempts[index]!;
     if (attempt.error) throw attempt.error;
     const deadline = Date.now() + ctx.config.receiptTimeoutMs;
     let knownRetryAt = Date.now() + 1_000;
@@ -917,8 +1001,8 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
       }
       const waited = await waitForReceipt(ctx.client, { signedVariants: job.variants ?? [job.signed], signer: job.signed.signer, nonce: job.signed.nonce,
         pollIntervalMs: ctx.config.pollIntervalMs, timeoutMs: Math.min(1_000, Math.max(0, deadline - Date.now())) });
-      if (waited.dead) await pipelineConflict(ctx, job);
-      if (waited.receipt) {
+      if ('dead' in waited) await pipelineConflict(ctx, job);
+      if ('receipt' in waited) {
         receipt = waited.receipt;
         break;
       }
@@ -934,7 +1018,8 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
         receipt = attempt.receipt;
       }
     }
-    if (!firstAttempts[index].receipt) await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: receipt.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
+    if (!receipt) throw new ApplyError('receipt-timeout', `No receipt for ${job.signed.transactionHash}.`, { actionId: job.item.planned.id, retryable: true });
+    if (!firstAttempts[index]?.receipt) await report(ctx, 'receipt-observed', { actionId: job.item.planned.id, transactionHash: receipt.transactionHash, receiptLatencyMs: Date.now() - receiptStart });
     ctx.timings.receiptMs += Date.now() - receiptStart;
     const mined = matchingVariant(job.variants ?? [job.signed], receipt);
     await recordReceipt(ctx, job.item, mined, receipt);
@@ -944,7 +1029,7 @@ async function settlePipelineBatch(ctx, work, { rebroadcast = false } = {}) {
   if (rejected) throw rejected.reason;
 }
 
-async function runBatch(ctx, wave, batch) {
+async function runBatch(ctx: ApplyContext, wave: number, batch: ScheduleEntry[]): Promise<void> {
   if (!ctx.pipeline && new Set(batch.map(entry => entry.signer)).size !== batch.length) throw new ApplyError('schedule', `Wave ${wave} has a batch with two actions for one signer.`);
   const work = await prepareBatch(ctx, batch);
   if (work.length === 0) return;
@@ -952,66 +1037,78 @@ async function runBatch(ctx, wave, batch) {
   await checkBatchFunding(ctx, work);
   if (ctx.pipeline) {
     const signingStart = Date.now();
-    await signPipelineBatch(ctx, wave, work);
+    const signed = await signPipelineBatch(ctx, wave, work);
     ctx.timings.submitMs += Date.now() - signingStart;
-    await settlePipelineBatch(ctx, work);
+    await settlePipelineBatch(ctx, signed);
   } else {
-    await signBatch(ctx, wave, work);
-    await settleBatch(ctx, work);
+    const signed = await signBatch(ctx, wave, work);
+    await settleBatch(ctx, signed);
   }
 }
 
-async function persist(ctx) {
+async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
   await revalidateVerified(ctx);
   if (!ctx.deps.recordResource) return { file: ctx.stateFile, written: false, reason: 'The state module has no recordResource function.' };
-  const verified = ctx.plan.resources.filter(resource => ctx.outcomes.get(resource.id)?.verification);
+  const verified = ctx.plan.resources.filter(resource => {
+    const outcome = ctx.outcomes.get(resource.id);
+    return outcome && 'verification' in outcome;
+  });
   if (verified.length === 0) return { file: ctx.stateFile, written: false, reason: 'No resource is verified yet.' };
   const current = await ctx.readState();
   assertFreshState(ctx, current.value);
   let state = current.value;
   for (const resource of verified) {
-    const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id).filter(record => record.phase === 'receipt' && record.receipt?.status === 'success').map(record => record.transactionHash);
-    state = await ctx.deps.recordResource({ resource: ctx.prepared.get(resource.id).resource, verification: ctx.outcomes.get(resource.id).verification, state, chain: ctx.plan.chain, transactions });
+    const item = ctx.prepared.get(resource.id);
+    const outcome = ctx.outcomes.get(resource.id);
+    if (!item || !outcome || !('verification' in outcome)) throw new ApplyError('plan-format', `Verified resource ${resource.id} has no prepared action or verification.`, { actionId: resource.id });
+    const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id)
+      .filter((record): record is JournalRecord & ReceiptFields => record.phase === 'receipt' && record.receipt.status === 'success')
+      .map(record => record.transactionHash);
+    state = ctx.deps.recordResource({ resource: item.resource, verification: outcome.verification, state, chain: ctx.plan.chain, transactions });
   }
+  if (!state) throw new ApplyError('stale-state', 'Verified resources did not produce a state file.');
   await ctx.lock.assertHeld?.();
   await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
   return { file: ctx.stateFile, written: true, resources: verified.length };
 }
 
-function assertFreshState(ctx, state) {
+function assertFreshState(ctx: ApplyContext, state: StateFile | null): void {
   if (typeof ctx.plan.stateHash !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(ctx.plan.stateHash) ||
     (hashJson(state) !== ctx.plan.stateHash && state?.lastPlanHash !== ctx.plan.planHash)) {
     throw new ApplyError('stale-state', 'State changed after this plan was created. Create a new plan.');
   }
 }
 
-function summary(ctx, status, error) {
+function summary(ctx: ApplyContext, status: ApplyResult['status'], error?: Error & Partial<ApplyError>): ApplyResult {
+  const resources: ResourceOutcomeSummary[] = ctx.plan.resources.map(resource => {
+    const outcome = ctx.outcomes.get(resource.id);
+    if (!outcome) return { id: resource.id, action: resource.action, outcome: 'pending' };
+    if (!('verification' in outcome)) return outcome;
+    const { verification, ...rest } = outcome;
+    return { ...rest, verification: summarizeVerification(verification) };
+  });
   return jsonSafe({
     status,
-    planHash: ctx.plan?.planHash,
-    chain: ctx.plan?.chain,
+    planHash: ctx.plan.planHash,
+    chain: ctx.plan.chain,
     parallel: ctx.parallel,
     pipeline: ctx.pipeline,
     timings: ctx.timings,
     transactionsSigned: ctx.sent.length,
     transactions: ctx.sent,
     rebroadcasts: ctx.rebroadcasts,
-    resources: (ctx.plan?.resources ?? []).map(resource => {
-      const outcome = ctx.outcomes.get(resource.id);
-      if (!outcome) return { id: resource.id, action: resource.action, outcome: 'pending' };
-      const { verification, ...rest } = outcome;
-      return { ...rest, verification: verification ? summarizeVerification(verification) : undefined };
-    }),
-    schedule: ctx.schedule,
+    resources,
+    ...(ctx.schedule ? { schedule: ctx.schedule } : {}),
     lockRecovered: ctx.lock.recovered,
     journal: { file: ctx.journal.file, tornTailRemoved: ctx.journal.tornTail !== null },
     state: ctx.state,
-    ...(error ? { stoppedAt: { code: error.code, actionId: error.actionId, message: error.message, retryable: error.retryable } } : {}),
-  });
+    ...(error ? { stoppedAt: { ...(error.code ? { code: error.code } : {}), ...(error.actionId ? { actionId: error.actionId } : {}), message: error.message, ...(error.retryable !== undefined ? { retryable: error.retryable } : {}) } } : {}),
+  } satisfies ApplyResult);
 }
 
-async function run(ctx) {
+async function run(ctx: ApplyContext): Promise<ApplyResult> {
   ctx.prepared = await preflight(ctx);
+  ctx.preflightComplete = true;
   ctx.stateSnapshot = (await ctx.readState()).value;
   if (ctx.stateSnapshot && (ctx.stateSnapshot.chain?.id !== ctx.plan.chain.id || ctx.stateSnapshot.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
     throw new ApplyError('wrong-chain', 'State belongs to a different chain than the saved plan.');
@@ -1020,8 +1117,8 @@ async function run(ctx) {
   const ownerActions = ctx.plan.resources.filter(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
   if (ownerActions.length && !ctx.lanes.owner) throw new ApplyError('signer', `The plan has owner actions (${ownerActions.map(resource => resource.id).join(', ')}), but no owner signer was supplied.`);
   if (ctx.pipeline !== Boolean(ctx.plan.pipeline)) throw new ApplyError('pipeline-plan', 'A pipeline apply requires a saved pipeline plan, and a pipeline plan requires --pipeline.');
-  const deployers = ctx.lanes.pool.map(account => account.address.toLowerCase());
-  const owner = (ctx.pipeline || ownerActions.length) ? ctx.lanes.owner?.address.toLowerCase() ?? null : null;
+  const deployers = ctx.lanes.pool.map(account => account.address.toLowerCase() as Address);
+  const owner = (ctx.pipeline || ownerActions.length) ? ctx.lanes.owner?.address.toLowerCase() as Address ?? null : null;
   const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
   const hasWrites = ctx.plan.resources.some(resource => ['deploy', 'call'].includes(resource.action));
   if (hasWrites && (!pinned || !Array.isArray(pinned.deployers) || pinned.deployers.length === 0 ||
@@ -1033,7 +1130,7 @@ async function run(ctx) {
     throw new ApplyError('signer', 'The supplied signers or parallel setting differ from the saved plan.');
   }
   ctx.schedule = createSchedule(ctx.plan, deployers, { owner, parallel: ctx.parallel, pipeline: ctx.pipeline });
-  if (ctx.pipeline && hashJson(ctx.schedule.waves) !== hashJson(ctx.plan.pipeline.waves)) throw new ApplyError('pipeline-plan', 'The saved pipeline schedule differs from the plan resources.');
+  if (ctx.pipeline && ctx.plan.pipeline && hashJson(ctx.schedule.waves) !== hashJson(ctx.plan.pipeline.waves)) throw new ApplyError('pipeline-plan', 'The saved pipeline schedule differs from the plan resources.');
   if (ctx.schedule.deferred.length) throw new ApplyError('unschedulable', `Some actions have dependencies that the plan cannot satisfy: ${ctx.schedule.deferred.map(entry => entry.id).join(', ')}.`, { evidence: ctx.schedule.deferred });
   await commitments(ctx);
   await revalidateVerified(ctx);
@@ -1044,7 +1141,11 @@ async function run(ctx) {
   if (ctx.pipeline) {
     for (const wave of ctx.schedule.waves) {
       if (!pipelineAttempt(ctx, wave)) continue;
-      const work = wave.batches.flat().map(entry => ({ item: ctx.prepared.get(entry.id) }));
+      const work = wave.batches.flat().map(entry => {
+        const item = ctx.prepared.get(entry.id);
+        if (!item) throw new ApplyError('plan-format', `Scheduled action ${entry.id} has no prepared resource.`, { actionId: entry.id });
+        return { item };
+      });
       await checkExecutionDependencies(ctx, work, false);
     }
   }
@@ -1068,51 +1169,61 @@ async function run(ctx) {
 export async function applyPlan({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }: ApplyInput): Promise<ApplyResult> {
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
   if (options.replacementFees !== undefined && (!options.replacementFees ||
-    ['maxFeePerGas', 'maxPriorityFeePerGas', 'maxCostWei'].some(field => !/^[0-9]+$/.test(String(options.replacementFees[field] ?? ''))))) {
+    (['maxFeePerGas', 'maxPriorityFeePerGas', 'maxCostWei'] as const).some(field => !/^[0-9]+$/.test(String(options.replacementFees?.[field] ?? ''))))) {
     throw new ApplyError('config', 'replacementFees needs maxFeePerGas, maxPriorityFeePerGas, and maxCostWei as non-negative wei integers.');
   }
-  const config = { ...DEFAULTS, ...options, hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
+  const config: ApplyConfig = { ...DEFAULTS, ...options, confirmations: options.confirmations ?? 1,
+    hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
   const remote = Boolean(stateStore || journalStore || lockProvider || journalCipher || scopeInput);
   if (remote && (!stateStore || !journalStore || !lockProvider || !journalCipher || !scopeInput)) throw new ApplyError('config', 'Production apply needs stateStore, journalStore, lockProvider, journalCipher, and scope together.');
-  if (remote && typeof journalStore.signedForSigner !== 'function') throw new ApplyError('config', 'Production journalStore needs signedForSigner(scope, address).');
+  if (remote && typeof journalStore?.signedForSigner !== 'function') throw new ApplyError('config', 'Production journalStore needs signedForSigner(scope, address).');
   if (remote && options.confirmations === undefined) throw new ApplyError('config', 'Production apply needs an explicit confirmations policy.');
-  config.confirmations = options.confirmations ?? 1;
   if (!Number.isSafeInteger(config.confirmations) || config.confirmations < 1) throw new ApplyError('config', 'Confirmations must be a positive integer.');
   if (!remote && (typeof stateFile !== 'string' || typeof journalFile !== 'string')) throw new ApplyError('config', 'Apply needs stateFile and journalFile paths.');
-  const scope = remote ? deploymentScope(scopeInput, plan?.chain) : null;
-  const signerControl = { scope, fence: null, assertHeld: null };
+  const backend = remote ? { stateStore: stateStore!, journalStore: journalStore!, lockProvider: lockProvider!, journalCipher: journalCipher!, scope: deploymentScope(scopeInput, plan.chain) } : null;
+  const scope = backend?.scope ?? null;
+  const signerControl: SignerAuthorization & { assertHeld: (() => Promise<void>) | null } = { scope, fence: null, assertHeld: null };
   const lanes = lanesFrom(signerProvider ? await signersFromProvider(signerProvider, signerRoles, plan, signerControl) : signers, parallel);
   const deps = loadDependencies(config.dependencies);
   const lockStarted = Date.now();
-  const emitLeaseEvent = event => typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit?.(event);
-  const lock = remote
-    ? await acquireLeases({ lockProvider, scope, addresses: [...lanes.byAddress.keys()], planHash: plan?.planHash, principal, ttlMs,
-      onRenew: event => emitLeaseEvent({ type: 'lock-renewal', at: new Date().toISOString(), planHash: plan?.planHash, chain: plan?.chain, scope, principal: event.holder.principal }),
-      onRenewFailure: event => emitLeaseEvent({ type: 'lock-renewal-failure', at: new Date().toISOString(), planHash: plan?.planHash, chain: plan?.chain, scope, principal: event.holder.principal, reason: event.error.message }),
+  const emitLeaseEvent = (event: ReportEvent) => typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit(event);
+  const lock = backend
+    ? await acquireLeases({ lockProvider: backend.lockProvider, scope: backend.scope, addresses: [...lanes.byAddress.keys()] as Address[], planHash: plan.planHash, principal, ttlMs,
+      onRenew: event => emitLeaseEvent({ type: 'lock-renewal', at: new Date().toISOString(), planHash: plan.planHash, chain: plan.chain, scope: backend.scope, principal: event.holder.principal }),
+      onRenewFailure: event => emitLeaseEvent({ type: 'lock-renewal-failure', at: new Date().toISOString(), planHash: plan.planHash, chain: plan.chain, scope: backend.scope, principal: event.holder.principal, reason: event.error.message }),
     })
-    : await acquireLock(`${stateFile}.lock`, { planHash: typeof plan?.planHash === 'string' ? plan.planHash : null });
-  signerControl.fence = lock.fence ?? null;
-  signerControl.assertHeld = () => lock.assertHeld?.();
-  let journal;
+    : await acquireLock(`${stateFile!}.lock`, { planHash: typeof plan.planHash === 'string' ? plan.planHash : null });
+  const fence = 'fence' in lock ? lock.fence : null;
+  signerControl.fence = fence;
+  signerControl.assertHeld = () => lock.assertHeld();
+  let journal: ApplyContext['journal'] | undefined;
   try {
-    journal = remote ? await openStoredJournal({ journalStore, journalCipher, scope, fence: lock.fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile);
-    const readState = remote ? async () => { const found = await stateStore.read(scope); return { version: found?.version ?? null, value: found ? validateState(found.value) : null }; } : async () => ({ version: null, value: await deps.readState(stateFile) });
-    const writeState = remote ? (version, state) => stateStore.compareAndSwap(scope, version, validateState(state), { fence: lock.fence }) : (_version, state) => deps.writeStateAtomic(stateFile, state);
-    const ctx = { plan, spec, artifacts, client, lanes, deps, journal, journalStore, lock, config, scope, remote, principal: lock.holder?.principal ?? principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline, sent: [], rebroadcasts: [], outcomes: new Map(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 }, state: { file: stateFile ?? null, written: false } };
-    await report(ctx, 'lock-acquisition', { holder: lock.holder, fencingTokens: lock.fence?.map(entry => entry.token), lockWaitMs: Date.now() - lockStarted });
+    journal = backend ? await openStoredJournal({ journalStore: backend.journalStore, journalCipher: backend.journalCipher, scope: backend.scope, fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile!);
+    const readState: ApplyContext['readState'] = backend
+      ? async () => { const found = await backend.stateStore.read(backend.scope); return { version: found?.version ?? null, value: found ? validateState(found.value) : null }; }
+      : async () => ({ version: null, value: await deps.readState(stateFile!) });
+    const writeState: ApplyContext['writeState'] = backend
+      ? (version, state) => backend.stateStore.compareAndSwap(backend.scope, version, validateState(state), { fence })
+      : (_version, state) => deps.writeStateAtomic(stateFile!, state);
+    const ctx: ApplyContext = { plan, spec, artifacts, client, lanes, deps, journal, journalStore: backend?.journalStore, lock, config, scope, remote,
+      principal: 'principal' in lock.holder ? lock.holder.principal : principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline,
+      sent: [], rebroadcasts: [], outcomes: new Map<ResourceId, ResourceOutcome>(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 },
+      state: { file: stateFile ?? null, written: false }, prepared: new Map<ResourceId, PreparedAction>(), preflightComplete: false, stateSnapshot: null };
+    await report(ctx, 'lock-acquisition', { holder: lock.holder, fencingTokens: fence?.map(entry => entry.token), lockWaitMs: Date.now() - lockStarted });
     try {
       return await run(ctx);
     } catch (error) {
       if (!error || typeof error !== 'object') throw error;
-      await report(ctx, error.code === 'conflict' || error.code === 'plan-mismatch' ? 'conflict' : 'terminal-failure', { actionId: error.actionId, code: error.code, reason: error.message }).catch(() => {});
-      if (ctx.prepared) {
+      const failure = error as Error & Partial<ApplyError>;
+      await report(ctx, failure.code === 'conflict' || failure.code === 'plan-mismatch' ? 'conflict' : 'terminal-failure', { actionId: failure.actionId, code: failure.code, reason: failure.message }).catch(() => {});
+      if (ctx.preflightComplete) {
         try {
           ctx.state = await persist(ctx);
         } catch (stateError) {
-          ctx.state = { file: stateFile, written: false, reason: stateError.message };
+          ctx.state = { file: stateFile ?? null, written: false, reason: stateError instanceof Error ? stateError.message : String(stateError) };
         }
       }
-      error.result = summary(ctx, 'stopped', error);
+      failure.result = summary(ctx, 'stopped', failure);
       throw error;
     }
   } finally {

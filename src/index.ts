@@ -1,4 +1,3 @@
-// @ts-nocheck
 export { DEFAULT_FACTORY, parseSpec, graph, dependencyGraphs, dependencyMode, dependencyWarnings, impact, resolve, usesDependencyPlan } from './spec/index.ts';
 export { prepareResources, transactionFor, createPlan } from './planning/index.ts';
 export { validateResources } from './validation/index.ts';
