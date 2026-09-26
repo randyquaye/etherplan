@@ -1082,7 +1082,7 @@ export async function applyPlan({ plan, spec, artifacts, client, signers, signer
   const scope = remote ? deploymentScope(scopeInput, plan?.chain) : null;
   const signerControl = { scope, fence: null, assertHeld: null };
   const lanes = lanesFrom(signerProvider ? await signersFromProvider(signerProvider, signerRoles, plan, signerControl) : signers, parallel);
-  const deps = await loadDependencies(config.dependencies);
+  const deps = loadDependencies(config.dependencies);
   const lockStarted = Date.now();
   const emitLeaseEvent = event => typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit?.(event);
   const lock = remote

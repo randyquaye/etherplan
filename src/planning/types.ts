@@ -4,7 +4,7 @@ import type { Artifacts, NormalizedArtifact } from '../artifacts/types.ts';
 import type { ScheduleWave } from '../scheduling/types.ts';
 import type { DependencyEdge, DependencyGraphs, DependencyMode, ExecutionAssumption, Factory } from '../spec/types.ts';
 import type { StateFile } from '../state/types.ts';
-import type { Address, ChainIdentity, Client, DecimalString, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
+import type { Address, CallId, ChainIdentity, Client, ContractId, DecimalString, ExternalId, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
 
 /** A getter check with its expected value resolved. */
@@ -36,6 +36,7 @@ interface PreparedBase {
 }
 
 export interface PreparedExternal extends PreparedBase {
+  id: ExternalId;
   kind: 'external';
   expectedCodeHash: Hash | null;
   checks: PreparedCheck[];
@@ -43,6 +44,7 @@ export interface PreparedExternal extends PreparedBase {
 }
 
 export interface PreparedContract extends PreparedBase {
+  id: ContractId;
   kind: 'contract';
   artifact: NormalizedArtifact;
   artifactHash: Hash;
@@ -65,7 +67,8 @@ export interface PreparedContract extends PreparedBase {
 
 export interface PreparedCall extends PreparedBase {
   kind: 'call';
-  targetId: `contract:${string}`;
+  id: CallId;
+  targetId: ContractId;
   targetArtifact: NormalizedArtifact;
   abi: NormalizedArtifact['abi'];
   method: string;

@@ -1,24 +1,24 @@
-// @ts-nocheck
 import { concatHex, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
 import type { Artifacts } from '../artifacts/types.ts';
-import type { OrderedNode } from '../spec/types.ts';
-import type { PlannedTransaction, PreparedResource, PreparedResources } from './types.ts';
+import type { DependencyEdge, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks } from '../spec/types.ts';
+import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
+import type { PlannedTransaction, PreparedBinding, PreparedCallCheck, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource, PreparedResources } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function create2Address(factory, salt, initcode) {
+function create2Address(factory: Address, salt: Hex, initcode: Hex): Address {
   const digest = keccak256(concatHex(['0xff', factory, salt, keccak256(initcode)]));
   return `0x${digest.slice(-40)}`;
 }
 
-function checks(value, spec, addresses) {
+function checks(value: SpecChecks | undefined, spec: ParsedSpec, addresses: ResolvedAddresses): PreparedCheck[] {
   return Object.entries(value ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([functionName, expected]) => ({ functionName, expected: resolve(expected, spec, addresses) }));
@@ -33,23 +33,22 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
   const spec = parseSpec(specInput);
   const ordered = orderedInput ?? graph(spec);
   const describeDependencies = usesDependencyPlan(spec);
-  const dependencyFields = node => describeDependencies ? {
+  const dependencyFields = (node: OrderedNode): { resolutionDependencies?: ResourceId[]; executionEdges?: DependencyEdge[] } => describeDependencies ? {
     resolutionDependencies: [...node.resolutionDependencies],
     executionEdges: node.executionEdges,
   } : {};
   assert(artifacts instanceof Map, 'Artifacts must be a Map keyed by contract ID.');
-  const addresses = {};
-  const resources = [];
-  const contracts = new Map();
+  const addresses: ResolvedAddresses = {};
+  const resources: PreparedResource[] = [];
+  const contracts = new Map<string, PreparedContract>();
 
   for (const node of ordered) {
-    if (node.kind === 'external' || node.type === 'external') {
-      const name = node.id.slice('external:'.length);
-      const item = spec.externals[name];
-      const resource = {
+    if (node.kind === 'external') {
+      const item = node.item;
+      const resource: PreparedExternal = {
         id: node.id,
         kind: 'external',
-        dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+        dependencies: [...node.dependencies].sort(),
         ...dependencyFields(node),
         address: item.address,
         expectedCodeHash: item.codeHash ?? null,
@@ -60,30 +59,32 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
       continue;
     }
 
-    if (node.kind === 'contract' || node.type === 'contract') {
+    if (node.kind === 'contract') {
       const item = node.item;
       const artifact = artifacts.get(item.id);
       assert(artifact, `Missing artifact for contract:${item.id}.`);
       assert(typeof artifact.artifactHash === 'string' && HASH.test(artifact.artifactHash), `contract:${item.id} needs a normalized artifactHash.`);
       const inputs = resolve(item.args ?? [], spec, addresses);
-      const libraries = resolve(item.libraries ?? {}, spec, addresses);
-      const imported = item.address !== undefined;
-      let initcode;
-      let address;
-      if (imported) {
+      // validateLibraries (through encodeConstructor and validateResources) checks that every value is an address.
+      const libraries = resolve(item.libraries ?? {}, spec, addresses) as Record<string, Address>;
+      let address: JsonValue;
+      let deployment: { initcode: Hex; salt: Hash; factory: Factory } | undefined;
+      if (item.address !== undefined) {
         address = resolve(item.address, spec, addresses);
       } else {
-        initcode = encodeConstructor(artifact, inputs, libraries, node.id);
-        address = create2Address(spec.factory.address, item.salt, initcode);
+        // parseSpec guarantees `salt` and `factory` for a contract without an address.
+        const initcode = encodeConstructor(artifact, inputs, libraries, node.id);
+        deployment = { initcode, salt: item.salt!, factory: spec.factory! };
+        address = create2Address(deployment.factory.address, deployment.salt, initcode);
       }
-      assert(isAddress(address), `contract:${item.id} has an invalid resolved address.`);
+      assert(typeof address === 'string' && isAddress(address), `contract:${item.id} has an invalid resolved address.`);
       assert(!Object.values(addresses).some(existing => existing.toLowerCase() === address.toLowerCase()), `contract:${item.id} resolves to a duplicate contract address.`);
       addresses[item.id] = address;
 
-      const resource = {
+      const resource: PreparedContract = {
         id: node.id,
         kind: 'contract',
-        dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+        dependencies: [...node.dependencies].sort(),
         ...dependencyFields(node),
         address,
         artifact,
@@ -96,11 +97,11 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
       };
       if (Object.keys(libraries).length > 0) resource.libraries = libraries;
       if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
-      if (initcode !== undefined) {
-        resource.initcode = initcode;
-        resource.initcodeHash = keccak256(initcode);
-        resource.salt = item.salt;
-        resource.factory = { ...spec.factory };
+      if (deployment !== undefined) {
+        resource.initcode = deployment.initcode;
+        resource.initcodeHash = keccak256(deployment.initcode);
+        resource.salt = deployment.salt;
+        resource.factory = { ...deployment.factory };
       }
       contracts.set(item.id, resource);
       resources.push(resource);
@@ -111,21 +112,21 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
     const target = contracts.get(item.target);
     assert(target, `${node.id} has unresolved target contract:${item.target}.`);
     const checkArgs = resolve(item.check.args, spec, addresses);
-    const after = {
+    const after: PreparedBinding = {
       functionName: item.check.function,
       args: checkArgs,
       expected: resolve(item.check.equals, spec, addresses),
     };
-    const before = {
+    const before: PreparedBinding = {
       functionName: item.check.function,
       args: checkArgs,
       expected: resolve(item.before.equals, spec, addresses),
     };
-    const check = { functionName: item.check.function, args: checkArgs };
+    const check: PreparedCallCheck = { functionName: item.check.function, args: checkArgs };
     resources.push({
       id: node.id,
       kind: 'call',
-      dependencies: [...(node.dependencies ?? node.deps ?? [])].sort(),
+      dependencies: [...node.dependencies].sort(),
       ...dependencyFields(node),
       address: target.address,
       targetId: target.id,

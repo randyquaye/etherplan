@@ -1,39 +1,51 @@
-// @ts-nocheck
 import { isAddress } from 'viem';
 import type { JournalRecord, StoredJournalRecord } from '../execution/types.ts';
+import type { Hash } from '../types.ts';
 import type { CreationProof } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const BLOCK = /^(0|[1-9][0-9]*)$/;
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
+}
+
+function isHash(value: unknown): value is Hash {
+  return typeof value === 'string' && HASH.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 /** Validate the persisted creation facts without treating them as trusted evidence. */
 export function validateCreationProof(proof: unknown, label = 'Creation proof'): CreationProof {
-  assert(proof && typeof proof === 'object' && !Array.isArray(proof), `${label} must be an object.`);
+  assert(isRecord(proof), `${label} must be an object.`);
   const create2 = proof.kind === 'create2';
   const keys = ['chain', 'transactionHash', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : [])];
-  assert(['create', 'create2'].includes(proof.kind) && Object.keys(proof).length === keys.length && keys.every(key => Object.hasOwn(proof, key)), `${label} has invalid fields.`);
-  assert(proof.chain && typeof proof.chain === 'object' && !Array.isArray(proof.chain) && Object.keys(proof.chain).length === 2 &&
-    Number.isSafeInteger(proof.chain.id) && proof.chain.id > 0 && HASH.test(proof.chain.genesisHash), `${label} has invalid chain identity.`);
-  for (const key of ['transactionHash', 'blockHash', 'initcodeHash', 'codeHash']) assert(HASH.test(proof[key]), `${label} has invalid ${key}.`);
+  assert((proof.kind === 'create' || create2) && Object.keys(proof).length === keys.length && keys.every(key => Object.hasOwn(proof, key)), `${label} has invalid fields.`);
+  const chain = proof.chain;
+  assert(isRecord(chain) && Object.keys(chain).length === 2 &&
+    typeof chain.id === 'number' && Number.isSafeInteger(chain.id) && chain.id > 0 && isHash(chain.genesisHash), `${label} has invalid chain identity.`);
+  for (const key of ['transactionHash', 'blockHash', 'initcodeHash', 'codeHash']) assert(isHash(proof[key]), `${label} has invalid ${key}.`);
   assert(typeof proof.blockNumber === 'string' && BLOCK.test(proof.blockNumber), `${label} has invalid blockNumber.`);
-  assert(isAddress(proof.address), `${label} has invalid address.`);
+  assert(typeof proof.address === 'string' && isAddress(proof.address), `${label} has invalid address.`);
   if (create2) {
-    assert(proof.factory && typeof proof.factory === 'object' && !Array.isArray(proof.factory) && Object.keys(proof.factory).length === 2 &&
-      isAddress(proof.factory.address) && HASH.test(proof.factory.codeHash), `${label} has invalid factory.`);
-    assert(HASH.test(proof.salt), `${label} has invalid salt.`);
+    const factory = proof.factory;
+    assert(isRecord(factory) && Object.keys(factory).length === 2 &&
+      typeof factory.address === 'string' && isAddress(factory.address) && isHash(factory.codeHash), `${label} has invalid factory.`);
+    assert(isHash(proof.salt), `${label} has invalid salt.`);
   }
-  return proof;
+  return proof as unknown as CreationProof;
 }
 
 export function validateJournalCreationProof(record: JournalRecord | StoredJournalRecord, label: string): void {
-  if (record.creationProof === undefined) return;
+  // Records come from disk, so any phase may carry a creationProof even though the type allows it only on `verified`.
+  const { creationProof } = record as { creationProof?: unknown };
+  if (creationProof === undefined) return;
   assert(record.phase === 'verified', `${label} has a creationProof outside verified.`);
-  const proof = validateCreationProof(record.creationProof, `${label} creationProof`);
+  const proof = validateCreationProof(creationProof, `${label} creationProof`);
   assert(proof.chain.id === record.chain.id && proof.chain.genesisHash.toLowerCase() === record.chain.genesisHash.toLowerCase() &&
-    proof.address.toLowerCase() === record.address?.toLowerCase() && proof.codeHash.toLowerCase() === record.codeHash?.toLowerCase(),
+    proof.address.toLowerCase() === record.address.toLowerCase() && proof.codeHash.toLowerCase() === record.codeHash?.toLowerCase(),
   `${label} creationProof differs from verified deployment.`);
 }

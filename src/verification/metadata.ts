@@ -1,24 +1,34 @@
-// @ts-nocheck
 import { createHash } from 'node:crypto';
+import type { MetadataHashKind } from '../artifacts/types.ts';
 import type { Hex } from '../types.ts';
 import type { MetadataTail } from './types.ts';
 
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const IPFS_CHUNK_SIZE = 256 * 1024;
 const IPFS_MAX_LINKS = 174;
-const HASH_KEYS = { ipfs: 34, bzzr0: 32, bzzr1: 32 };
+const HASH_KEYS: Record<MetadataHashKind, number> = { ipfs: 34, bzzr0: 32, bzzr1: 32 };
 
-function hexToBytes(hex) {
+/** A UnixFS node: its multihash, the file bytes it covers, and the total size of its blocks. */
+interface IpfsLink {
+  hash: Buffer;
+  size: number;
+  blockSize: number;
+}
+
+/** What decodeItem produces. solc metadata uses only unsigned integers, byte and text strings, maps, and booleans. */
+type CborValue = number | string | boolean | { [key: string]: CborValue };
+
+function hexToBytes(hex: string): Buffer {
   const body = hex.startsWith('0x') ? hex.slice(2) : hex;
   return Buffer.from(body, 'hex');
 }
 
-function bytesToHex(bytes) {
+function bytesToHex(bytes: Uint8Array): Hex {
   return `0x${Buffer.from(bytes).toString('hex')}`;
 }
 
-function varint(value) {
-  const out = [];
+function varint(value: number): Buffer {
+  const out: number[] = [];
   let rest = value;
   while (rest >= 0x80) {
     out.push((rest & 0x7f) | 0x80);
@@ -28,17 +38,17 @@ function varint(value) {
   return Buffer.from(out);
 }
 
-function lengthDelimited(tag, bytes) {
+function lengthDelimited(tag: number, bytes: Uint8Array): Buffer {
   return Buffer.concat([Buffer.from([tag]), varint(bytes.length), bytes]);
 }
 
-function multihash(block) {
+function multihash(block: Uint8Array): Buffer {
   return Buffer.concat([Buffer.from([0x12, 0x20]), createHash('sha256').update(block).digest()]);
 }
 
-function combineLinks(links) {
-  const data = [];
-  const lengths = [];
+function combineLinks(links: IpfsLink[]): IpfsLink {
+  const data: Buffer[] = [];
+  const lengths: Buffer[] = [];
   let size = 0;
   let blockSize = 0;
   for (const link of links) {
@@ -60,21 +70,22 @@ function combineLinks(links) {
 export function ipfsMetadataHash(text: string): Hex {
   const data = Buffer.from(text, 'utf8');
   const count = Math.max(1, Math.ceil(data.length / IPFS_CHUNK_SIZE));
-  let level = [];
+  let level: IpfsLink[] = [];
   for (let index = 0; index < count; index++) {
     const chunk = data.subarray(index * IPFS_CHUNK_SIZE, (index + 1) * IPFS_CHUNK_SIZE);
-    const parts = [Buffer.from([0x08, 0x02])];
+    const parts: Buffer[] = [Buffer.from([0x08, 0x02])];
     if (chunk.length > 0) parts.push(lengthDelimited(0x12, chunk));
     parts.push(Buffer.from([0x18]), varint(chunk.length));
     const block = lengthDelimited(0x0a, Buffer.concat(parts));
     level.push({ hash: multihash(block), size: chunk.length, blockSize: block.length });
   }
   while (level.length > 1) {
-    const next = [];
+    const next: IpfsLink[] = [];
     for (let start = 0; start < level.length; start += IPFS_MAX_LINKS) next.push(combineLinks(level.slice(start, start + IPFS_MAX_LINKS)));
     level = next;
   }
-  return bytesToHex(level[0].hash);
+  // `count` is at least 1, so the tree has a root.
+  return bytesToHex(level[0]!.hash);
 }
 
 /** Encodes a `0x1220...` multihash as a base58 CIDv0 string (`Qm...`). */
@@ -83,7 +94,7 @@ export function cidV0(multihashHex: string): string {
   let number = BigInt(bytesToHex(bytes));
   let out = '';
   while (number > 0n) {
-    out = BASE58[Number(number % 58n)] + out;
+    out = BASE58.charAt(Number(number % 58n)) + out;
     number /= 58n;
   }
   for (const byte of bytes) {
@@ -93,17 +104,19 @@ export function cidV0(multihashHex: string): string {
   return out;
 }
 
-function decodeItem(bytes, offset) {
-  if (offset >= bytes.length) throw new Error('CBOR ends early.');
+function decodeItem(bytes: Buffer, offset: number): { value: CborValue; next: number } {
   const initial = bytes[offset];
+  if (initial === undefined) throw new Error('CBOR ends early.');
   const major = initial >> 5;
   const info = initial & 0x1f;
   let cursor = offset + 1;
-  let argument;
+  let argument: number | undefined;
   if (info < 24) argument = info;
   else if (info === 24) argument = bytes[cursor++];
   else if (info === 25) {
-    argument = (bytes[cursor] << 8) | bytes[cursor + 1];
+    const high = bytes[cursor];
+    const low = bytes[cursor + 1];
+    argument = high === undefined || low === undefined ? undefined : (high << 8) | low;
     cursor += 2;
   } else if (info === 26) {
     argument = bytes.readUInt32BE(cursor);
@@ -119,7 +132,7 @@ function decodeItem(bytes, offset) {
     return { value: major === 2 ? bytesToHex(slice) : slice.toString('utf8'), next: end };
   }
   if (major === 5) {
-    const value = {};
+    const value: { [key: string]: CborValue } = {};
     let next = cursor;
     for (let index = 0; index < argument; index++) {
       const key = decodeItem(bytes, next);
@@ -148,7 +161,7 @@ export function decodeMetadataTail(code: string): MetadataTail | null {
   const tailHex = text.slice(start * 2);
   if (!/^[0-9a-fA-F]*$/.test(tailHex)) return null;
   const tailBytes = hexToBytes(tailHex);
-  let decoded;
+  let decoded: { value: CborValue; next: number };
   try {
     decoded = decodeItem(tailBytes.subarray(0, length), 0);
   } catch {
@@ -156,19 +169,22 @@ export function decodeMetadataTail(code: string): MetadataTail | null {
   }
   if (decoded.next !== length || !decoded.value || typeof decoded.value !== 'object' || Array.isArray(decoded.value)) return null;
   const map = decoded.value;
-  const tail = { start, raw: `0x${tailHex.toLowerCase()}`, map };
-  for (const [kind, size] of Object.entries(HASH_KEYS)) {
-    if (typeof map[kind] === 'string' && (map[kind].length - 2) / 2 === size) {
+  const tail: MetadataTail = { start, raw: `0x${tailHex.toLowerCase()}`, map };
+  for (const [kind, size] of Object.entries(HASH_KEYS) as [MetadataHashKind, number][]) {
+    const hash = map[kind];
+    if (typeof hash === 'string' && (hash.length - 2) / 2 === size) {
       tail.hashKind = kind;
-      tail.hash = map[kind];
+      // A byte string of the right length; decodeItem produced it through bytesToHex.
+      tail.hash = hash as Hex;
       break;
     }
   }
-  if (typeof map.solc === 'string' && map.solc.length === 8) {
-    const release = hexToBytes(map.solc);
+  const solc = map.solc;
+  if (typeof solc === 'string' && solc.length === 8) {
+    const release = hexToBytes(solc);
     tail.solc = `${release[0]}.${release[1]}.${release[2]}`;
-  } else if (typeof map.solc === 'string' && !map.solc.startsWith('0x')) {
-    tail.solc = map.solc;
+  } else if (typeof solc === 'string' && !solc.startsWith('0x')) {
+    tail.solc = solc;
   }
   return tail;
 }

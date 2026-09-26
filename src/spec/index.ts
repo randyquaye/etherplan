@@ -384,6 +384,8 @@ export function impact(spec: ParsedSpec, ordered: OrderedNode[], reference: stri
   return ordered.filter(node => affected.has(node.id)).map(node => node.id);
 }
 
+export function resolve(value: SpecValue[], spec: ParsedSpec, addresses: ResolvedAddresses): JsonValue[];
+export function resolve(value: SpecValue, spec: ParsedSpec, addresses: ResolvedAddresses): JsonValue;
 export function resolve(value: SpecValue, spec: ParsedSpec, addresses: ResolvedAddresses): JsonValue {
   if (Array.isArray(value)) return value.map(item => resolve(item, spec, addresses));
   if (isObject(value)) {

@@ -1,5 +1,5 @@
 // Shapes of a parsed specification and its dependency graph. Source of truth: parseSpec and graph in index.ts.
-import type { Abi, Address, Hash, JsonPrimitive, JsonValue, ResourceId } from '../types.ts';
+import type { Abi, Address, CallId, ContractId, ExternalId, Hash, JsonPrimitive, JsonValue, ResourceId } from '../types.ts';
 
 /** A spec before parseSpec: JSON from disk or a compiled .ethp document. */
 export type RawSpec = unknown;
@@ -118,6 +118,7 @@ interface OrderedNodeBase {
 }
 
 export interface OrderedContractNode extends OrderedNodeBase {
+  id: ContractId;
   kind: 'contract';
   /** Same as `kind`. */
   type: 'contract';
@@ -125,12 +126,14 @@ export interface OrderedContractNode extends OrderedNodeBase {
 }
 
 export interface OrderedExternalNode extends OrderedNodeBase {
+  id: ExternalId;
   kind: 'external';
   type: 'external';
   item: SpecExternal;
 }
 
 export interface OrderedCallNode extends OrderedNodeBase {
+  id: CallId;
   kind: 'call';
   type: 'call';
   item: SpecCall;

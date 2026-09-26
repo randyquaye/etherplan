@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { concatHex, keccak256, pad, stringToHex } from 'viem';
 import type { Address, Client, Hex } from '../types.ts';
 import type { SimulateCreate2Input, SimulateCreateInput } from './types.ts';
@@ -19,7 +18,9 @@ export const PROBE_CODE: Hex = `0x${[
 
 export const PROBE_ADDRESS: Address = `0x${keccak256(stringToHex('etherplan.verification.create2-probe')).slice(-40)}`;
 
-function at(blockNumber) {
+type CallRequest = Parameters<Client['call']>[0];
+
+function at(blockNumber: bigint | undefined): { blockNumber?: bigint } {
   return blockNumber === undefined ? {} : { blockNumber };
 }
 
@@ -29,7 +30,7 @@ function at(blockNumber) {
  * Nothing is signed or sent.
  */
 export async function simulateCreate2(client: Client, { factory, salt, initcode, address, blockNumber, account }: SimulateCreate2Input): Promise<Hex> {
-  const request = {
+  const request: CallRequest = {
     to: PROBE_ADDRESS,
     data: concatHex([pad(factory), pad(address), salt, initcode]),
     stateOverride: [
@@ -41,12 +42,12 @@ export async function simulateCreate2(client: Client, { factory, salt, initcode,
   if (account) request.account = account;
   const { data } = await client.call(request);
   if (!data || data === '0x') throw new Error('CREATE2 simulation returned no runtime code.');
-  return data.toLowerCase();
+  return data.toLowerCase() as Hex;
 }
 
 /** Replays a direct CREATE transaction with `eth_call` and returns the runtime that its constructor returns. */
 export async function simulateCreate(client: Client, { from, initcode, blockNumber }: SimulateCreateInput): Promise<Hex> {
   const { data } = await client.call({ account: from, data: initcode, ...at(blockNumber) });
   if (!data || data === '0x') throw new Error('Creation replay returned no runtime code.');
-  return data.toLowerCase();
+  return data.toLowerCase() as Hex;
 }

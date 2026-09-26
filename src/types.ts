@@ -9,7 +9,10 @@ export type Hash = Hex;
 export type ResourceKind = 'contract' | 'external' | 'call';
 
 /** `<kind>:<name>`, where the name matches `/^[a-z][a-zA-Z0-9_]*$/`. */
-export type ResourceId = `contract:${string}` | `external:${string}` | `call:${string}`;
+export type ContractId = `contract:${string}`;
+export type ExternalId = `external:${string}`;
+export type CallId = `call:${string}`;
+export type ResourceId = ContractId | ExternalId | CallId;
 
 /** The chain a plan, state file, journal, or scope belongs to. `genesisHash` is the hash of block 0. */
 export interface ChainIdentity {

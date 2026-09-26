@@ -1,31 +1,30 @@
-// @ts-nocheck
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseSpec } from '../spec/index.ts';
 import { compileConfig, compileSpec, configOptions } from './compile.ts';
 import { parseHcl } from './hcl.ts';
 import type { ParsedSpec } from '../spec/types.ts';
-import type { CommandOptions, CompiledSpec, LoadedConfig } from './types.ts';
+import type { CommandOptions, CompiledSpec, ConfigOptions, LoadedConfig } from './types.ts';
 
-function isEthp(file) {
+function isEthp(file: string): boolean {
   return path.extname(file) === '.ethp';
 }
 
-function display(file) {
+function display(file: string): string {
   const relative = path.relative(process.cwd(), file);
   return relative && !relative.startsWith('..') ? relative : file;
 }
 
 // main.ethp reads main.ethpvars and main.ethpconfig from the same directory.
-function sibling(specFile, extension) {
+function sibling(specFile: string, extension: string): string {
   return path.join(path.dirname(specFile), `${path.basename(specFile, '.ethp')}${extension}`);
 }
 
-async function readOptional(file) {
+async function readOptional(file: string): Promise<string | null> {
   try {
     return await readFile(file, 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return null;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
 }
@@ -55,7 +54,7 @@ export async function loadSpec(specFile: string): Promise<ParsedSpec> {
   try {
     return parseSpec(compiled);
   } catch (error) {
-    throw new Error(`${display(specFile)}: ${error.message}`, { cause: error });
+    throw new Error(`${display(specFile)}: ${(error as Error).message}`, { cause: error });
   }
 }
 
@@ -79,6 +78,6 @@ export function withConfig(options: Record<string, string | boolean>, config: Lo
     delete configured.deployers;
     delete configured.owner;
   }
-  for (const name of Object.keys(options)) delete configured[name];
+  for (const name of Object.keys(options)) delete configured[name as keyof ConfigOptions];
   return { options: { ...configured, ...options }, configured: Object.keys(configured).sort() };
 }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // A fail-closed stop. `retryable` means that a rerun of the same plan can continue; otherwise a new plan is necessary.
 
 import type { ResourceId } from '../types.ts';
