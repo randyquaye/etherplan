@@ -66,8 +66,35 @@ node src/cli.mjs status --plan plan.json --backend backend.json
 
 A signer module exports `signerProvider` (and optionally `signerRoles`). It can use `createSignerServiceProvider`, a hardware wallet, or an organization-specific signer. `status` is read-only: it reports lock holder and expiry, active or abandoned lease state, plan hash, last journal phase, sequence, and state version without decrypting signed bytes.
 
+## KMS transaction signers
+
+`createKmsSignerProvider` implements the signer-module interface using AWS KMS asymmetric secp256k1 keys. It calls `GetPublicKey` when the module loads, checks `ECC_SECG_P256K1`, `SIGN_VERIFY`, and `ECDSA_SHA_256`, derives the Ethereum address, and pins the resolved key ID so an alias change cannot silently change the signing key. For each EIP-1559 transaction it asks KMS to sign the Ethereum transaction digest with `MessageType: DIGEST`, normalizes the DER signature to Ethereum's low-s form, recovers the signature parity, and serializes the signed transaction. Apply independently checks the returned bytes against its requested envelope and pinned signer address.
+
+For example, save this as `signer.mjs` in a project that has Etherplan installed:
+
+```js
+import { createKmsSignerProvider } from 'etherplan/src/core.mjs';
+
+export const signerRoles = { deployer: ['deployer-a', 'deployer-b'] };
+export const signerProvider = await createKmsSignerProvider({
+  keys: {
+    'deployer-a': process.env.ETHERPLAN_KMS_DEPLOYER_A_ARN,
+    'deployer-b': process.env.ETHERPLAN_KMS_DEPLOYER_B_ARN,
+  },
+});
+```
+
+Add an `owner` key and `owner: 'owner'` to `signerRoles` when owner actions need a separate signer. The role order must match the saved plan's deployer order. Full KMS key ARNs let the provider infer the region; for aliases or key IDs, use the AWS SDK's configured region or pass `region`. All keys in one provider must use the same region. The runner's AWS identity needs `kms:GetPublicKey` and `kms:Sign` on every signing key. No AWS credentials belong in the module or plan.
+
+```sh
+etherplan plan --spec spec.json --signer-module signer.mjs --parallel --max-spend-wei 100000000000000000 --out plan.json
+etherplan apply --spec spec.json --plan plan.json --signer-module signer.mjs --parallel
+```
+
+Add `--backend backend.json` to both commands when shared AWS recovery is needed. The backend's `kmsKeyId` remains a **separate symmetric encryption key** for the journal and S3; an `ECC_SECG_P256K1` signing key cannot replace it. An in-process KMS module means the apply runner itself has `kms:Sign` permission. A separate signer service can instead hold that permission and independently validate the supplied lease fencing tokens before signing. Local recovery stores signed transaction bytes in a mode-`0600` journal; it never stores KMS private key material.
+
 Single-signer pipelining works with the backend. Pass `--pipeline --deployers <signer address>` to `plan`, and `--pipeline` to `apply`. Signed bytes for a nonce reservation are encrypted in the journal like any other signed record, and a replacement runner resumes the reservation without signing again. Apply checks the leases before each signature and once before the first broadcasts of a signer group, so a lost lease stops the group before it reaches the chain.
 
-Grant the planner only chain read access, DynamoDB `GetItem` for state, S3 `PutObject`/`GetObject` on its plan prefix, and the KMS permission required for S3 server-side encryption. Grant the apply runner DynamoDB `GetItem`, `Query`, `UpdateItem`, and `TransactWriteItems` on its scoped keys, S3 `GetObject` on plans, and KMS `GenerateDataKey`/`Decrypt` for the journal key. Give the signer service its own signing permission; the apply runner needs permission to call it, not to read its keys. An auditor needs DynamoDB `GetItem`/`Query` only. Scope all policies by resource ARN and deployment key prefix; deny destructive S3 and DynamoDB actions to normal runners.
+Grant the planner only chain read access, DynamoDB `GetItem` for state, S3 `PutObject`/`GetObject` on its plan prefix, and the KMS permission required for S3 server-side encryption. A planner that loads a KMS signer module also needs `kms:GetPublicKey` on its signing keys. Grant the apply runner DynamoDB `GetItem`, `Query`, `UpdateItem`, and `TransactWriteItems` on its scoped keys, S3 `GetObject` on plans, and KMS `GenerateDataKey`/`Decrypt` for the journal key. With an in-process KMS signer, the apply runner also needs `kms:GetPublicKey` and `kms:Sign` on the signing keys. With a separate signer service, give that service the signing permission and let the apply runner call it. An auditor needs DynamoDB `GetItem`/`Query` only. Scope all policies by resource ARN and deployment key prefix; deny destructive S3 and DynamoDB actions to normal runners.
 
 The local CLI remains available without `--backend`. The AWS path requires a shared table, bucket, KMS key, and signer service; local files are not copied to a replacement runner. Production `import` is not supported by the CLI.
