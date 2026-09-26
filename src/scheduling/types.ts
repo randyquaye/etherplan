@@ -1,4 +1,5 @@
 // Execution waves and signer batches. Source of truth: executionWaves and createSchedule in index.ts.
+import type { PlanAction } from '../planning/types.ts';
 import type { DependencyEdge, DependencyGraphs, Factory } from '../spec/types.ts';
 import type { Address, ResourceId, ResourceKind } from '../types.ts';
 
@@ -18,7 +19,7 @@ export interface ExecutionWaves {
 export interface SchedulableResource {
   id: ResourceId;
   kind: ResourceKind;
-  action: string;
+  action: PlanAction;
   address: Address;
   dependencies: ResourceId[];
   signerRole?: string | null;

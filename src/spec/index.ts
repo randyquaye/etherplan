@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { isAddress } from 'viem';
-import type { JsonValue, ResourceId } from '../types.ts';
-import type { DependencyGraphs, DependencyMode, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecValue } from './types.ts';
+import type { ContractId, DistributiveOmit, Hash, JsonValue, ResourceId } from '../types.ts';
+import type { DependencyEdge, DependencyGraphs, DependencyMode, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecContract, SpecValue } from './types.ts';
 
 export const DEFAULT_FACTORY: Factory = {
   address: '0x4e59b44847b379578588920cA78FbF26c0B4956C',
@@ -13,21 +12,33 @@ const ROLE = /^[a-z][a-z0-9_-]*$/;
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SECRET_KEY = /^(private[_-]?key|secret[_-]?key|mnemonic|seed[_-]?phrase|passphrase)$/i;
 
-function assert(condition, message) {
+/** A reference found in a spec value, and where it sits. */
+interface ReferenceDetail {
+  reference: string;
+  requiresLive: boolean;
+  location: string;
+}
+
+/** A graph node before its edges are computed. */
+type NodeDraft = DistributiveOmit<OrderedNode, 'resolutionEdges' | 'executionEdges' | 'resolutionDependencies' | 'executionDependencies' | 'dependencies' | 'deps'>;
+
+type DependencyField = 'resolutionDependencies' | 'executionDependencies';
+
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function isObject(value) {
+function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 
-function cloneJson(value, location = 'Spec') {
+function cloneJson(value: unknown, location = 'Spec'): JsonValue {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (Array.isArray(value)) return value.map((item, index) => cloneJson(item, `${location}[${index}]`));
   if (isObject(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    return Object.fromEntries(Object.entries(value).map(([key, item]): [string, JsonValue] => {
       assert(item !== undefined, `${location}.${key} must be a JSON value.`);
       return [key, cloneJson(item, `${location}.${key}`)];
     }));
@@ -35,11 +46,11 @@ function cloneJson(value, location = 'Spec') {
   throw new Error(`${location} must contain only JSON values.`);
 }
 
-function assertKeys(value, allowed, location) {
+function assertKeys(value: object, allowed: Set<string>, location: string): void {
   for (const key of Object.keys(value)) assert(allowed.has(key), `${location} has unknown field ${key}.`);
 }
 
-function assertNoSecrets(value, location = 'Spec') {
+function assertNoSecrets(value: unknown, location = 'Spec'): void {
   if (Array.isArray(value)) value.forEach((item, index) => assertNoSecrets(item, `${location}[${index}]`));
   else if (isObject(value)) {
     for (const [key, item] of Object.entries(value)) {
@@ -49,53 +60,56 @@ function assertNoSecrets(value, location = 'Spec') {
   }
 }
 
-function assertId(value, location) {
+function assertId(value: unknown, location: string): asserts value is string {
   assert(typeof value === 'string' && ID.test(value), `${location} must match ${ID}.`);
 }
 
-function assertHash(value, location) {
+function assertHash(value: unknown, location: string): asserts value is Hash {
   assert(typeof value === 'string' && HASH.test(value), `${location} must be a 32-byte hex value.`);
 }
 
-function assertAddressOrReference(value, location) {
-  assert(isAddress(value) || (isObject(value) && typeof value.ref === 'string' &&
+function assertAddressOrReference(value: unknown, location: string): void {
+  assert((typeof value === 'string' && isAddress(value)) || (isObject(value) && typeof value.ref === 'string' &&
     Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
     (value.requiresLive === undefined || typeof value.requiresLive === 'boolean')), `${location} must be an Ethereum address or one reference.`);
 }
 
-function assertChecks(value, location) {
+function assertChecks(value: unknown, location: string): void {
   assert(isObject(value), `${location} must be an object.`);
   for (const name of Object.keys(value)) assert(typeof name === 'string' && name.length > 0, `${location} has an invalid function name.`);
 }
 
-function assertAfter(value, location) {
+function assertAfter(value: unknown, location: string): void {
   assert(Array.isArray(value), `${location} must be an array.`);
-  for (const dependency of value) {
+  for (const dependency of value as unknown[]) {
     assert(typeof dependency === 'string' && /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/.test(dependency), `${location} contains invalid dependency ${String(dependency)}.`);
   }
 }
 
-function collectReferences(value, into = new Set(), location = 'value') {
+/** Validates a `{ ref, requiresLive? }` object and reads it. */
+function referenceIn(value: Record<string, unknown>, location: string): { ref: string; requiresLive: boolean } {
+  const { ref, requiresLive } = value;
+  assert(typeof ref === 'string' && Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
+    (requiresLive === undefined || typeof requiresLive === 'boolean'), `${location} must use a reference object with ref and optional boolean requiresLive.`);
+  return { ref, requiresLive: requiresLive === true };
+}
+
+function collectReferences(value: unknown, into = new Set<string>(), location = 'value'): Set<string> {
   if (Array.isArray(value)) {
     value.forEach((item, index) => collectReferences(item, into, `${location}[${index}]`));
   } else if (isObject(value)) {
-    if (Object.hasOwn(value, 'ref')) {
-      assert(typeof value.ref === 'string' && Object.keys(value).every(key => ['ref', 'requiresLive'].includes(key)) &&
-        (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'), `${location} must use a reference object with ref and optional boolean requiresLive.`);
-      into.add(value.ref);
-    } else {
-      for (const [key, item] of Object.entries(value)) collectReferences(item, into, `${location}.${key}`);
-    }
+    if (Object.hasOwn(value, 'ref')) into.add(referenceIn(value, location).ref);
+    else for (const [key, item] of Object.entries(value)) collectReferences(item, into, `${location}.${key}`);
   }
   return into;
 }
 
-function referenceDetails(value, location, into = []) {
+function referenceDetails(value: unknown, location: string, into: ReferenceDetail[] = []): ReferenceDetail[] {
   if (Array.isArray(value)) value.forEach((item, index) => referenceDetails(item, `${location}[${index}]`, into));
   else if (isObject(value)) {
     if (Object.hasOwn(value, 'ref')) {
-      collectReferences(value, new Set(), location);
-      into.push({ reference: value.ref, requiresLive: value.requiresLive === true, location });
+      const { ref, requiresLive } = referenceIn(value, location);
+      into.push({ reference: ref, requiresLive, location });
     } else for (const [key, item] of Object.entries(value)) referenceDetails(item, `${location}.${key}`, into);
   }
   return into;
@@ -109,14 +123,14 @@ export function usesDependencyPlan(spec: ParsedSpec): boolean {
   return spec.schema === 2 || spec.dependencyMode !== undefined || spec.executionAssumptions !== undefined;
 }
 
-function validateReferences(spec) {
+function validateReferences(spec: ParsedSpec): void {
   for (const [name, value] of Object.entries(spec.values)) {
     assert(collectReferences(value).size === 0, `Value ${name} must be literal and cannot contain references.`);
   }
 
   const contractIds = new Set(spec.contracts.map(item => item.id));
   const externalIds = new Set(Object.keys(spec.externals));
-  const candidates = [];
+  const candidates: [string, unknown[]][] = [];
   for (const item of spec.contracts) candidates.push([`contract:${item.id}`, [item.address, item.args, item.libraries, item.checks]]);
   for (const [name, item] of Object.entries(spec.externals)) candidates.push([`external:${name}`, [item.checks]]);
   for (const item of spec.calls) candidates.push([`call:${item.id}`, [item.args, item.check, item.before]]);
@@ -124,16 +138,17 @@ function validateReferences(spec) {
   for (const [owner, values] of candidates) {
     for (const { reference, requiresLive } of referenceDetails(values, owner)) {
       const parts = reference.split('.');
-      if (parts[0] === 'values') {
+      const [root, name] = parts;
+      if (root === 'values') {
         assert(!requiresLive, `${owner} cannot use requiresLive on value ${reference}.`);
-        assert(parts.length === 2, `${owner} has invalid reference ${reference}.`);
-        assert(Object.hasOwn(spec.values, parts[1]), `Missing value ${parts[1]} for ${owner}.`);
-      } else if (parts[0] === 'externals') {
-        assert(parts.length === 3 && parts[2] === 'address', `${owner} has invalid reference ${reference}.`);
-        assert(externalIds.has(parts[1]), `Missing graph node external:${parts[1]} for ${owner}.`);
-      } else if (parts[0] === 'contracts') {
-        assert(parts.length === 3 && parts[2] === 'address', `${owner} has invalid reference ${reference}.`);
-        assert(contractIds.has(parts[1]), `Missing graph node contract:${parts[1]} for ${owner}.`);
+        assert(parts.length === 2 && name !== undefined, `${owner} has invalid reference ${reference}.`);
+        assert(Object.hasOwn(spec.values, name), `Missing value ${name} for ${owner}.`);
+      } else if (root === 'externals') {
+        assert(parts.length === 3 && parts[2] === 'address' && name !== undefined, `${owner} has invalid reference ${reference}.`);
+        assert(externalIds.has(name), `Missing graph node external:${name} for ${owner}.`);
+      } else if (root === 'contracts') {
+        assert(parts.length === 3 && parts[2] === 'address' && name !== undefined, `${owner} has invalid reference ${reference}.`);
+        assert(contractIds.has(name), `Missing graph node contract:${name} for ${owner}.`);
       } else {
         throw new Error(`${owner} has unknown reference ${reference}.`);
       }
@@ -141,22 +156,23 @@ function validateReferences(spec) {
   }
 }
 
-function creationReferences(item) {
+function creationReferences(item: SpecContract): (ReferenceDetail & { text: string })[] {
   return [
     ...referenceDetails(item.args, 'args').map(detail => ({ ...detail, text: 'constructor references' })),
     ...referenceDetails(item.libraries, 'libraries').map(detail => ({ ...detail, text: 'links library' })),
   ].filter(({ reference }) => reference.startsWith('contracts.'));
 }
 
-function validateAssumptions(spec) {
-  const contracts = new Map(spec.contracts.map(item => [`contract:${item.id}`, item]));
-  const seen = new Set();
-  for (const assumption of spec.executionAssumptions ?? []) {
+function validateAssumptions(contracts: SpecContract[], assumptions: unknown[]): void {
+  const byId = new Map(contracts.map((item): [string, SpecContract] => [`contract:${item.id}`, item]));
+  const seen = new Set<string>();
+  for (const assumption of assumptions) {
     assert(isObject(assumption), 'Spec executionAssumptions must contain objects.');
     assertKeys(assumption, new Set(['consumer', 'location', 'reference', 'reason']), 'Execution assumption');
-    assert(typeof assumption.consumer === 'string' && contracts.has(assumption.consumer), `Execution assumption has unknown consumer ${String(assumption.consumer)}.`);
+    const consumer = typeof assumption.consumer === 'string' ? byId.get(assumption.consumer) : undefined;
+    assert(consumer !== undefined, `Execution assumption has unknown consumer ${String(assumption.consumer)}.`);
     assert(typeof assumption.location === 'string' && typeof assumption.reference === 'string' &&
-      creationReferences(contracts.get(assumption.consumer)).some(detail => detail.location === assumption.location && detail.reference === assumption.reference),
+      creationReferences(consumer).some(detail => detail.location === assumption.location && detail.reference === assumption.reference),
     `Execution assumption for ${assumption.consumer} must identify a real constructor or library reference and location.`);
     assert(typeof assumption.reason === 'string' && assumption.reason.trim().length > 0, 'Execution assumption needs a nonempty reason.');
     const key = `${assumption.consumer}\u0000${assumption.location}\u0000${assumption.reference}`;
@@ -171,11 +187,11 @@ export function parseSpec(raw: unknown): ParsedSpec {
   assertNoSecrets(spec);
   assertKeys(spec, new Set(['schema', 'chainId', 'values', 'externals', 'factory', 'contracts', 'calls', 'dependencyMode', 'executionAssumptions']), 'Spec');
   assert(spec.schema === 1 || spec.schema === 2, 'Spec must have schema: 1 or 2.');
-  assert(spec.dependencyMode === undefined || ['split', 'compatibility'].includes(spec.dependencyMode), 'Spec dependencyMode must be split or compatibility.');
+  assert(spec.dependencyMode === undefined || (typeof spec.dependencyMode === 'string' && ['split', 'compatibility'].includes(spec.dependencyMode)), 'Spec dependencyMode must be split or compatibility.');
   if (spec.executionAssumptions !== undefined) {
     assert(Array.isArray(spec.executionAssumptions), 'Spec executionAssumptions must be an array.');
   }
-  assert(Number.isSafeInteger(spec.chainId) && spec.chainId > 0, 'Spec needs a positive numeric chainId.');
+  assert(typeof spec.chainId === 'number' && Number.isSafeInteger(spec.chainId) && spec.chainId > 0, 'Spec needs a positive numeric chainId.');
   assert(Array.isArray(spec.contracts) && spec.contracts.length > 0, 'Spec needs a nonempty contracts array.');
   spec.values ??= {};
   spec.externals ??= {};
@@ -189,13 +205,13 @@ export function parseSpec(raw: unknown): ParsedSpec {
     assertId(name, `External name ${name}`);
     assert(isObject(external), `External ${name} must be an object.`);
     assertKeys(external, new Set(['address', 'codeHash', 'checks', 'abi']), `External ${name}`);
-    assert(isAddress(external.address), `External ${name} needs an address.`);
+    assert(typeof external.address === 'string' && isAddress(external.address), `External ${name} needs an address.`);
     if (external.codeHash !== undefined) assertHash(external.codeHash, `External ${name} codeHash`);
     if (external.checks !== undefined) assertChecks(external.checks, `External ${name} checks`);
     if (external.abi !== undefined) assert(Array.isArray(external.abi), `External ${name} abi must be an array.`);
   }
 
-  const ids = new Set();
+  const ids = new Set<string>();
   for (const item of spec.contracts) {
     assert(isObject(item), 'Every contract must be an object.');
     assertKeys(item, new Set(['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'signerRole', 'senderIndependent']), `Contract ${item.id ?? '<unknown>'}`);
@@ -243,64 +259,69 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.transfersOwnership !== undefined) assert(typeof item.transfersOwnership === 'boolean', `${fullId} transfersOwnership must be boolean.`);
   }
 
-  if (spec.contracts.some(item => item.salt !== undefined)) {
+  if (spec.contracts.some(item => isObject(item) && item.salt !== undefined)) {
     spec.factory ??= cloneJson(DEFAULT_FACTORY);
     assert(isObject(spec.factory), 'Factory must be an object.');
     assertKeys(spec.factory, new Set(['address', 'codeHash']), 'Factory');
-    assert(isAddress(spec.factory.address), 'Factory needs an address.');
+    assert(typeof spec.factory.address === 'string' && isAddress(spec.factory.address), 'Factory needs an address.');
     assertHash(spec.factory.codeHash, 'Factory codeHash');
   } else {
     assert(spec.factory === undefined, 'Factory is allowed only when a contract uses CREATE2.');
   }
 
-  validateReferences(spec);
-  validateAssumptions(spec);
-  return spec;
+  // The checks above are the runtime half of ParsedSpec; the reference and assumption checks need the typed shape.
+  const parsed = spec as unknown as ParsedSpec;
+  validateReferences(parsed);
+  validateAssumptions(parsed.contracts, parsed.executionAssumptions ?? []);
+  return parsed;
 }
 
-function references(value) {
+function references(value: unknown): Set<string> {
   return collectReferences(value);
 }
 
-function orderGraph(nodes, field, label) {
-  const visited = new Set();
-  const visiting = new Set();
-  const ordered = [];
-  function visit(id) {
-    assert(nodes.has(id), label === 'Dependency' ? `Missing graph node ${id}.` : `Missing ${label.toLowerCase()} resource ${id}.`);
+function orderGraph(nodes: Map<ResourceId, OrderedNode>, field: DependencyField, label: string): OrderedNode[] {
+  const visited = new Set<ResourceId>();
+  const visiting = new Set<ResourceId>();
+  const ordered: OrderedNode[] = [];
+  function visit(id: ResourceId): void {
+    const node = nodes.get(id);
+    assert(node !== undefined, label === 'Dependency' ? `Missing graph node ${id}.` : `Missing ${label.toLowerCase()} resource ${id}.`);
     if (visited.has(id)) return;
     assert(!visiting.has(id), `${label} cycle at ${id}.`);
     visiting.add(id);
-    for (const dependency of nodes.get(id)[field]) visit(dependency);
+    for (const dependency of node[field]) visit(dependency);
     visiting.delete(id);
     visited.add(id);
-    ordered.push(nodes.get(id));
+    ordered.push(node);
   }
   for (const id of nodes.keys()) visit(id);
   return ordered;
 }
 
-function addEdge(edges, dependency, reason) {
-  if (!edges.has(dependency)) edges.set(dependency, new Set());
-  edges.get(dependency).add(reason);
+function addEdge(edges: Map<ResourceId, Set<string>>, dependency: ResourceId, reason: string): void {
+  const reasons = edges.get(dependency);
+  if (reasons) reasons.add(reason);
+  else edges.set(dependency, new Set([reason]));
 }
 
-function edgeList(edges) {
+function edgeList(edges: Map<ResourceId, Set<string>>): DependencyEdge[] {
   return [...edges].sort(([left], [right]) => left.localeCompare(right))
     .map(([id, reasons]) => ({ id, reasons: [...reasons].sort() }));
 }
 
 export function graph(spec: ParsedSpec): OrderedNode[] {
   const mode = dependencyMode(spec);
-  const nodes = new Map();
-  for (const [name, item] of Object.entries(spec.externals)) nodes.set(`external:${name}`, { id: `external:${name}`, kind: 'external', type: 'external', item });
-  for (const item of spec.contracts) nodes.set(`contract:${item.id}`, { id: `contract:${item.id}`, kind: 'contract', type: 'contract', item });
-  for (const item of spec.calls) nodes.set(`call:${item.id}`, { id: `call:${item.id}`, kind: 'call', type: 'call', item });
+  const drafts: NodeDraft[] = [];
+  for (const [name, item] of Object.entries(spec.externals)) drafts.push({ id: `external:${name}`, kind: 'external', type: 'external', item });
+  for (const item of spec.contracts) drafts.push({ id: `contract:${item.id}`, kind: 'contract', type: 'contract', item });
+  for (const item of spec.calls) drafts.push({ id: `call:${item.id}`, kind: 'call', type: 'call', item });
 
-  for (const node of nodes.values()) {
-    const resolution = new Map();
-    const execution = new Map();
-    const fields = node.kind === 'contract'
+  const nodes = new Map<ResourceId, OrderedNode>();
+  for (const node of drafts) {
+    const resolution = new Map<ResourceId, Set<string>>();
+    const execution = new Map<ResourceId, Set<string>>();
+    const fields: [string, unknown][] = node.kind === 'contract'
       ? [['address', node.item.address], ['args', node.item.args], ['libraries', node.item.libraries], ['checks', node.item.checks]]
       : node.kind === 'external' ? [['checks', node.item.checks]]
         : [['args', node.item.args], ['check', node.item.check], ['before', node.item.before]];
@@ -308,7 +329,7 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
       for (const { reference, requiresLive, location } of referenceDetails(value, field)) {
         const [root, name] = reference.split('.');
         if (root === 'values') continue;
-        const dependency = `${root === 'contracts' ? 'contract' : 'external'}:${name}`;
+        const dependency: ResourceId = `${root === 'contracts' ? 'contract' : 'external'}:${name}`;
         addEdge(resolution, dependency, `${location} needs ${reference}`);
         if (mode === 'compatibility') addEdge(execution, dependency, `compatibility reference ${reference}`);
         else if (requiresLive) addEdge(execution, dependency, `requiresLive ${reference}`);
@@ -316,11 +337,12 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
       }
     }
     if (node.kind === 'call') {
-      const target = `contract:${node.item.target}`;
+      const target: ContractId = `contract:${node.item.target}`;
       addEdge(resolution, target, 'call target address');
       addEdge(execution, target, 'live call target');
     }
-    for (const dependency of node.item.after ?? []) addEdge(execution, dependency, 'explicit after');
+    const after = node.kind === 'external' ? undefined : node.item.after;
+    for (const dependency of after ?? []) addEdge(execution, dependency, 'explicit after');
     if (node.kind === 'call' && (node.item.transfersOwnership || node.item.method === 'transferOwnership')) {
       for (const other of spec.calls) {
         if (other.id !== node.item.id && other.target === node.item.target && other.ownerOnly) {
@@ -328,12 +350,11 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
         }
       }
     }
-    node.resolutionEdges = edgeList(resolution);
-    node.executionEdges = edgeList(execution);
-    node.resolutionDependencies = node.resolutionEdges.map(edge => edge.id);
-    node.executionDependencies = node.executionEdges.map(edge => edge.id);
-    node.dependencies = node.executionDependencies;
-    node.deps = node.dependencies;
+    const resolutionEdges = edgeList(resolution);
+    const executionEdges = edgeList(execution);
+    const resolutionDependencies = resolutionEdges.map(edge => edge.id);
+    const executionDependencies = executionEdges.map(edge => edge.id);
+    nodes.set(node.id, { ...node, resolutionEdges, executionEdges, resolutionDependencies, executionDependencies, dependencies: executionDependencies, deps: executionDependencies });
   }
 
   const label = mode === 'compatibility' && spec.schema === 1 ? 'Dependency' : 'Resolution dependency';
@@ -350,19 +371,20 @@ export function dependencyGraphs(ordered: OrderedNode[]): DependencyGraphs {
 }
 
 export function executionOrder(ordered: OrderedNode[]): OrderedNode[] {
-  return orderGraph(new Map(ordered.map(node => [node.id, node])), 'executionDependencies', 'Execution dependency');
+  return orderGraph(new Map(ordered.map((node): [ResourceId, OrderedNode] => [node.id, node])), 'executionDependencies', 'Execution dependency');
 }
 
 export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): string[] {
   if (dependencyMode(spec) !== 'split') return [];
   const assumptions = spec.executionAssumptions ?? [];
-  const warnings = [];
+  const warnings: string[] = [];
   for (const node of ordered) {
     if (node.kind !== 'contract') continue;
     // Creation code can call a constructor argument or a linked library, so both need an edge or an assumption.
     for (const { reference, location, text } of creationReferences(node.item)) {
       const name = reference.split('.')[1];
-      if (!node.executionDependencies.includes(`contract:${name}`) &&
+      const dependency: ContractId = `contract:${name}`;
+      if (!node.executionDependencies.includes(dependency) &&
         !assumptions.some(entry => entry.consumer === node.id && entry.location === location && entry.reference === reference)) {
         warnings.push(`${node.id} ${text} ${reference} without an execution dependency; confirm its constructor does not call the referenced contract.`);
       }
@@ -374,7 +396,7 @@ export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): st
 export function impact(spec: ParsedSpec, ordered: OrderedNode[], reference: string): ResourceId[] {
   assert(/^values\.[a-z][a-zA-Z0-9_]*$/.test(reference), 'Impact source must be values.<name>.');
   assert(Object.hasOwn(spec.values, reference.slice(7)), `Missing ${reference}.`);
-  const affected = new Set();
+  const affected = new Set<ResourceId>();
   for (const node of ordered) {
     const inputs = node.kind === 'contract'
       ? [node.item.address, node.item.args, node.item.libraries, node.item.checks]
@@ -394,16 +416,18 @@ export function resolve(value: SpecValue, spec: ParsedSpec, addresses: ResolvedA
         (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'), 'A reference object needs ref and optional boolean requiresLive.');
       const [root, name, field] = value.ref.split('.');
       if (root === 'values' && field === undefined) {
-        assert(Object.hasOwn(spec.values, name), `Missing value ${name}.`);
+        assert(name !== undefined && Object.hasOwn(spec.values, name), `Missing value ${name}.`);
         return cloneJson(spec.values[name]);
       }
       if (root === 'externals' && field === 'address') {
-        assert(spec.externals[name], `Missing external ${name}.`);
-        return spec.externals[name].address;
+        const external = name === undefined ? undefined : spec.externals[name];
+        assert(external, `Missing external ${name}.`);
+        return external.address;
       }
       if (root === 'contracts' && field === 'address') {
-        assert(addresses[name], `Contract ${name} has no resolved address.`);
-        return addresses[name];
+        const address = name === undefined ? undefined : addresses[name];
+        assert(address, `Contract ${name} has no resolved address.`);
+        return address;
       }
       throw new Error(`Invalid reference ${value.ref}.`);
     }

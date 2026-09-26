@@ -10,13 +10,16 @@ export type SchemaVersion = 1 | 2;
 export type DependencyMode = 'split' | 'compatibility';
 
 /** `values.<name>`, `contracts.<name>.address`, or `externals.<name>.address`. */
-export interface Reference {
+export type Reference = {
   ref: string;
   requiresLive?: boolean;
-}
+};
+
+/** An object in a spec value; a Reference is one whose only keys are `ref` and `requiresLive`. */
+export type SpecObject = { [key: string]: SpecValue };
 
 /** A JSON value that may hold Reference objects at any depth. */
-export type SpecValue = JsonPrimitive | Reference | SpecValue[] | { [key: string]: SpecValue };
+export type SpecValue = JsonPrimitive | SpecValue[] | SpecObject;
 
 /** Getter name to expected value. Names are validated as nonempty strings only. */
 export type SpecChecks = Record<string, SpecValue>;
