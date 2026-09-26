@@ -1,0 +1,611 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { createWalletClient, http, keccak256, pad } from 'viem';
+import { acquireLock, applyPlan } from '../src/execution/index.ts';
+import { estimateGasLimit } from '../src/execution/transactions.ts';
+import { hashJson } from '../src/identity.ts';
+import { createPlan } from '../src/planning/index.ts';
+import { verifyResource } from '../src/verification/index.ts';
+import { deployerA, deployerB, fixture, owner, outsider, startAnvil, TEST_KEYS } from './execution/chain.ts';
+
+const CHILD = fileURLToPath(new URL('./execution/apply-child.ts', import.meta.url));
+
+async function workspace() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'etherplan-apply-'));
+  return { dir, stateFile: path.join(dir, 'state.json'), journalFile: path.join(dir, 'journal.jsonl'), planFile: path.join(dir, 'plan.json') };
+}
+
+function rehash(plan) {
+  const { planHash, ...fields } = plan;
+  return { ...fields, planHash: hashJson(fields) };
+}
+
+async function journalOf(file) {
+  return (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
+const count = (records, phase, actionId) => records.filter(record => record.phase === phase && (!actionId || record.actionId === actionId)).length;
+
+function runChild(config) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CHILD, JSON.stringify(config)], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code, signal) => resolve({ code, signal, stderr }));
+  });
+}
+
+async function rejectsWith(promise, code, actionId) {
+  await assert.rejects(promise, error => {
+    assert.equal(error.code, code, error.message);
+    if (actionId) assert.equal(error.actionId, actionId);
+    return true;
+  });
+}
+
+describe('apply on a private automining chain', () => {
+  let chain;
+  let snapshot;
+  let callPlanned;
+
+  const nonce = account => chain.client.getTransactionCount({ address: account.address });
+  const planFor = (options = {}, policy = { deployers: [deployerA.address], owner: owner.address, parallel: false }, maxSpendWei = '100000000000000000000') => {
+    const { spec, artifacts } = fixture({ withCall: callPlanned, ...options });
+    return createPlan({ spec, artifacts, client: chain.client, signers: policy, maxSpendWei }).then(plan => ({ plan, spec, artifacts }));
+  };
+  const apply = ({ plan, spec, artifacts }, ws, extra = {}) => applyPlan({
+    plan, spec, artifacts, client: chain.client, signers: { deployer: [deployerA], owner }, stateFile: ws.stateFile, journalFile: ws.journalFile, pollIntervalMs: 20, ...extra,
+  });
+
+  before(async () => {
+    chain = await startAnvil();
+    const probe = await createPlan({ ...fixture(), client: chain.client });
+    callPlanned = probe.resources.find(resource => resource.kind === 'call').action === 'call';
+  });
+  after(async () => chain?.stop());
+  beforeEach(async () => { snapshot = await chain.rpc('evm_snapshot'); });
+  afterEach(async () => { await chain.rpc('evm_revert', [snapshot]); });
+
+  test('sequential apply deploys each resource once, and a rerun or a new plan sends nothing', async t => {
+    if (!callPlanned) t.diagnostic('Builder B does not yet plan a call on a same-plan deploy target (coordinator decision 7); this run omits the call.');
+    const input = await planFor();
+    const ws = await workspace();
+    const actions = input.plan.resources.filter(resource => resource.action !== 'reuse').length;
+    const result = await apply(input, ws);
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, actions);
+    assert.ok(result.resources.every(resource => resource.outcome === 'applied' && resource.verification.status === 'verified'));
+    assert.equal(await nonce(deployerA), 4);
+    assert.equal(await nonce(owner), callPlanned ? 1 : 0);
+
+    const rerun = await apply(input, ws);
+    assert.equal(rerun.transactionsSigned, 0);
+    assert.ok(rerun.resources.every(resource => resource.resumed));
+    const state = JSON.parse(await readFile(ws.stateFile, 'utf8'));
+    const replanned = await createPlan({ ...fixture({ withCall: callPlanned }), client: chain.client, state });
+    assert.ok(replanned.resources.every(resource => resource.action === 'reuse'));
+    const fresh = await apply({ ...fixture({ withCall: callPlanned }), plan: replanned }, ws);
+    assert.equal(fresh.transactionsSigned, 0);
+    assert.ok(fresh.resources.every(resource => resource.outcome === 'reused'));
+    assert.equal(await nonce(deployerA), 4);
+
+    const records = await journalOf(ws.journalFile);
+    assert.deepEqual(Object.keys(state.resources).sort(), input.plan.resources.map(resource => resource.id).sort());
+    for (const verified of records.filter(record => record.phase === 'verified' && record.outcome === 'applied')) {
+      assert.deepEqual(state.resources[verified.actionId].transactions, [verified.transactionHash]);
+    }
+    const text = await readFile(ws.journalFile, 'utf8');
+    for (const key of TEST_KEYS) assert.ok(!text.includes(key.slice(2)), 'journal contains no signer key');
+    for (const signed of records.filter(record => record.phase === 'signed')) {
+      const sent = records.find(record => record.phase === 'broadcast' && record.transactionHash === signed.transactionHash);
+      assert.ok(sent.sequence > signed.sequence, 'the signed record is durable before broadcast');
+    }
+    if (callPlanned) {
+      const callRecord = records.find(record => record.phase === 'verified' && record.actionId === 'call:bindGamma');
+      const tx = await chain.client.getTransaction({ hash: callRecord.transactionHash });
+      assert.equal(tx.from.toLowerCase(), owner.address.toLowerCase());
+    }
+  });
+
+  test('a saved plan cannot replace state written by a newer plan', async () => {
+    const older = fixture({ withCall: false });
+    older.spec.contracts = older.spec.contracts.slice(0, 1);
+    older.artifacts = new Map([['alpha', older.artifacts.get('alpha')]]);
+    const newer = structuredClone(older.spec);
+    newer.contracts[0].salt = `0x${'e'.repeat(64)}`;
+    const policy = { signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' };
+    const oldPlan = await createPlan({ ...older, client: chain.client, ...policy });
+    const newPlan = await createPlan({ spec: newer, artifacts: older.artifacts, client: chain.client, ...policy });
+    const ws = await workspace();
+    await apply({ ...older, spec: newer, plan: newPlan }, ws);
+    const saved = await readFile(ws.stateFile, 'utf8');
+    const nonceBefore = await nonce(deployerA);
+
+    await rejectsWith(apply({ ...older, plan: oldPlan }, ws), 'stale-state');
+    assert.equal(await nonce(deployerA), nonceBefore);
+    assert.equal(await readFile(ws.stateFile, 'utf8'), saved);
+    assert.equal(JSON.parse(saved).resources['contract:alpha'].address, newPlan.resources[0].address);
+  });
+
+  test('apply rechecks the state baseline before writing verified work', async () => {
+    const input = fixture({ withCall: false });
+    input.spec.contracts = input.spec.contracts.slice(0, 1);
+    input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
+    input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+    const ws = await workspace();
+    const changed = { formatVersion: 1, chain: input.plan.chain, resources: {} };
+    await rejectsWith(apply(input, ws, { hooks: { async afterRecord(record) {
+      if (record.phase === 'verified') await writeFile(ws.stateFile, JSON.stringify(changed));
+    } } }), 'stale-state');
+    assert.deepEqual(JSON.parse(await readFile(ws.stateFile, 'utf8')), changed);
+  });
+
+  test('a mined call with decoded secret-like fields is journaled and resumes', async t => {
+    if (!callPlanned) return t.skip('The fixture did not plan a call.');
+    const input = await planFor();
+    const ws = await workspace();
+    const decoded = { secretHash: `0x${'12'.repeat(32)}`, privateKey: 'contract field' };
+    const dependencies = { async verifyResource(resource, client, options) {
+      const result = await verifyResource(resource, client, options);
+      if (resource.id === 'call:bindGamma' && result.status === 'verified') result.bindingChecks[0].actual = decoded;
+      return result;
+    } };
+    const first = await apply(input, ws, { dependencies });
+    assert.equal(first.status, 'applied');
+    const verified = (await journalOf(ws.journalFile)).find(record => record.actionId === 'call:bindGamma' && record.phase === 'verified');
+    assert.deepEqual(verified.verification.bindingChecks[0].actual, decoded);
+    assert.equal((await apply(input, ws, { dependencies })).transactionsSigned, 0);
+  });
+
+  test('rerun uses creation evidence for immutables without getters', async () => {
+    const input = fixture({ withCall: false });
+    for (const contract of input.spec.contracts) delete contract.checks;
+    input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+    const ws = await workspace();
+    const first = await apply(input, ws);
+    assert.equal(first.transactionsSigned, 4);
+
+    const rerun = await apply(input, ws);
+    assert.equal(rerun.transactionsSigned, 0);
+    assert.ok(rerun.resources.every(resource => resource.verification.status === 'verified'));
+
+    const state = JSON.parse(await readFile(ws.stateFile, 'utf8'));
+    const replanned = await createPlan({ spec: input.spec, artifacts: input.artifacts, client: chain.client, state });
+    assert.ok(replanned.resources.every(resource => resource.action === 'reuse'));
+    const reused = await apply({ ...input, plan: replanned }, ws);
+    assert.equal(reused.transactionsSigned, 0);
+  });
+
+  test('a SIGKILL after signing, after broadcast, or after receipt resumes without a duplicate transaction', async () => {
+    const cases = [['signed', 'contract:alpha'], ['broadcast', 'contract:beta'], ['receipt', 'contract:gamma']];
+    if (callPlanned) cases.push(['signed', 'call:bindGamma']);
+    for (const [phase, actionId] of cases) {
+      const inner = await chain.rpc('evm_snapshot');
+      const input = await planFor();
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(input.plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned }, crash: { phase, actionId } });
+      assert.equal(killed.signal, 'SIGKILL', `${phase}/${actionId}: ${killed.stderr}`);
+      const before = await journalOf(ws.journalFile);
+      assert.equal(before.at(-1).phase, phase);
+
+      const result = await apply(input, ws);
+      assert.equal(result.status, 'applied', `${phase}/${actionId}`);
+      assert.ok(result.lockRecovered, 'the killed apply left a lock that the resume recovered');
+      const records = await journalOf(ws.journalFile);
+      assert.equal(count(records, 'signed', actionId), 1, `${phase}/${actionId} was signed once`);
+      assert.equal(count(records, 'verified'), input.plan.resources.length);
+      assert.equal(await nonce(deployerA), 4, `${phase}/${actionId} sent no duplicate deployment`);
+      assert.equal(await nonce(owner), callPlanned ? 1 : 0, `${phase}/${actionId} sent no duplicate call`);
+      assert.deepEqual(result.rebroadcasts.map(entry => entry.actionId), phase === 'signed' ? [actionId] : []);
+      await chain.rpc('evm_revert', [inner]);
+    }
+  });
+
+  test('recovery rejects a substituted valid signature before any chain action', async () => {
+    for (const phase of ['signed', 'broadcast', 'receipt']) {
+      const inner = await chain.rpc('evm_snapshot');
+      const input = await planFor();
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(input.plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+        journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+        crash: { phase, actionId: 'contract:alpha' } });
+      assert.equal(killed.signal, 'SIGKILL', `${phase}: ${killed.stderr}`);
+      const records = await journalOf(ws.journalFile);
+      const intent = records.find(record => record.phase === 'intent' && record.actionId === 'contract:alpha');
+      const signed = records.find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      const rawTransaction = await deployerA.signTransaction({ type: 'eip1559', chainId: input.plan.chain.id,
+        nonce: Number(intent.nonce), to: outsider.address, data: '0x', value: 100n,
+        gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas),
+        maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas) });
+      const substitutedHash = keccak256(rawTransaction);
+      signed.rawTransaction = rawTransaction;
+      for (const record of records.filter(record => record.actionId === 'contract:alpha' && record.transactionHash)) {
+        record.transactionHash = substitutedHash;
+        if (record.receipt) record.receipt.transactionHash = substitutedHash;
+      }
+      await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+      let sends = 0;
+      const client = new Proxy(chain.client, { get(target, property) {
+        if (property === 'request') return async args => {
+          if (args.method === 'eth_sendRawTransaction') sends++;
+          return target.request(args);
+        };
+        return target[property];
+      } });
+      const beforeBalance = await chain.client.getBalance({ address: outsider.address });
+      await assert.rejects(apply(input, ws, { client }), error => {
+        assert.equal(error.code, 'journal');
+        assert.equal(error.actionId, 'contract:alpha');
+        assert.ok(!error.message.includes(rawTransaction));
+        return true;
+      });
+      assert.equal(sends, 0, `${phase} sent a transaction`);
+      assert.equal(await chain.client.getBalance({ address: outsider.address }), beforeBalance);
+      assert.equal(count(await journalOf(ws.journalFile), 'verified', 'contract:alpha'), 0);
+      await chain.rpc('evm_revert', [inner]);
+    }
+  });
+
+  test('a saved broadcast attempt resumes with the same signature', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const records = await journalOf(ws.journalFile);
+    const signed = records.find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+    records.push({ formatVersion: 1, planHash: signed.planHash, chain: signed.chain, actionId: signed.actionId,
+      phase: 'broadcast-attempt', sequence: signed.sequence + 1, signer: signed.signer,
+      nonce: signed.nonce, transactionHash: signed.transactionHash });
+    await writeFile(ws.journalFile, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+    assert.equal((await apply(input, ws)).status, 'applied');
+    assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
+  });
+
+  async function stuckDeployment() {
+    const input = await planFor({ withCall: false });
+    const ws = await workspace();
+    await chain.rpc('anvil_setAutomine', [false]);
+    const fees = { maxFeePerGas: 10_000_000_000n, maxPriorityFeePerGas: 2_000_000_000n };
+    await rejectsWith(apply(input, ws, { fees, receiptTimeoutMs: 60 }), 'receipt-timeout', 'contract:alpha');
+    const first = (await journalOf(ws.journalFile)).find(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+    const intent = (await journalOf(ws.journalFile)).find(record => record.phase === 'intent' && record.actionId === 'contract:alpha');
+    const replacementFees = { maxFeePerGas: '20000000000', maxPriorityFeePerGas: '4000000000',
+      maxCostWei: String(BigInt(intent.gas) * 20_000_000_000n + BigInt(intent.value)) };
+    return { input, ws, first, replacementFees };
+  }
+
+  test('a stuck signed transaction is replaced at the same nonce within its reviewed ceiling', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      await rejectsWith(apply(input, ws, { replacementFees: { ...replacementFees, maxCostWei: '1' } }), 'replacement-budget', 'contract:alpha');
+      await rejectsWith(apply(input, ws, { replacementFees: { ...replacementFees, maxFeePerGas: '10000000000', maxPriorityFeePerGas: '2000000000' } }), 'replacement-fees', 'contract:alpha');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'broadcast' && record.actionId === 'contract:alpha' && record.transactionHash !== first.transactionHash) {
+          await chain.rpc('anvil_setAutomine', [true]);
+        }
+      } } });
+      assert.equal(result.status, 'applied');
+      const records = await journalOf(ws.journalFile);
+      const variants = records.filter(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      assert.equal(variants.length, 2);
+      assert.equal(variants[1].replacesTransactionHash, first.transactionHash);
+      assert.equal(variants[1].nonce, first.nonce);
+      assert.ok(variants[1].sequence < records.find(record => record.phase === 'broadcast' && record.transactionHash === variants[1].transactionHash).sequence);
+      assert.equal(records.find(record => record.phase === 'verified' && record.actionId === 'contract:alpha').transactionHash, variants[1].transactionHash);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('restart after replacement signing resends its durable bytes', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      await assert.rejects(apply(input, ws, { replacementFees, hooks: { afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) throw new Error('stop after durable replacement');
+      } } }), /stop after durable replacement/);
+      const signed = (await journalOf(ws.journalFile)).filter(record => record.phase === 'signed' && record.actionId === 'contract:alpha');
+      assert.equal(signed.length, 2);
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'broadcast' && record.transactionHash === signed[1].transactionHash) await chain.rpc('anvil_setAutomine', [true]);
+      } } });
+      assert.equal(result.status, 'applied');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 2);
+      assert.equal(first.nonce, signed[1].nonce);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('an original receipt wins after replacement is signed but before broadcast', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      const result = await apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) {
+          await chain.rpc('evm_mine');
+          await chain.rpc('anvil_setAutomine', [true]);
+        }
+      } } });
+      assert.equal(result.status, 'applied');
+      const records = await journalOf(ws.journalFile);
+      assert.equal(records.find(record => record.phase === 'verified' && record.actionId === 'contract:alpha').transactionHash, first.transactionHash);
+      const replacement = records.find(record => record.phase === 'signed' && record.replacesTransactionHash);
+      assert.ok(!records.some(record => record.phase === 'broadcast' && record.transactionHash === replacement.transactionHash));
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('replacement refuses a nonce consumed by an unknown transaction', async () => {
+    const { input, ws, first, replacementFees } = await stuckDeployment();
+    try {
+      const outside = await deployerA.signTransaction({ type: 'eip1559', chainId: input.plan.chain.id,
+        nonce: Number(first.nonce), to: deployerA.address, data: '0x', value: 0n, gas: 21_000n,
+        maxFeePerGas: 40_000_000_000n, maxPriorityFeePerGas: 8_000_000_000n });
+      await rejectsWith(apply(input, ws, { replacementFees, hooks: { async afterRecord(record) {
+        if (record.phase === 'signed' && record.replacesTransactionHash) {
+          await chain.rpc('eth_sendRawTransaction', [outside]);
+          await chain.rpc('evm_mine');
+        }
+      } } }), 'nonce-race', 'contract:alpha');
+      await rejectsWith(apply(input, ws, { replacementFees }), 'nonce-race', 'contract:alpha');
+      assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 2);
+    } finally { await chain.rpc('anvil_setAutomine', [true]); }
+  });
+
+  test('a SIGKILL inside a parallel batch resumes both signed transactions with their original signers', async () => {
+    const input = await planFor({}, { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true });
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0, 1], owner: 3, parallel: true, fixture: { withCall: callPlanned }, crash: { phase: 'signed', actionId: 'contract:beta' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    assert.deepEqual((await journalOf(ws.journalFile)).filter(record => record.phase === 'signed').map(record => record.actionId), ['contract:alpha', 'contract:beta']);
+
+    const result = await apply(input, ws, { parallel: true, signers: { deployer: [deployerA, deployerB], owner } });
+    assert.equal(result.status, 'applied');
+    assert.deepEqual(result.rebroadcasts.map(entry => entry.actionId).sort(), ['contract:alpha', 'contract:beta']);
+    assert.equal(await nonce(deployerA), 3);
+    assert.equal(await nonce(deployerB), 1);
+  });
+
+  test('a tampered, stale, or wrong-chain plan fails before any signature', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    const deploy = input.plan.resources.findIndex(resource => resource.id === 'contract:alpha');
+    const edit = (change, hashed = true) => {
+      const plan = structuredClone(input.plan);
+      change(plan);
+      return hashed ? rehash(plan) : plan;
+    };
+
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.resources[deploy].tx.data += '00'; }, false) }, ws), 'plan-hash');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.resources[deploy].tx.data += '00'; }) }, ws), 'stale-resource', 'contract:alpha');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.resources[deploy].address = outsider.address; }) }, ws), 'stale-resource', 'contract:alpha');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.resources[deploy].action = 'conflict'; }) }, ws), 'plan-not-applicable');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.chain.id = 1; }) }, ws), 'wrong-chain');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.chain.genesisHash = `0x${'12'.repeat(32)}`; }) }, ws), 'wrong-chain');
+    await rejectsWith(apply({ ...input, plan: edit(plan => { plan.observed.blockHash = `0x${'34'.repeat(32)}`; }) }, ws), 'stale-observation');
+    await rejectsWith(apply({ ...input, spec: fixture({ withCall: callPlanned, upstream: outsider.address }).spec }, ws), 'stale-spec');
+    const changed = new Map(input.artifacts);
+    changed.set('alpha', { ...changed.get('alpha'), artifactHash: `0x${'56'.repeat(32)}` });
+    await rejectsWith(apply({ ...input, artifacts: changed }, ws), 'stale-artifact', 'contract:alpha');
+
+    assert.equal(await nonce(deployerA), 0);
+    assert.equal(count(await journalOf(ws.journalFile), 'signed'), 0);
+  });
+
+  test('a reorg of the observed block makes the plan stale', async () => {
+    const fork = await chain.rpc('evm_snapshot');
+    await chain.rpc('evm_mine');
+    const input = await planFor();
+    await chain.rpc('evm_revert', [fork]);
+    const { timestamp } = await chain.client.getBlock();
+    await chain.rpc('evm_setNextBlockTimestamp', [Number(timestamp) + 1000]);
+    await chain.rpc('evm_mine');
+    await rejectsWith(apply(input, await workspace()), 'stale-observation');
+    assert.equal(await nonce(deployerA), 0);
+  });
+
+  test('an address occupied by other code is a conflict, and that plan cannot be retried', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    const alpha = input.plan.resources.find(resource => resource.id === 'contract:alpha');
+    await chain.rpc('anvil_setCode', [alpha.address, '0x60016000f3']);
+    await rejectsWith(apply(input, ws), 'conflict', 'contract:alpha');
+    assert.equal(await nonce(deployerA), 0);
+    const failed = (await journalOf(ws.journalFile)).find(record => record.phase === 'failed');
+    assert.equal(failed.retryable, false);
+    assert.equal(failed.evidence.status, 'conflict');
+    await rejectsWith(apply(input, ws), 'previous-failure', 'contract:alpha');
+  });
+
+  test('a different deployer is rejected before any transaction', async () => {
+    const input = await planFor({ withCall: false });
+    await rejectsWith(apply(input, await workspace(), { signers: { deployer: [outsider] } }), 'signer');
+    const { signers, maxSpendWei, ...oldFields } = input.plan;
+    await rejectsWith(apply({ ...input, plan: rehash(oldFields) }, await workspace()), 'plan-policy');
+    assert.equal(await nonce(outsider), 0);
+    assert.equal(await nonce(deployerA), 0);
+  });
+
+  test('an insufficiently funded deployer stops the batch before signing; a rerun after funding continues', async () => {
+    const input = await planFor({}, { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true });
+    const ws = await workspace();
+    const signers = { deployer: [deployerA, deployerB], owner };
+    await chain.rpc('anvil_setBalance', [deployerB.address, '0x3e8']);
+    await rejectsWith(apply(input, ws, { parallel: true, signers }), 'insufficient-funds', 'contract:beta');
+    const records = await journalOf(ws.journalFile);
+    assert.equal(count(records, 'signed'), 0);
+    assert.equal(records.find(record => record.phase === 'failed').retryable, true);
+    assert.equal(await nonce(deployerA), 0);
+
+    await chain.rpc('anvil_setBalance', [deployerB.address, '0x8ac7230489e80000']);
+    const result = await apply(input, ws, { parallel: true, signers });
+    assert.equal(result.status, 'applied');
+    assert.equal(await nonce(deployerB), 1);
+  });
+
+  test('a reviewed ceiling rejects a fee spike and counts earlier transactions by the same signer', async () => {
+    const input = await planFor();
+    const alpha = input.plan.resources.find(resource => resource.id === 'contract:alpha');
+    const fees = await chain.client.estimateFeesPerGas();
+    const gas = await estimateGasLimit(chain.client, { from: deployerA.address, tx: alpha.tx, gasMultiplier: 1.2 });
+    const cap = gas * fees.maxFeePerGas + BigInt(alpha.tx.value);
+    const limited = await planFor({}, undefined, String(cap));
+    assert.notEqual(limited.plan.planHash, input.plan.planHash);
+    await rejectsWith(apply(limited, await workspace(), { fees: { ...fees, maxFeePerGas: fees.maxFeePerGas * 100n } }), 'budget-exceeded', 'contract:alpha');
+    assert.equal(await nonce(deployerA), 0);
+
+    const ws = await workspace();
+    await rejectsWith(apply(limited, ws, { fees }), 'budget-exceeded', 'contract:beta');
+    assert.equal(count(await journalOf(ws.journalFile), 'signed'), 1);
+    assert.equal(await nonce(deployerA), 1);
+  });
+
+  test('the reviewed ceiling still counts a verified signature after restart', async () => {
+    const preliminary = await planFor();
+    const alpha = preliminary.plan.resources.find(resource => resource.id === 'contract:alpha');
+    const fees = await chain.client.estimateFeesPerGas();
+    const gas = await estimateGasLimit(chain.client, { from: deployerA.address, tx: alpha.tx, gasMultiplier: 1.2 });
+    const input = await planFor({}, undefined, String(gas * fees.maxFeePerGas * 11n / 10n));
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const intent = (await journalOf(ws.journalFile)).find(record => record.phase === 'intent');
+    const committed = (BigInt(intent.gas) * BigInt(intent.maxFeePerGas) + BigInt(intent.value)).toString();
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await rejectsWith(apply(input, ws), 'budget-exceeded', 'contract:beta');
+      const records = await journalOf(ws.journalFile);
+      assert.equal(count(records, 'signed'), 1);
+      assert.equal(await nonce(deployerA), 1);
+      assert.match(records.at(-1).reason, new RegExp(`${committed} wei committed`));
+    }
+  });
+
+  test('a changed serial intent cost fails journal validation before rebroadcast', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile,
+      journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned },
+      crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const records = await journalOf(ws.journalFile);
+    records.find(record => record.phase === 'intent').gas = '1';
+    await writeFile(ws.journalFile, records.map(record => JSON.stringify(record)).join('\n') + '\n');
+
+    await rejectsWith(apply(input, ws), 'journal', 'contract:alpha');
+    assert.equal(count(await journalOf(ws.journalFile), 'broadcast'), 0);
+    assert.equal(await nonce(deployerA), 0);
+  });
+
+  test('a nonce used by another writer stops safely, and the next run deploys once', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned }, crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const wallet = createWalletClient({ account: deployerA, transport: http(chain.url) });
+    await wallet.sendTransaction({ to: deployerA.address, value: 0n, nonce: 0, chain: null });
+
+    await rejectsWith(apply(input, ws), 'nonce-race', 'contract:alpha');
+    const failed = (await journalOf(ws.journalFile)).filter(record => record.phase === 'failed');
+    assert.equal(failed.at(-1).retryable, true);
+
+    const result = await apply(input, ws);
+    assert.equal(result.status, 'applied');
+    const records = await journalOf(ws.journalFile);
+    assert.equal(count(records, 'signed', 'contract:alpha'), 2);
+    assert.equal(count(records, 'receipt', 'contract:alpha'), 1);
+    assert.equal(await nonce(deployerA), 5);
+  });
+
+  test('an unsent transaction from an older plan blocks a newer plan until the older plan resumes', async () => {
+    const older = await planFor();
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(older.plan));
+    const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned }, crash: { phase: 'signed', actionId: 'contract:alpha' } });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    await chain.rpc('evm_mine');
+    const newer = await planFor();
+    assert.notEqual(newer.plan.planHash, older.plan.planHash);
+    await rejectsWith(apply(newer, ws), 'foreign-outstanding', 'contract:alpha');
+    assert.equal(await nonce(deployerA), 0);
+    assert.equal((await apply(older, ws)).status, 'applied');
+    assert.equal(await nonce(deployerA), 4);
+  });
+
+  test('a live writer lock blocks a second apply', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    const lock = await acquireLock(`${ws.stateFile}.lock`, { planHash: input.plan.planHash });
+    try {
+      await rejectsWith(apply(input, ws), 'state-locked');
+    } finally {
+      await lock.release();
+    }
+    assert.equal(await nonce(deployerA), 0);
+  });
+
+  test('a binding changed after the plan is a conflict, and the owner call is never sent', async t => {
+    if (!callPlanned) return t.skip('Builder B does not yet plan a call on a same-plan deploy target (coordinator decision 7).');
+    const input = await planFor();
+    const registry = input.plan.resources.find(resource => resource.id === 'contract:registry');
+    const hooks = {
+      async afterRecord(record) {
+        if (record.phase === 'verified' && record.actionId === 'contract:gamma') await chain.rpc('anvil_setStorageAt', [registry.address, pad('0x0'), pad(outsider.address)]);
+      },
+    };
+    await rejectsWith(apply(input, await workspace(), { hooks }), 'conflict', 'call:bindGamma');
+    assert.equal(await nonce(owner), 0);
+  });
+});
+
+describe('parallel apply on a manually mined chain', () => {
+  let chain;
+  before(async () => { chain = await startAnvil(['--no-mining']); });
+  after(async () => chain?.stop());
+
+  test('two funded deployers share a wave, the dependent wave waits, and owner calls stay on the owner', async () => {
+    const probe = await createPlan({ ...fixture(), client: chain.client });
+    const withCall = probe.resources.find(resource => resource.kind === 'call').action === 'call';
+    const { spec, artifacts } = fixture({ withCall });
+    const plan = await createPlan({ spec, artifacts, client: chain.client, signers: { deployers: [deployerA.address, deployerB.address], owner: owner.address, parallel: true }, maxSpendWei: '100000000000000000000' });
+    const ws = await workspace();
+    let signed = 0;
+    let sent = 0;
+    // Mine one block only after every transaction of the current batch is broadcast.
+    const hooks = {
+      async afterRecord(record) {
+        if (record.phase === 'signed') signed += 1;
+        if (record.phase === 'broadcast' && ++sent === signed) await chain.rpc('evm_mine');
+      },
+    };
+    const result = await applyPlan({ plan, spec, artifacts, client: chain.client, signers: { deployer: [deployerA, deployerB], owner }, stateFile: ws.stateFile, journalFile: ws.journalFile, parallel: true, pollIntervalMs: 20, hooks });
+    assert.equal(result.status, 'applied');
+    const receipts = new Map((await journalOf(ws.journalFile)).filter(record => record.phase === 'receipt').map(record => [record.actionId, BigInt(record.receipt.blockNumber)]));
+    const signers = new Map(result.transactions.map(entry => [entry.actionId, entry.signer]));
+    assert.equal(receipts.get('contract:alpha'), receipts.get('contract:beta'), 'independent deploys share one block');
+    assert.notEqual(signers.get('contract:alpha'), signers.get('contract:beta'));
+    assert.ok(receipts.get('contract:registry') > receipts.get('contract:alpha'), 'a third independent deploy waits for a free signer');
+    assert.ok(receipts.get('contract:gamma') > receipts.get('contract:registry'), 'the dependent wave starts after wave 1 verifies');
+    assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 3);
+    assert.equal(await chain.client.getTransactionCount({ address: deployerB.address }), 1);
+    if (withCall) {
+      assert.ok(receipts.get('call:bindGamma') > receipts.get('contract:gamma'));
+      assert.equal(signers.get('call:bindGamma'), owner.address.toLowerCase());
+    }
+    for (const resource of plan.resources.filter(item => item.kind === 'contract')) {
+      assert.equal(result.resources.find(item => item.id === resource.id).address, resource.address.toLowerCase());
+    }
+  });
+});

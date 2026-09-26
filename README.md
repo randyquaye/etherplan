@@ -6,17 +6,22 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install and test
 
-Use Node.js 20 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.2-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
+Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.2-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
+
+The source is TypeScript. `npm ci` compiles it into `dist/`, which the CLI, integration tests, and published package run; unit tests import `src/`. Signer modules import the library as `etherplan`. See [the architecture guide](docs/architecture.md) for the module map, durable records, and public API boundary.
 
 ```sh
 npm ci
 npm install --global .
 etherplan --version
-npm run check
+npm run typecheck
+npm run lint
 npm test
 ```
 
 The package uses `viem` and the AWS SDK packages for its production backend. Run `npm pack --dry-run` to inspect the release contents. `etherplan --help` lists commands, and `etherplan <command> --help` lists each command's options.
+
+`typecheck` strictly checks production source. `lint` uses type information for source and tests, including promise checks; `npm test` runs the runtime suite one file at a time because chain tests share local Anvil resources. Test fixtures use deliberately loose shapes, so they are outside the strict compiler project.
 
 ## Describe desired state
 
