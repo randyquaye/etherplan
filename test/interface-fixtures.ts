@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { concatHex, keccak256 } from 'viem';
 import { hashJson } from '../src/identity.ts';
 

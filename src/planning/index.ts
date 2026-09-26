@@ -32,7 +32,7 @@ function copyDefined(target: Record<string, unknown>, source: object, keys: stri
   for (const key of keys) if (fields[key] !== undefined) target[key] = fields[key];
 }
 
-// Phase 5 replaces these field lists with one builder per kind; until then the entry is assembled by name and cast.
+// The saved plan omits artifacts and initcode; copy only fields defined for each resource kind.
 function planResource(resource: PreparedResource, observation: PlanObservation, action: PlanAction): PlannedResource {
   const result: Record<string, unknown> = {
     id: resource.id,

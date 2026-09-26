@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { privateKeyToAccount } from 'viem/accounts';
 
 const keys = (process.env.TEST_DEPLOYER_KEYS ?? '').split(',').filter(Boolean);

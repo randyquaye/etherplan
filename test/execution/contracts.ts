@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { hashJson } from '../../src/identity.ts';
 
 const byte = value => value.toString(16).padStart(2, '0');

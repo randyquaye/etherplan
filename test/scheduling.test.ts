@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSchedule } from '../src/scheduling/index.ts';

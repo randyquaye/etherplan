@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Runs one apply in a separate process and kills it with SIGKILL right after a chosen journal record is durable.
 import { readFile } from 'node:fs/promises';
 import { createPublicClient, http } from 'viem';

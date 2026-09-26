@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { importResource, recordResource, validateState } from '../src/state/index.ts';

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { spawn } from 'node:child_process';
 import net from 'node:net';
 import { createPublicClient, http } from 'viem';

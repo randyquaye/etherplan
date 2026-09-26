@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck
 import { execFile } from 'node:child_process';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';

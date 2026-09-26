@@ -1,4 +1,3 @@
-// @ts-nocheck
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { appendFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';

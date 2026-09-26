@@ -7,7 +7,7 @@ export default [
     files: ['src/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
       parser: tseslint.parser,
-      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+      parserOptions: { project: './tsconfig.eslint.json', tsconfigRootDir: import.meta.dirname },
     },
     plugins: { '@typescript-eslint': tseslint.plugin },
     rules: {
