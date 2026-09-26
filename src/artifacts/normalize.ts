@@ -1,16 +1,22 @@
-// @ts-nocheck
 import { keccak256, stringToHex } from 'viem';
 import { canonicalJson, hashJson } from '../identity.ts';
 import { immutableEntries, normalizeCode } from '../verification/bytecode.ts';
 import { decodeMetadataTail, ipfsMetadataHash } from '../verification/metadata.ts';
-import type { Abi } from '../types.ts';
-import type { NormalizedArtifact, NormalizeOptions } from './types.ts';
+import type { Abi, Hash, JsonObject } from '../types.ts';
+import type { ArtifactFormat, BuildIdentity, ByteRange, ImmutableReferences, LinkReferences, NamedImmutable, NormalizedArtifact, NormalizeOptions } from './types.ts';
 
-function assert(condition, message) {
+type ObjectValue = Record<string, unknown>;
+type Metadata = { rawText: string | null; parsed: ObjectValue | null };
+type BytecodeSource = ObjectValue & { object: string };
+type BytecodeParts = { creation: BytecodeSource; deployed: BytecodeSource; immutableReferences: unknown };
+type SourceUnit = ObjectValue;
+type Declaration = { name?: string; mutability?: string; visibility?: string; type?: string; source?: string };
+
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function plainObject(value) {
+function plainObject(value: unknown): value is ObjectValue {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
@@ -18,7 +24,7 @@ export function codeBody(object: unknown): string | null {
   return typeof object === 'string' ? object.replace(/^0x/i, '').toLowerCase() : null;
 }
 
-function formatOf(raw) {
+function formatOf(raw: ObjectValue): ArtifactFormat {
   if (typeof raw._format === 'string' && raw._format.startsWith('hh-sol-artifact')) return 'hardhat2';
   if (typeof raw._format === 'string' && raw._format.startsWith('hh3-artifact')) return 'hardhat3';
   if (plainObject(raw.evm)) return 'solc';
@@ -26,46 +32,50 @@ function formatOf(raw) {
   return 'flat';
 }
 
-function cleanLinkReferences(references, label) {
+function cleanLinkReferences(references: unknown, label: string): LinkReferences {
   assert(references === undefined || plainObject(references), `${label} link references must be an object.`);
-  const out = {};
-  for (const file of Object.keys(references ?? {}).sort()) {
-    const names = references[file];
+  const byFile = plainObject(references) ? references : {};
+  const out: LinkReferences = {};
+  for (const file of Object.keys(byFile).sort()) {
+    const names = byFile[file];
     assert(plainObject(names), `${label} link references for ${file} must be an object.`);
     out[file] = {};
     for (const name of Object.keys(names).sort()) {
       assert(Array.isArray(names[name]), `${label} link references for ${file}:${name} must be an array.`);
-      out[file][name] = names[name].map(({ start, length }) => ({ start, length })).sort((left, right) => left.start - right.start);
+      out[file]![name] = names[name].map((range: unknown) => {
+        assert(plainObject(range), `${label} link reference for ${file}:${name} must be an object.`);
+        return { start: range.start as number, length: range.length as number };
+      }).sort((left: ByteRange, right: ByteRange) => left.start - right.start);
     }
   }
   return out;
 }
 
-function cleanImmutableReferences(references, label) {
+function cleanImmutableReferences(references: unknown, label: string): ImmutableReferences {
   assert(plainObject(references), `${label} immutable references must be an object.`);
-  return Object.fromEntries(immutableEntries(references).map(([id, ranges]) => {
+  return Object.fromEntries(immutableEntries(references as ImmutableReferences).map(([id, ranges]) => {
     assert(/^[0-9]+$/.test(id), `${label} immutable reference ${id} is not an AST ID.`);
     assert(Array.isArray(ranges) && ranges.length > 0, `${label} immutable reference ${id} needs ranges.`);
     return [id, ranges.map(({ start, length }) => ({ start, length }))];
   }));
 }
 
-function sameReferences(left, right) {
+function sameReferences(left: ImmutableReferences, right: ImmutableReferences): boolean {
   return hashJson(left) === hashJson(right);
 }
 
-function canonicalAbi(abi) {
+function canonicalAbi(abi: Abi): string[] {
   return abi
     .map(item => item.type === 'function' ? { ...item, outputs: item.outputs ?? [] } : item)
     .map(canonicalJson)
     .sort();
 }
 
-function sameAbi(left, right) {
+function sameAbi(left: Abi, right: Abi): boolean {
   return hashJson(canonicalAbi(left)) === hashJson(canonicalAbi(right));
 }
 
-function assertAbiParameter(parameter, label) {
+function assertAbiParameter(parameter: unknown, label: string): void {
   assert(plainObject(parameter) && typeof parameter.type === 'string', `${label} needs an ABI type.`);
   const type = parameter.type;
   const base = type.replace(/(\[[0-9]*\])*$/, '');
@@ -83,7 +93,7 @@ function assertAbiParameter(parameter, label) {
   assert(valid, `${label} has invalid ABI type ${type}.`);
   if (base === 'tuple') {
     assert(Array.isArray(parameter.components), `${label} tuple needs components.`);
-    parameter.components.forEach((component, index) => assertAbiParameter(component, `${label} component ${index}`));
+    parameter.components.forEach((component: unknown, index: number) => assertAbiParameter(component, `${label} component ${index}`));
   }
 }
 
@@ -92,7 +102,7 @@ export function assertAbi(abi: unknown, label: string): asserts abi is Abi {
   const kinds = new Set(['function', 'constructor', 'event', 'error', 'fallback', 'receive']);
   for (const [index, item] of abi.entries()) {
     const location = `${label} ABI item ${index}`;
-    assert(plainObject(item) && kinds.has(item.type), `${location} has an invalid kind.`);
+    assert(plainObject(item) && typeof item.type === 'string' && kinds.has(item.type), `${location} has an invalid kind.`);
     if (['function', 'event', 'error'].includes(item.type)) {
       assert(typeof item.name === 'string' && item.name.length > 0, `${location} needs a name.`);
     }
@@ -108,15 +118,17 @@ export function assertAbi(abi: unknown, label: string): asserts abi is Abi {
   assert(abi.filter(item => item.type === 'constructor').length <= 1, `${label} ABI has more than one constructor.`);
 }
 
-function bytecodeParts(raw, format, compilerOutput, label) {
-  const outputDeployed = compilerOutput?.evm?.deployedBytecode;
-  let creation;
-  let deployed;
-  let immutableReferences;
+function bytecodeParts(raw: ObjectValue, format: ArtifactFormat, compilerOutput: ObjectValue | null, label: string): BytecodeParts {
+  const outputEvm = plainObject(compilerOutput?.evm) ? compilerOutput.evm : null;
+  const outputDeployed = plainObject(outputEvm?.deployedBytecode) ? outputEvm.deployedBytecode : null;
+  let creation: ObjectValue;
+  let deployed: ObjectValue;
+  let immutableReferences: unknown;
   if (format === 'foundry' || format === 'solc') {
     const source = format === 'foundry' ? raw : raw.evm;
-    creation = source.bytecode;
-    deployed = source.deployedBytecode;
+    assert(plainObject(source), `${label} has an incomplete artifact: bytecode objects are missing.`);
+    creation = source.bytecode as ObjectValue;
+    deployed = source.deployedBytecode as ObjectValue;
     assert(plainObject(creation) && plainObject(deployed), `${label} has an incomplete artifact: bytecode objects are missing.`);
     immutableReferences = deployed.immutableReferences ?? outputDeployed?.immutableReferences ?? {};
   } else {
@@ -125,20 +137,21 @@ function bytecodeParts(raw, format, compilerOutput, label) {
     immutableReferences = raw.immutableReferences ?? outputDeployed?.immutableReferences;
     assert(immutableReferences !== undefined, `${label} has an incomplete artifact: it has no immutable references. Supply its build-info file.`);
   }
-  assert(typeof creation.object === 'string' && codeBody(creation.object).length > 0, `${label} has an incomplete artifact: it has no creation bytecode.`);
-  assert(typeof deployed.object === 'string' && codeBody(deployed.object).length > 0, `${label} has an incomplete artifact: it has no runtime bytecode.`);
-  if (compilerOutput?.evm) {
-    assert(codeBody(compilerOutput.evm.bytecode?.object) === codeBody(creation.object) && codeBody(outputDeployed?.object) === codeBody(deployed.object), `${label} does not match the compiler output from its build-info.`);
+  assert(typeof creation.object === 'string' && (codeBody(creation.object)?.length ?? 0) > 0, `${label} has an incomplete artifact: it has no creation bytecode.`);
+  assert(typeof deployed.object === 'string' && (codeBody(deployed.object)?.length ?? 0) > 0, `${label} has an incomplete artifact: it has no runtime bytecode.`);
+  if (outputEvm) {
+    const outputCreation = plainObject(outputEvm.bytecode) ? outputEvm.bytecode : null;
+    assert(codeBody(outputCreation?.object) === codeBody(creation.object) && codeBody(outputDeployed?.object) === codeBody(deployed.object), `${label} does not match the compiler output from its build-info.`);
     if (outputDeployed?.immutableReferences) assert(sameReferences(cleanImmutableReferences(outputDeployed.immutableReferences, label), cleanImmutableReferences(immutableReferences, label)), `${label} immutable references differ from its build-info.`);
   }
-  return { creation, deployed, immutableReferences };
+  return { creation: creation as BytecodeSource, deployed: deployed as BytecodeSource, immutableReferences };
 }
 
-function linkRanges(references) {
+function linkRanges(references: LinkReferences): ByteRange[] {
   return Object.values(references).flatMap(names => Object.values(names).flat());
 }
 
-function checkImmutableRanges(object, immutableReferences, linkReferences, label) {
+function checkImmutableRanges(object: string, immutableReferences: ImmutableReferences, linkReferences: LinkReferences, label: string): void {
   const text = object.slice(2);
   const size = text.length / 2;
   const taken = linkRanges(linkReferences).map(({ start, length }) => ({ start, end: start + length, what: 'a link reference' }));
@@ -154,17 +167,17 @@ function checkImmutableRanges(object, immutableReferences, linkReferences, label
   }
 }
 
-function parseMetadata(text, label) {
+function parseMetadata(text: string, label: string): ObjectValue {
   try {
     const value = JSON.parse(text);
     assert(plainObject(value), `${label} metadata is not a JSON object.`);
     return value;
   } catch (error) {
-    throw new Error(`${label} metadata is not valid JSON: ${error.message}`);
+    throw new Error(`${label} metadata is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
-function metadataOf(raw, compilerOutput, label) {
+function metadataOf(raw: ObjectValue, compilerOutput: ObjectValue | null, label: string): Metadata {
   const rawText = typeof raw.rawMetadata === 'string' ? raw.rawMetadata
     : typeof raw.metadata === 'string' ? raw.metadata
       : typeof compilerOutput?.metadata === 'string' ? compilerOutput.metadata
@@ -173,27 +186,28 @@ function metadataOf(raw, compilerOutput, label) {
   return { rawText, parsed };
 }
 
-function sourceHash(sources) {
+function sourceHash(sources: ObjectValue): Hash {
   return hashJson(Object.fromEntries(Object.keys(sources).sort().map(file => {
-    const source = sources[file] ?? {};
+    const source = plainObject(sources[file]) ? sources[file] : {};
     const digest = source.keccak256 ?? (typeof source.content === 'string' ? keccak256(stringToHex(source.content)) : null);
     return [file, digest];
   })));
 }
 
-function buildIdentityOf({ rawText, parsed }, runtime, label) {
-  const identity = {};
+function buildIdentityOf({ rawText, parsed }: Metadata, runtime: string, label: string): BuildIdentity {
+  const identity: BuildIdentity = {};
   if (parsed) {
     if (parsed.language === 'Solidity') identity.compiler = 'solc';
     else if (parsed.language === 'Vyper') identity.compiler = 'vyper';
     if (typeof parsed.language === 'string') identity.language = parsed.language;
-    if (typeof parsed.compiler?.version === 'string') identity.version = parsed.compiler.version;
+    if (plainObject(parsed.compiler) && typeof parsed.compiler.version === 'string') identity.version = parsed.compiler.version;
     if (plainObject(parsed.settings)) {
-      identity.settingsHash = hashJson(parsed.settings);
-      if (typeof parsed.settings.evmVersion === 'string') identity.evmVersion = parsed.settings.evmVersion;
-      if (plainObject(parsed.settings.optimizer)) identity.optimizer = parsed.settings.optimizer;
-      if (typeof parsed.settings.viaIR === 'boolean') identity.viaIR = parsed.settings.viaIR;
-      const [target] = Object.entries(parsed.settings.compilationTarget ?? {});
+      const settings = parsed.settings;
+      identity.settingsHash = hashJson(settings);
+      if (typeof settings.evmVersion === 'string') identity.evmVersion = settings.evmVersion;
+      if (plainObject(settings.optimizer)) identity.optimizer = settings.optimizer as JsonObject;
+      if (typeof settings.viaIR === 'boolean') identity.viaIR = settings.viaIR;
+      const [target] = Object.entries(plainObject(settings.compilationTarget) ? settings.compilationTarget : {});
       if (target) identity.compilationTarget = `${target[0]}:${target[1]}`;
     }
     if (plainObject(parsed.sources)) identity.sourceHash = sourceHash(parsed.sources);
@@ -209,7 +223,7 @@ function buildIdentityOf({ rawText, parsed }, runtime, label) {
   }
   if (tail?.hash) {
     identity.metadataHash = tail.hash;
-    identity.metadataHashKind = tail.hashKind;
+    if (tail.hashKind) identity.metadataHashKind = tail.hashKind;
     if (rawText && tail.hashKind === 'ipfs') {
       assert(ipfsMetadataHash(rawText) === tail.hash, `${label} metadata does not match the metadata hash in its bytecode, so its build identity cannot be reproduced.`);
       identity.metadataVerified = true;
@@ -218,16 +232,19 @@ function buildIdentityOf({ rawText, parsed }, runtime, label) {
   return identity;
 }
 
-function sourceUnits(sources) {
+function sourceUnits(sources: unknown): SourceUnit[] {
   if (!sources) return [];
-  const list = Array.isArray(sources) ? sources : Object.entries(sources).map(([file, unit]) => (unit?.ast ? { ...unit.ast, absolutePath: unit.ast.absolutePath ?? file } : unit));
-  return list.filter(unit => plainObject(unit) && unit.nodeType === 'SourceUnit');
+  const list = Array.isArray(sources) ? sources : plainObject(sources) ? Object.entries(sources).map(([file, unit]) => {
+    if (!plainObject(unit) || !plainObject(unit.ast)) return unit;
+    return { ...unit.ast, absolutePath: unit.ast.absolutePath ?? file };
+  }) : [];
+  return list.filter((unit): unit is SourceUnit => plainObject(unit) && unit.nodeType === 'SourceUnit');
 }
 
-function declarations(units) {
-  const found = new Map();
+function declarations(units: SourceUnit[]): Map<string, Declaration> {
+  const found = new Map<string, Declaration>();
   for (const unit of units) {
-    const stack = [unit];
+    const stack: unknown[] = [unit];
     while (stack.length > 0) {
       const node = stack.pop();
       if (Array.isArray(node)) {
@@ -235,13 +252,14 @@ function declarations(units) {
         continue;
       }
       if (!plainObject(node)) continue;
-      if (node.nodeType === 'VariableDeclaration' && node.stateVariable === true && Number.isSafeInteger(node.id)) {
+      if (node.nodeType === 'VariableDeclaration' && node.stateVariable === true && typeof node.id === 'number' && Number.isSafeInteger(node.id)) {
+        const descriptions = plainObject(node.typeDescriptions) ? node.typeDescriptions : null;
         found.set(String(node.id), {
-          name: node.name,
-          mutability: node.mutability ?? (node.constant ? 'constant' : 'mutable'),
-          visibility: node.visibility,
-          type: node.typeDescriptions?.typeString,
-          source: unit.absolutePath,
+          ...(typeof node.name === 'string' ? { name: node.name } : {}),
+          mutability: typeof node.mutability === 'string' ? node.mutability : node.constant ? 'constant' : 'mutable',
+          ...(typeof node.visibility === 'string' ? { visibility: node.visibility } : {}),
+          ...(typeof descriptions?.typeString === 'string' ? { type: descriptions.typeString } : {}),
+          ...(typeof unit.absolutePath === 'string' ? { source: unit.absolutePath } : {}),
         });
       }
       for (const value of Object.values(node)) if (value && typeof value === 'object') stack.push(value);
@@ -250,37 +268,37 @@ function declarations(units) {
   return found;
 }
 
-function namedImmutables(immutableReferences, units, abi, label) {
-  const found = units.length > 0 ? declarations(units) : new Map();
+function namedImmutables(immutableReferences: ImmutableReferences, units: SourceUnit[], abi: Abi, label: string): NamedImmutable[] {
+  const found = units.length > 0 ? declarations(units) : new Map<string, Declaration>();
   return immutableEntries(immutableReferences).map(([id, ranges]) => {
-    const entry = { id, ranges };
+    const entry: NamedImmutable = { id, ranges };
     const declaration = found.get(id);
     if (!declaration) return entry;
     assert(declaration.mutability === 'immutable', `${label} AST does not match its immutable references: AST node ${id} is not immutable, so the AST comes from a different compilation.`);
-    entry.name = declaration.name;
+    if (declaration.name) entry.name = declaration.name;
     if (declaration.type) entry.type = declaration.type;
     if (declaration.visibility) entry.visibility = declaration.visibility;
     if (declaration.source) entry.source = declaration.source;
     const getter = abi.find(item => item.type === 'function' && item.name === declaration.name && (item.inputs ?? []).length === 0 && (item.outputs ?? []).length === 1);
-    if (declaration.visibility === 'public' && getter) entry.getter = declaration.name;
+    if (declaration.visibility === 'public' && getter && declaration.name) entry.getter = declaration.name;
     return entry;
   });
 }
 
-function namesOf(raw, parsed, options, label) {
-  const targets = Object.entries(parsed?.settings?.compilationTarget ?? {});
+function namesOf(raw: ObjectValue, parsed: ObjectValue | null, options: NormalizeOptions, label: string): { contractName?: string; sourceName?: string } {
+  const settings = plainObject(parsed?.settings) ? parsed.settings : null;
+  const targets = Object.entries(plainObject(settings?.compilationTarget) ? settings.compilationTarget : {});
   assert(targets.length <= 1, `${label} metadata has more than one compilation target.`);
   const [target] = targets;
-  function one(field, candidates) {
+  function one(field: string, candidates: unknown[]): string | undefined {
     const present = candidates.filter(value => value !== undefined);
     for (const value of present) assert(typeof value === 'string' && value.length > 0, `${label} has an invalid ${field}.`);
     assert(new Set(present).size <= 1, `${label} has conflicting ${field} declarations: ${present.join(', ')}.`);
-    return present[0];
+    return present[0] as string | undefined;
   }
-  return {
-    contractName: one('contract name', [raw.contractName, options.contractName, target?.[1]]),
-    sourceName: one('source name', [raw.sourceName, raw.inputSourceName, options.sourceName, target?.[0]]),
-  };
+  const contractName = one('contract name', [raw.contractName, options.contractName, target?.[1]]);
+  const sourceName = one('source name', [raw.sourceName, raw.inputSourceName, options.sourceName, target?.[0]]);
+  return { ...(contractName ? { contractName } : {}), ...(sourceName ? { sourceName } : {}) };
 }
 
 /**
@@ -293,11 +311,13 @@ function namesOf(raw, parsed, options, label) {
 export function normalizeArtifact(raw: unknown, id: string, options: NormalizeOptions = {}): NormalizedArtifact {
   const label = id ?? 'Artifact';
   assert(plainObject(raw), `${label} is not a JSON object.`);
-  const compilerOutput = options.compilerOutput ?? null;
+  const compilerOutput = plainObject(options.compilerOutput) ? options.compilerOutput : null;
   const format = formatOf(raw);
   const abi = raw.abi ?? compilerOutput?.abi;
   assertAbi(abi, label);
   if (raw.abi !== undefined && compilerOutput?.abi !== undefined) {
+    assertAbi(raw.abi, label);
+    assertAbi(compilerOutput.abi, label);
     assert(sameAbi(raw.abi, compilerOutput.abi), `${label} ABI differs from its build-info compiler output.`);
   }
   const { creation, deployed, immutableReferences } = bytecodeParts(raw, format, compilerOutput, label);
@@ -311,8 +331,10 @@ export function normalizeArtifact(raw: unknown, id: string, options: NormalizeOp
   };
   checkImmutableRanges(deployedBytecode.object, deployedBytecode.immutableReferences, deployedLinks, label);
   const metadata = metadataOf(raw, compilerOutput, label);
-  if (metadata.parsed?.output?.abi !== undefined) {
-    assert(Array.isArray(metadata.parsed.output.abi) && sameAbi(abi, metadata.parsed.output.abi), `${label} ABI differs from its compiler metadata.`);
+  const metadataOutput = plainObject(metadata.parsed?.output) ? metadata.parsed.output : null;
+  if (metadataOutput?.abi !== undefined) {
+    assertAbi(metadataOutput.abi, label);
+    assert(sameAbi(abi, metadataOutput.abi), `${label} ABI differs from its compiler metadata.`);
   }
   const buildIdentity = buildIdentityOf(metadata, deployedBytecode.object, label);
   const units = sourceUnits(options.sources);

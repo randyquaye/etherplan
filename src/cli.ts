@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
@@ -18,7 +17,36 @@ import { createPlan, prepareResources, transactionFor } from './planning/index.t
 import { createSchedule } from './scheduling/index.ts';
 import { dependencyGraphs, dependencyWarnings, graph, impact, parseSpec, usesDependencyPlan } from './spec/index.ts';
 import { importResource, readState, writeStateAtomic } from './state/index.ts';
+import { validateState } from './state/index.ts';
 import { verifyResource } from './verification/index.ts';
+import type { Artifacts } from './artifacts/types.ts';
+import type { AwsBackend, DeploymentScope, SignerProvider, SignerRoles, Signers } from './execution/types.ts';
+import type { StateFile } from './state/types.ts';
+import type { Plan } from './planning/types.ts';
+import type { ReplacementFees } from './execution/types.ts';
+import type { OrderedNode, ParsedSpec } from './spec/types.ts';
+import type { Address, ChainIdentity, Client, Hash, Hex, ResourceId } from './types.ts';
+import type { VerificationResult } from './verification/types.ts';
+
+type CommandName = keyof typeof COMMANDS;
+type CliOptions = {
+  spec?: string; value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
+  'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
+  'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
+  'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean;
+};
+type SignerModuleSource = { signerProvider: SignerProvider; signerRoles?: SignerRoles; signers?: never };
+type LocalSignerSource = { signers: Signers; signerProvider?: never; signerRoles?: never };
+type SignerSource = SignerModuleSource | LocalSignerSource;
+type Backend = AwsBackend & { scope: DeploymentScope; ttlMs?: number; confirmations?: number };
+
+function isCommand(value: string | undefined): value is CommandName {
+  return value !== undefined && Object.hasOwn(COMMANDS, value);
+}
+
+function isPrivateKey(value: string): value is Hex {
+  return /^0x[0-9a-fA-F]{64}$/.test(value);
+}
 
 const COMMANDS = {
   validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec'] },
@@ -60,12 +88,12 @@ const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([, det
 
 class UsageError extends Error {}
 
-function usage(command) {
+function usage(command?: CommandName): string {
   if (!command) {
     return `Usage: etherplan <command> [options]\n\nCommands:\n${Object.entries(COMMANDS).map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`).join('\n')}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
   }
   const details = COMMANDS[command];
-  const describe = name => name === 'out' && command === 'plan' ? 'Local plan file (default: ./plan.json; - skips the local file)'
+  const describe = (name: keyof typeof OPTION_HELP) => name === 'out' && command === 'plan' ? 'Local plan file (default: ./plan.json; - skips the local file)'
     : name === 'out' ? 'Adapter directory (default: ./generated)'
       : name === 'plan' && command === 'apply' ? 'Saved plan file; omit to create and approve a fresh plan'
         : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
@@ -74,29 +102,29 @@ function usage(command) {
     ? '\n\nRequires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
     ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
-  return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
+  return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 
-function parseOptions(args) {
-  const options = {};
+function parseOptions(args: string[]): CliOptions {
+  const options: CliOptions = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index];
-    if (!flag.startsWith('--')) throw new UsageError(`Invalid option ${flag}.`);
+    if (!flag?.startsWith('--')) throw new UsageError(`Invalid option ${flag}.`);
     const name = flag.slice(2);
     if (Object.hasOwn(options, name)) throw new UsageError(`Duplicate option ${flag}.`);
     if (BOOLEAN_OPTIONS.has(name)) {
-      options[name] = true;
+      (options as Record<string, string | boolean>)[name] = true;
       continue;
     }
     if (!VALUE_OPTIONS.has(name)) throw new UsageError(`Unknown option ${flag}.`);
     const value = args[++index];
     if (!value || value.startsWith('--')) throw new UsageError(`Option ${flag} needs a value.`);
-    options[name] = value;
+    (options as Record<string, string | boolean>)[name] = value;
   }
   return options;
 }
 
-function validateOptions(command, options) {
+function validateOptions(command: CommandName, options: CliOptions): void {
   const allowed = new Set(COMMANDS[command].options);
   for (const name of Object.keys(options)) {
     if (!allowed.has(name)) throw new UsageError(`--${name} is not an option for ${command}.`);
@@ -108,7 +136,7 @@ function validateOptions(command, options) {
 }
 
 // Checks option combinations after .ethpconfig options are merged in.
-function validateCombination(command, options) {
+function validateCombination(command: CommandName, options: CliOptions): void {
   if (command === 'plan') {
     if (options['signer-module'] && (options.deployers || options.owner)) throw new UsageError('plan --signer-module supplies signer addresses; omit --deployers and --owner.');
     if (options.pipeline && !options.deployers && !options['signer-module']) throw new UsageError('A pipeline plan needs --deployers <address,address> or --signer-module.');
@@ -120,16 +148,16 @@ function validateCombination(command, options) {
   }
 }
 
-function print(value) {
+function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
-async function approvePlan(plan) {
+async function approvePlan(plan: Plan): Promise<void> {
   process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
   const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
   if (blocked.length) throw new Error(`Plan cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`);
   process.stderr.write("Apply this plan? Only 'yes' will be accepted: ");
-  const answer = await new Promise(resolve => {
+  const answer = await new Promise<string | null>(resolve => {
     const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
     input.once('line', line => {
       resolve(line);
@@ -140,7 +168,7 @@ async function approvePlan(plan) {
   if (answer !== 'yes') throw new Error('Apply cancelled; no transactions were signed.');
 }
 
-async function writeJsonAtomic(file, value) {
+async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   const directory = path.dirname(file);
   await mkdir(directory, { recursive: true });
   const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`);
@@ -166,36 +194,40 @@ function publicClient() {
   return createPublicClient({ transport: http(process.env.ETH_RPC_URL) });
 }
 
-function stateFileFor(specFile, options) {
+function stateFileFor(specFile: string, options: CliOptions): string {
   return path.resolve(options.state ?? path.join(path.dirname(specFile), '.etherplan/state.json'));
 }
 
-function signersFromEnvironment() {
+function signersFromEnvironment(): Signers {
   const encoded = process.env.DEPLOYER_PRIVATE_KEYS ?? process.env.DEPLOYER_PRIVATE_KEY;
   if (!encoded) throw new Error('Set DEPLOYER_PRIVATE_KEYS to one or more comma-separated private keys for apply.');
   const keys = encoded.split(',').map(key => key.trim());
-  if (!keys.every(key => /^0x[0-9a-fA-F]{64}$/.test(key))) throw new Error('DEPLOYER_PRIVATE_KEYS contains an invalid private key.');
+  if (!keys.every(isPrivateKey)) throw new Error('DEPLOYER_PRIVATE_KEYS contains an invalid private key.');
   const ownerKey = process.env.OWNER_PRIVATE_KEY;
-  if (ownerKey && !/^0x[0-9a-fA-F]{64}$/.test(ownerKey)) throw new Error('OWNER_PRIVATE_KEY is invalid.');
-  return { deployer: keys.map(key => privateKeyToAccount(key)), ...(ownerKey ? { owner: privateKeyToAccount(ownerKey) } : {}) };
+  if (ownerKey && !isPrivateKey(ownerKey)) throw new Error('OWNER_PRIVATE_KEY is invalid.');
+  return { deployer: keys.map(key => privateKeyToAccount(key as Hex)), ...(ownerKey ? { owner: privateKeyToAccount(ownerKey as Hex) } : {}) };
 }
 
-async function backendFromFile(file, chain, { requireBucket = false } = {}) {
-  const config = JSON.parse(await readFile(path.resolve(file), 'utf8'));
+async function backendFromFile(file: string, chain: ChainIdentity, { requireBucket = false }: { requireBucket?: boolean } = {}): Promise<Backend> {
+  const config = JSON.parse(await readFile(path.resolve(file), 'utf8')) as {
+    kind: string; tableName: string; kmsKeyId: string; bucket?: string; prefix?: string;
+    scope: unknown; ttlMs?: number; confirmations?: number;
+  };
   if (config.kind !== 'aws') throw new Error('Backend config kind must be aws.');
   if (requireBucket && !config.bucket) throw new Error('AWS plan and apply need an immutable plan bucket in backend config.');
   const scope = deploymentScope(config.scope, chain);
-  return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, bucket: config.bucket, prefix: config.prefix }), scope, ttlMs: config.ttlMs, confirmations: config.confirmations };
+  return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, ...(config.bucket ? { bucket: config.bucket } : {}), ...(config.prefix ? { prefix: config.prefix } : {}) }), scope,
+    ...(config.ttlMs !== undefined ? { ttlMs: config.ttlMs } : {}), ...(config.confirmations !== undefined ? { confirmations: config.confirmations } : {}) };
 }
 
-async function signerFromModule(file) {
+async function signerFromModule(file: string): Promise<SignerModuleSource> {
   const module = await import(pathToFileURL(path.resolve(file)).href);
   const signerProvider = module.signerProvider ?? module.default;
   if (typeof signerProvider?.address !== 'function' || typeof signerProvider?.signTransaction !== 'function') throw new Error('Signer module must export signerProvider with address(role) and signTransaction(role, request).');
-  return { signerProvider, signerRoles: module.signerRoles };
+  return { signerProvider: signerProvider as SignerProvider, ...(module.signerRoles ? { signerRoles: module.signerRoles as SignerRoles } : {}) };
 }
 
-async function addressesFromModule(source, needsOwner) {
+async function addressesFromModule(source: SignerModuleSource, needsOwner: boolean): Promise<{ deployers: Address[]; owner: Address | null }> {
   const roles = source.signerRoles ?? {};
   return {
     deployers: await Promise.all((roles.deployer ?? ['deployer']).map(role => source.signerProvider.address(role))),
@@ -203,11 +235,13 @@ async function addressesFromModule(source, needsOwner) {
   };
 }
 
-async function importOne({ spec, ordered, artifacts, client, options, stateFile }) {
+async function importOne({ spec, ordered, artifacts, client, options, stateFile }: {
+  spec: ParsedSpec; ordered: OrderedNode[]; artifacts: Artifacts; client: Client; options: CliOptions; stateFile: string;
+}): Promise<void> {
   if (!options.id?.startsWith('contract:')) throw new Error('import needs --id contract:<name>.');
   const { resources } = prepareResources(spec, ordered, artifacts);
   const byId = new Map(resources.map(resource => [resource.id, resource]));
-  const selected = byId.get(options.id);
+  const selected = byId.get(options.id as ResourceId);
   if (!selected || selected.kind !== 'contract') throw new Error(`Unknown contract resource ${options.id}.`);
   const lock = await acquireLock(`${stateFile}.lock`, { planHash: 'import' });
   try {
@@ -215,11 +249,13 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     if (chainId !== spec.chainId) throw new Error(`Connected to chain ${chainId}; spec requires ${spec.chainId}.`);
     const genesis = await client.getBlock({ blockNumber: 0n });
     const observed = await client.getBlock({ blockTag: 'latest' });
-    const chain = { id: chainId, genesisHash: genesis.hash };
+    if (!genesis.hash || !observed.hash || observed.number === null) throw new Error('Chain block is missing its hash or number.');
+    const chain: ChainIdentity = { id: chainId, genesisHash: genesis.hash };
     const current = await readState(stateFile);
-    const checked = new Map();
-    async function verifyDependency(id) {
-      if (checked.has(id)) return checked.get(id);
+    const checked = new Map<ResourceId, VerificationResult>();
+    async function verifyDependency(id: ResourceId): Promise<VerificationResult> {
+      const previous = checked.get(id);
+      if (previous) return previous;
       const resource = byId.get(id);
       if (!resource) throw new Error(`Missing dependency ${id}.`);
       for (const dependency of resource.dependencies) await verifyDependency(dependency);
@@ -234,7 +270,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
       checked.set(id, verification);
       return verification;
     }
-    const verification = await verifyDependency(options.id);
+    const verification = await verifyDependency(selected.id);
     if (options['creation-tx'] && verification.evidence?.creation?.status !== 'verified') {
       throw new Error(`Creation transaction ${options['creation-tx']} did not prove ${options.id}.`);
     }
@@ -243,20 +279,23 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     const state = importResource({ resource: selected, verification, state: current, chain, creationTransactionHash: options['creation-tx'] ?? null, rebaseline: options.rebaseline ?? false });
     await writeStateAtomic(stateFile, state);
     const record = state.resources[selected.id];
+    if (!record) throw new Error(`Imported resource ${selected.id} is missing from state.`);
+    const lastRevision = record.artifactRevisions?.at(-1);
+    if (options.rebaseline && !lastRevision) throw new Error(`Rebaselined resource ${selected.id} has no artifact revision.`);
     print({
       status: options.rebaseline ? 'rebaselined' : 'imported', chain, id: selected.id, address: selected.address, codeHash: verification.codeHash, proofHash: record.proofHash,
-      ...(options.rebaseline ? { artifactHash: record.artifactHash, previousArtifactHash: record.artifactRevisions.at(-1).artifactHash } : {}), stateFile,
+      ...(options.rebaseline ? { artifactHash: record.artifactHash, previousArtifactHash: lastRevision?.artifactHash } : {}), stateFile,
     });
   } finally {
     await lock.release();
   }
 }
 
-async function run(command, options) {
+async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
   if (command === 'status') {
     if (!options.backend) throw new Error('status needs --backend file.json.');
-    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8'));
+    const plan = JSON.parse(await readFile(path.resolve(options.plan ?? 'plan.json'), 'utf8')) as Plan;
     const { planHash, ...fields } = plan;
     if (hashJson(fields) !== planHash) throw new Error('Plan content does not match planHash.');
     const backend = await backendFromFile(options.backend, plan.chain);
@@ -266,8 +305,8 @@ async function run(command, options) {
   const specFile = await findSpecFile(options.spec);
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
-  if (merged.configured.length) process.stderr.write(`Using ${merged.configured.map(name => `--${name}`).join(', ')} from ${config.file}.\n`);
-  options = merged.options;
+  if (merged.configured.length && config) process.stderr.write(`Using ${merged.configured.map(name => `--${name}`).join(', ')} from ${config.file}.\n`);
+  options = merged.options as CliOptions;
   validateCombination(command, options);
   const spec = await loadSpec(specFile);
   const ordered = graph(spec);
@@ -308,29 +347,30 @@ async function run(command, options) {
     return;
   }
   if (command === 'apply') {
-    const replacementFlags = ['replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'];
+    const replacementFlags = ['replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'] as const;
     const replacementFees = replacementFlags.some(flag => options[flag] !== undefined) ? {
       maxFeePerGas: options['replace-max-fee-per-gas'], maxPriorityFeePerGas: options['replace-priority-fee-per-gas'],
       maxCostWei: options['replace-max-cost-wei'],
-    } : undefined;
+    } as ReplacementFees : undefined;
     if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
     if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
     if (options.plan && options['max-spend-wei']) throw new Error('A saved plan already pins maxSpendWei; omit --max-spend-wei.');
-    const signerSource = options['signer-module'] ? await signerFromModule(options['signer-module']) : { signers: signersFromEnvironment() };
-    let plan;
-    let planningBackend;
+    const signerSource: SignerSource = options['signer-module'] ? await signerFromModule(options['signer-module']) : { signers: signersFromEnvironment() };
+    let plan: Plan;
+    let planningBackend: Backend | undefined;
     if (options.plan) {
-      plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+      plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8')) as Plan;
     } else {
-      let state;
+      let state: StateFile | null;
       if (options.backend) {
         const chainId = await client.getChainId();
         const genesis = await client.getBlock({ blockNumber: 0n });
         planningBackend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: true });
-        state = (await planningBackend.stateStore.read(planningBackend.scope))?.value ?? null;
+        const stored = (await planningBackend.stateStore.read(planningBackend.scope))?.value;
+        state = stored == null ? null : validateState(stored);
       } else state = await readState(stateFile);
       if (!options['max-spend-wei']) throw new Error('Fresh apply needs --max-spend-wei <amount>.');
-      const addresses = signerSource.signerProvider ? await addressesFromModule(signerSource, spec.calls.length > 0) : {
+      const addresses = signerSource.signerProvider ? await addressesFromModule(signerSource as SignerModuleSource, spec.calls.length > 0) : {
         deployers: signerSource.signers.deployer.map(account => account.address), owner: signerSource.signers.owner?.address ?? null,
       };
       plan = await createPlan({ spec, artifacts, client, state, signers: { ...addresses, parallel: options.parallel ?? false }, maxSpendWei: options['max-spend-wei'] });
@@ -353,18 +393,19 @@ async function run(command, options) {
     print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
     return;
   }
-  let plan;
-  let backend;
+  let plan: Plan;
+  let backend: Backend | undefined;
   if (command === 'schedule' && options.plan) {
-    plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    plan = JSON.parse(await readFile(path.resolve(options.plan), 'utf8')) as Plan;
     await checkPlanIdentity({ plan, spec, artifacts, client, deps: { parseSpec, graph, prepareResources, transactionFor } });
   } else {
-    let state;
+    let state: StateFile | null;
     if (options.backend) {
       const chainId = await client.getChainId();
       const genesis = await client.getBlock({ blockNumber: 0n });
       backend = await backendFromFile(options.backend, { id: chainId, genesisHash: genesis.hash }, { requireBucket: command === 'plan' });
-      state = (await backend.stateStore.read(backend.scope))?.value ?? null;
+      const stored = (await backend.stateStore.read(backend.scope))?.value;
+      state = stored == null ? null : validateState(stored);
     } else state = await readState(stateFile);
     const moduleAddresses = command === 'plan' && options['signer-module']
       ? await addressesFromModule(await signerFromModule(options['signer-module']), spec.calls.length > 0) : null;
@@ -390,7 +431,7 @@ async function run(command, options) {
     return;
   }
   if (command === 'verify') {
-    const resources = plan.resources.map(resource => ({ id: resource.id, kind: resource.kind, address: resource.address, action: resource.action, ...resource.observation }));
+    const resources = plan.resources.map(resource => Object.assign({ id: resource.id, kind: resource.kind, address: resource.address, action: resource.action }, resource.observation));
     const status = resources.every(resource => resource.status === 'verified' && resource.action === 'reuse') ? 'verified'
       : resources.some(resource => resource.status === 'conflict' || resource.action === 'conflict') ? 'conflict' : 'unverified';
     print({ formatVersion: 1, chain: plan.chain, observed: plan.observed, status, resources });
@@ -413,7 +454,7 @@ async function run(command, options) {
   }
   const schedule = createSchedule(plan, deployers, { owner: options.owner ?? pinned?.owner ?? null, parallel: options.parallel ?? pinned?.parallel ?? false, pipeline: options.pipeline ?? Boolean(plan.pipeline) });
   if (plan.pipeline && hashJson(schedule.waves) !== hashJson(plan.pipeline.waves)) throw new Error('The requested schedule differs from the saved pipeline plan.');
-  const funding = await Promise.all(deployers.map(async address => ({ address, balanceWei: (await client.getBalance({ address })).toString() })));
+  const funding = await Promise.all(deployers.map(async address => ({ address, balanceWei: (await client.getBalance({ address: address as Address })).toString() })));
   if (funding.some(account => account.balanceWei === '0')) throw new Error('Every supplied deployer must have a nonzero native-token balance.');
   const requested = new Map(deployers.map(address => [address.toLowerCase(), address]));
   const waves = schedule.waves.map(wave => ({ ...wave, batches: wave.batches.map(batch => batch.map(entry => ({
@@ -429,13 +470,13 @@ if (command === '--version' || command === '-V' || command === 'version') {
   console.log(manifest.version);
 } else if (command === '--help' || command === '-h' || command === 'help') {
   const topic = command === 'help' ? args[0] : null;
-  if (topic && !COMMANDS[topic]) {
+  if (topic && !isCommand(topic)) {
     console.error(`Unknown command ${topic}.\n${usage()}`);
     process.exitCode = 2;
   } else {
-    console.log(usage(topic));
+    console.log(usage(isCommand(topic ?? undefined) ? topic as CommandName : undefined));
   }
-} else if (!COMMANDS[command]) {
+} else if (!isCommand(command)) {
   console.error(`${command ? `Unknown command ${command}.\n` : ''}${usage()}`);
   process.exitCode = 2;
 } else if (args.includes('--help') || args.includes('-h')) {
@@ -446,8 +487,9 @@ if (command === '--version' || command === '-V' || command === 'version') {
     validateOptions(command, options);
     await run(command, options);
   } catch (error) {
-    if (error.result) print(error.result);
-    console.error(`${error.code ? `${error.code}: ` : ''}${error.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
+    const failure = error as { result?: unknown; code?: string; message?: string };
+    if (failure?.result) print(failure.result);
+    console.error(`${failure?.code ? `${failure.code}: ` : ''}${failure?.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
     process.exitCode = error instanceof UsageError ? 2 : 1;
   }
 }
