@@ -13,8 +13,9 @@ export interface Located {
   at: SourcePosition;
 }
 
-export type TokenType = 'newline' | 'string' | 'number' | 'ident' | 'operator' | 'eof'
-  | '=' | ':' | ',' | '.' | '{' | '}' | '[' | ']' | '(' | ')' | '-';
+export type Punctuation = '=' | ':' | ',' | '.' | '{' | '}' | '[' | ']' | '(' | ')' | '-';
+
+export type TokenType = 'newline' | 'string' | 'number' | 'ident' | 'operator' | 'eof' | Punctuation;
 
 export interface HclToken extends Located {
   type: TokenType;

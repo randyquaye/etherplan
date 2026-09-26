@@ -8,22 +8,22 @@ import type { Address, CallId, ChainIdentity, Client, ContractId, DecimalString,
 import type { VerificationResult } from '../verification/types.ts';
 
 /** A getter check with its expected value resolved. */
-export interface PreparedCheck {
+export type PreparedCheck = {
   functionName: string;
   expected: JsonValue;
-}
+};
 
-export interface PreparedCallCheck {
+export type PreparedCallCheck = {
   functionName: string;
   args: JsonValue[];
-}
+};
 
 /** The binding getter with the value it must hold before (`before`) or after (`after`) the call. */
-export interface PreparedBinding {
+export type PreparedBinding = {
   functionName: string;
   args: JsonValue[];
   expected: JsonValue;
-}
+};
 
 interface PreparedBase {
   id: ResourceId;
@@ -85,6 +85,9 @@ export interface PreparedCall extends PreparedBase {
 
 /** A spec resource with every reference resolved and its inputs validated, but nothing read from the chain. */
 export type PreparedResource = PreparedContract | PreparedExternal | PreparedCall;
+
+/** A contract the plan can deploy: the CREATE2 fields are present together. */
+export type DeployableContract = PreparedContract & Required<Pick<PreparedContract, 'initcode' | 'initcodeHash' | 'salt' | 'factory'>>;
 
 export interface PreparedResources {
   resources: PreparedResource[];
@@ -209,7 +212,7 @@ interface PlanBase {
   stateHash: Hash;
   specHash: Hash;
   /** Contract resource ID to artifact hash. */
-  artifactHashes: Record<string, Hash>;
+  artifactHashes: Record<ContractId, Hash>;
   resources: PlannedResource[];
   /** Present on write plans; a positive decimal wei ceiling per signer. */
   maxSpendWei?: DecimalString;

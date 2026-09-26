@@ -102,9 +102,9 @@ interface LockScopeBase {
 }
 
 /** One deployment lease covers the label; one signer lease per address covers every label. */
-export type LockScope =
-  | (LockScopeBase & { kind: 'deployment'; label: string })
-  | (LockScopeBase & { kind: 'signer'; address: Address });
+export type DeploymentLockScope = LockScopeBase & { kind: 'deployment'; label: string };
+export type SignerLockScope = LockScopeBase & { kind: 'signer'; address: Address };
+export type LockScope = DeploymentLockScope | SignerLockScope;
 
 /** Written into the local `<state>.lock` file. */
 export interface LocalLockHolder {
@@ -178,7 +178,7 @@ export type Lock = LocalLock | Leases;
 export interface AcquireLeasesInput {
   lockProvider: LockProvider;
   scope: DeploymentScope;
-  addresses: string[];
+  addresses: Address[];
   planHash: Hash | undefined;
   principal?: string | undefined;
   /** At least 3000; defaults to 30000. */
@@ -795,8 +795,8 @@ export interface Receipt {
   blockNumber: bigint;
   blockHash: Hash;
   gasUsed: bigint;
-  effectiveGasPrice?: bigint | null;
-  contractAddress?: Address | null;
+  effectiveGasPrice?: bigint | null | undefined;
+  contractAddress?: Address | null | undefined;
 }
 
 export interface EstimateGasInput {

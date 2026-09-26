@@ -1,15 +1,14 @@
-// @ts-nocheck
 import { isAddress } from 'viem';
 import type { AbiParameter } from 'viem';
 import type { JsonValue } from '../types.ts';
 
 const HEX = /^0x[0-9a-fA-F]*$/;
 
-function fail(label, value, type) {
+function fail(label: string, value: unknown, type: string): never {
   throw new Error(`${label} is not a valid ${type}: ${typeof value === 'bigint' ? value.toString() : JSON.stringify(value)}.`);
 }
 
-function integer(value, label, type) {
+function integer(value: unknown, label: string, type: string): string {
   try {
     if (typeof value === 'bigint') return value.toString();
     if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value).toString();
@@ -21,9 +20,20 @@ function integer(value, label, type) {
   return fail(label, value, type);
 }
 
-function arrayType(type) {
+function arrayType(type: string): { inner: string; length: number | null } | null {
   const match = /^(.*)\[(\d*)\]$/.exec(type);
-  return match ? { inner: match[1], length: match[2] === '' ? null : Number(match[2]) } : null;
+  if (!match) return null;
+  const [, inner = '', length = ''] = match;
+  return { inner, length: length === '' ? null : Number(length) };
+}
+
+function components(parameter: AbiParameter): readonly AbiParameter[] {
+  return 'components' in parameter ? parameter.components : [];
+}
+
+/** The item of a tuple value for one component: by position for arrays, by component name for objects. */
+function tupleItem(value: unknown, component: AbiParameter, index: number): unknown {
+  return Array.isArray(value) ? value[index] : (value as Record<string, unknown> | null | undefined)?.[component.name ?? ''];
 }
 
 /**
@@ -58,25 +68,27 @@ export function normalizeAbiValue(parameter: AbiParameter, value: unknown, label
     return value;
   }
   if (type === 'tuple') {
-    const components = parameter.components ?? [];
-    const named = components.length > 0 && components.every(component => component.name);
+    const parts = components(parameter);
+    const named = parts.length > 0 && parts.every(component => component.name);
     if (Array.isArray(value)) {
-      if (value.length !== components.length) return fail(label, value, type);
+      if (value.length !== parts.length) return fail(label, value, type);
     } else if (!named || !value || typeof value !== 'object' ||
-      Object.keys(value).length !== components.length || components.some(component => !Object.hasOwn(value, component.name))) {
+      Object.keys(value).length !== parts.length || parts.some(component => !Object.hasOwn(value, component.name ?? ''))) {
       return fail(label, value, type);
     }
-    const items = components.map((component, index) => {
-      const item = Array.isArray(value) ? value[index] : value?.[component.name];
-      if (item === undefined) return fail(`${label}.${component.name || index}`, item, component.type);
-      return normalizeAbiValue(component, item, `${label}.${component.name || index}`);
+    const entries = parts.map((component, index): [string, JsonValue] => {
+      const item = tupleItem(value, component, index);
+      const itemLabel = `${label}.${component.name || index}`;
+      if (item === undefined) return fail(itemLabel, item, component.type);
+      return [component.name ?? '', normalizeAbiValue(component, item, itemLabel)];
     });
-    return named ? Object.fromEntries(components.map((component, index) => [component.name, items[index]])) : items;
+    return named ? Object.fromEntries(entries) : entries.map(([, item]) => item);
   }
   return toJson(value);
 }
 
-function abiArgument(parameter, value, label) {
+/** The value viem encodes for one parameter: bigint integers, nested arrays, and tuples as objects or arrays. */
+function abiArgument(parameter: AbiParameter, value: unknown, label: string): unknown {
   const type = parameter?.type;
   const array = typeof type === 'string' ? arrayType(type) : null;
   if (array) {
@@ -85,10 +97,11 @@ function abiArgument(parameter, value, label) {
   }
   if (/^u?int(\d+)?$/.test(type ?? '')) return BigInt(integer(value, label, type));
   if (type === 'tuple') {
-    const components = parameter.components ?? [];
-    const named = components.length > 0 && components.every(component => component.name);
-    const items = components.map((component, index) => abiArgument(component, Array.isArray(value) ? value[index] : value?.[component.name], `${label}.${component.name || index}`));
-    return named ? Object.fromEntries(components.map((component, index) => [component.name, items[index]])) : items;
+    const parts = components(parameter);
+    const named = parts.length > 0 && parts.every(component => component.name);
+    const entries = parts.map((component, index): [string, unknown] =>
+      [component.name ?? '', abiArgument(component, tupleItem(value, component, index), `${label}.${component.name || index}`)]);
+    return named ? Object.fromEntries(entries) : entries.map(([, item]) => item);
   }
   return normalizeAbiValue(parameter, value, label);
 }
@@ -101,7 +114,8 @@ export function abiArguments(parameters: readonly AbiParameter[], values: unknow
 
 /** Normalizes a function result with its ABI outputs: one output gives one value, several give an array. */
 export function normalizeOutputs(outputs: readonly AbiParameter[], value: unknown, label: string): JsonValue {
-  if (outputs.length === 1) return normalizeAbiValue(outputs[0], value, label);
+  const [single] = outputs;
+  if (outputs.length === 1 && single) return normalizeAbiValue(single, value, label);
   if (!Array.isArray(value) || value.length !== outputs.length) return fail(label, value, 'output list');
   return outputs.map((output, index) => normalizeAbiValue(output, value[index], `${label}[${index}]`));
 }
@@ -111,9 +125,10 @@ export function toJson(value: unknown): JsonValue {
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'number') return Number.isSafeInteger(value) ? value.toString() : String(value);
   if (typeof value === 'string') return HEX.test(value) ? value.toLowerCase() : value;
+  if (typeof value === 'boolean') return value;
   if (Array.isArray(value)) return value.map(toJson);
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, toJson(item)]));
-  return value ?? null;
+  return null;
 }
 
 export function sameJson(left: unknown, right: unknown): boolean {
@@ -125,6 +140,7 @@ export function sameJson(left: unknown, right: unknown): boolean {
  * an access key and must not enter a plan or report.
  */
 export function safeError(error: unknown): string {
-  const text = String(error?.shortMessage ?? error?.message ?? error ?? 'Unknown error.').split('\n')[0];
+  const details = error as { shortMessage?: unknown; message?: unknown } | null | undefined;
+  const text = String(details?.shortMessage ?? details?.message ?? error ?? 'Unknown error.').split('\n')[0] ?? '';
   return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>').slice(0, 300);
 }

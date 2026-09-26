@@ -1,45 +1,55 @@
-// @ts-nocheck
 import { encodeAbiParameters, encodeDeployData, encodeFunctionData, isAddress } from 'viem';
 import { assertAbi } from '../artifacts.ts';
 import { linkBytecode } from '../verification/bytecode.ts';
 import { abiArguments, normalizeOutputs } from '../verification/values.ts';
-import type { AbiFunction } from 'viem';
-import type { NormalizedArtifact } from '../artifacts/types.ts';
+import type { AbiFunction, AbiParameter } from 'viem';
+import type { LinkReferences, NormalizedArtifact } from '../artifacts/types.ts';
 import type { PreparedResource } from '../planning/types.ts';
 import type { Abi, Address, Hex, JsonValue } from '../types.ts';
 
-function assert(condition, message) {
+type AbiConstructor = Extract<Abi[number], { type: 'constructor' }>;
+
+/** A getter check: PreparedCheck has no `args`; PreparedBinding has them. */
+interface CheckInput {
+  functionName: string;
+  args?: JsonValue[];
+  expected: JsonValue;
+}
+
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-function withContext(label, work) {
+function withContext<T>(label: string, work: () => T): T {
   try {
     return work();
   } catch (error) {
-    throw new Error(`${label}: ${error.message}`, { cause: error });
+    throw new Error(`${label}: ${(error as Error).message}`, { cause: error });
   }
 }
 
 /** A name and argument count must identify exactly one ABI function. */
 export function abiFunction(abi: Abi | undefined, name: string, argumentCount: number, label: string): AbiFunction {
   assert(Array.isArray(abi), `${label} needs an ABI for ${name}.`);
-  const matches = abi.filter(item => item?.type === 'function' && item.name === name && (item.inputs ?? []).length === argumentCount);
-  assert(matches.length === 1, `${label} has ${matches.length === 0 ? 'no' : 'more than one'} ABI function ${name} with ${argumentCount} argument(s).`);
-  return matches[0];
+  const matches = abi.filter((item): item is AbiFunction => item?.type === 'function' && item.name === name && (item.inputs ?? []).length === argumentCount);
+  const [match, ...extra] = matches;
+  assert(match !== undefined && extra.length === 0, `${label} has ${matches.length === 0 ? 'no' : 'more than one'} ABI function ${name} with ${argumentCount} argument(s).`);
+  return match;
 }
 
-function encodedArguments(parameters, values, label) {
+function encodedArguments(parameters: readonly AbiParameter[], values: unknown, label: string): unknown[] {
   const args = abiArguments(parameters, values, label);
   encodeAbiParameters(parameters, args);
   return args;
 }
 
-function libraryKeys(references) {
+function libraryKeys(references: LinkReferences | undefined): string[] {
   return Object.entries(references ?? {}).flatMap(([file, names]) => Object.keys(names).map(name => `${file}:${name}`));
 }
 
-function selectedLibraries(references, libraries) {
-  return Object.fromEntries(libraryKeys(references).filter(key => Object.hasOwn(libraries, key)).map(key => [key, libraries[key]]));
+function selectedLibraries(references: LinkReferences | undefined, libraries: Record<string, Address>): Record<string, Address> {
+  const keys = new Set(libraryKeys(references));
+  return Object.fromEntries(Object.entries(libraries).filter(([key]) => keys.has(key)));
 }
 
 /** Validate both creation and runtime links, including contracts already on-chain. */
@@ -48,7 +58,10 @@ export function validateLibraries(artifact: NormalizedArtifact, libraries: Recor
     const creation = artifact.bytecode?.linkReferences ?? {};
     const runtime = artifact.deployedBytecode?.linkReferences ?? {};
     const required = new Set([...libraryKeys(creation), ...libraryKeys(runtime)]);
-    for (const key of required) assert(isAddress(libraries[key], { strict: false }), `Missing linked library ${key}.`);
+    for (const key of required) {
+      const address = libraries[key];
+      assert(address !== undefined && isAddress(address, { strict: false }), `Missing linked library ${key}.`);
+    }
     for (const key of Object.keys(libraries)) assert(required.has(key), `Unknown linked library ${key}.`);
     linkBytecode(artifact.bytecode.object, creation, selectedLibraries(creation, libraries));
     linkBytecode(artifact.deployedBytecode.object, runtime, selectedLibraries(runtime, libraries));
@@ -57,7 +70,7 @@ export function validateLibraries(artifact: NormalizedArtifact, libraries: Recor
 
 export function encodeConstructor(artifact: NormalizedArtifact, inputs: JsonValue[], libraries: Record<string, Address> = {}, label = 'Contract'): Hex {
   return withContext(`${label} constructor`, () => {
-    const constructors = artifact.abi.filter(item => item?.type === 'constructor');
+    const constructors = artifact.abi.filter((item): item is AbiConstructor => item?.type === 'constructor');
     assert(constructors.length <= 1, 'Artifact has more than one ABI constructor.');
     const args = encodedArguments(constructors[0]?.inputs ?? [], inputs, 'argument');
     const references = artifact.bytecode.linkReferences ?? {};
@@ -74,7 +87,7 @@ export function encodeMethod(abi: Abi | undefined, method: string, values: JsonV
   });
 }
 
-function validateCheck(abi, check, label) {
+function validateCheck(abi: Abi | undefined, check: CheckInput, label: string): AbiFunction {
   return withContext(label, () => {
     const args = check.args ?? [];
     const fn = abiFunction(abi, check.functionName, args.length, label);

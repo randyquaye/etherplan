@@ -1,35 +1,40 @@
-// @ts-nocheck
 import { access, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hashJson } from './identity.ts';
+import { field, isRecord } from './json.ts';
 import { assertAbi, codeBody, normalizeArtifact } from './artifacts/normalize.ts';
-import type { Artifacts, BuildContext } from './artifacts/types.ts';
+import type { Artifacts, BuildContext, NormalizedArtifact } from './artifacts/types.ts';
 import type { ParsedSpec } from './spec/types.ts';
 
 export { assertAbi, normalizeArtifact };
 
 const SAFE_ID = /^[a-z][a-zA-Z0-9_]*$/;
 
-function assert(condition, message) {
+function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
-async function readJson(file, cache) {
-  if (!cache.has(file)) cache.set(file, readFile(file, 'utf8').then(JSON.parse));
-  return cache.get(file);
+async function readJson(file: string, cache: Map<string, Promise<unknown>>): Promise<unknown> {
+  let pending = cache.get(file);
+  if (!pending) {
+    pending = readFile(file, 'utf8').then(JSON.parse);
+    cache.set(file, pending);
+  }
+  return pending;
 }
 
-async function exists(file) {
+async function exists(file: string): Promise<boolean> {
   try {
     await access(file);
     return true;
   } catch (error) {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
+    const { code } = error as NodeJS.ErrnoException;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
     throw error;
   }
 }
 
-async function upward(start, relative, levels = 4) {
+async function upward(start: string, relative: string, levels = 4): Promise<string | null> {
   let directory = start;
   for (let level = 0; level <= levels; level++) {
     const candidate = path.join(directory, relative);
@@ -41,14 +46,15 @@ async function upward(start, relative, levels = 4) {
   return null;
 }
 
-async function buildInfoDirectory(start, levels = 4) {
+async function buildInfoDirectory(start: string, levels = 4): Promise<{ directory: string; files: string[] } | null> {
   let directory = start;
   for (let level = 0; level <= levels; level++) {
     const candidate = path.join(directory, 'build-info');
     try {
       return { directory: candidate, files: (await readdir(candidate)).filter(file => file.endsWith('.json')).sort() };
     } catch (error) {
-      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+      const { code } = error as NodeJS.ErrnoException;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
     }
     const parent = path.dirname(directory);
     if (parent === directory) break;
@@ -57,44 +63,53 @@ async function buildInfoDirectory(start, levels = 4) {
   return null;
 }
 
-function contextFrom(output, sourceName, contractName, raw) {
-  const compilerOutput = output?.contracts?.[sourceName]?.[contractName];
-  if (!compilerOutput?.evm) return null;
-  const deployed = raw.deployedBytecode?.object ?? raw.deployedBytecode ?? raw.evm?.deployedBytecode?.object;
-  if (codeBody(compilerOutput.evm.deployedBytecode?.object) !== codeBody(deployed)) return null;
-  const references = raw.deployedBytecode?.immutableReferences ?? raw.immutableReferences;
-  const outputReferences = compilerOutput.evm.deployedBytecode?.immutableReferences;
+// The build output is the artifact's own only when its runtime code and immutable references agree with the artifact.
+function contextFrom(output: unknown, sourceName: unknown, contractName: unknown, raw: unknown): BuildContext | null {
+  if (typeof sourceName !== 'string' || typeof contractName !== 'string') return null;
+  const compilerOutput = field(field(field(output, 'contracts'), sourceName), contractName);
+  const evm = field(compilerOutput, 'evm');
+  if (!evm) return null;
+  const deployedBytecode = field(raw, 'deployedBytecode');
+  const deployed = field(deployedBytecode, 'object') ?? deployedBytecode ?? field(field(field(raw, 'evm'), 'deployedBytecode'), 'object');
+  if (codeBody(field(field(evm, 'deployedBytecode'), 'object')) !== codeBody(deployed)) return null;
+  const references = field(deployedBytecode, 'immutableReferences') ?? field(raw, 'immutableReferences');
+  const outputReferences = field(field(evm, 'deployedBytecode'), 'immutableReferences');
   if (references && outputReferences && hashJson(references) !== hashJson(outputReferences)) return null;
-  return { compilerOutput, sources: output.sources ?? {} };
+  return { compilerOutput, sources: field(output, 'sources') ?? {} };
 }
 
-function compilationTarget(raw) {
-  let metadata = raw.metadata;
+function compilationTarget(raw: unknown): { sourceName: string; contractName: string } | null {
+  let metadata = field(raw, 'metadata');
+  const rawMetadata = field(raw, 'rawMetadata');
   try {
-    if (typeof raw.rawMetadata === 'string') metadata = JSON.parse(raw.rawMetadata);
+    if (typeof rawMetadata === 'string') metadata = JSON.parse(rawMetadata);
     else if (typeof metadata === 'string') metadata = JSON.parse(metadata);
   } catch {
     return null;
   }
-  const [target] = Object.entries(metadata?.settings?.compilationTarget ?? {});
-  return target ? { sourceName: target[0], contractName: target[1] } : null;
+  const target = field(field(metadata, 'settings'), 'compilationTarget');
+  const [entry] = Object.entries(isRecord(target) ? target : {});
+  return entry && typeof entry[1] === 'string' ? { sourceName: entry[0], contractName: entry[1] } : null;
 }
 
 /** Finds the build-info compiler output and ASTs from the same compilation as an artifact file, or returns null. */
 export async function findBuildContext(file: string, raw: unknown, cache: Map<string, Promise<unknown>> = new Map()): Promise<BuildContext | null> {
   const directory = path.dirname(file);
-  if (typeof raw._format === 'string' && raw._format.startsWith('hh-sol-artifact')) {
+  const format = field(raw, '_format');
+  if (typeof format === 'string' && format.startsWith('hh-sol-artifact')) {
     const debugFile = file.replace(/\.json$/, '.dbg.json');
     if (!(await exists(debugFile))) return null;
-    const debug = await readJson(debugFile, cache);
-    const buildInfo = await readJson(path.resolve(path.dirname(debugFile), debug.buildInfo), cache);
-    return contextFrom(buildInfo.output, raw.sourceName, raw.contractName, raw);
+    const buildInfoPath = field(await readJson(debugFile, cache), 'buildInfo');
+    if (typeof buildInfoPath !== 'string') return null;
+    const buildInfo = await readJson(path.resolve(path.dirname(debugFile), buildInfoPath), cache);
+    return contextFrom(field(buildInfo, 'output'), field(raw, 'sourceName'), field(raw, 'contractName'), raw);
   }
-  if (typeof raw.buildInfoId === 'string') {
-    const outputFile = await upward(directory, path.join('build-info', `${raw.buildInfoId}.output.json`));
+  const buildInfoId = field(raw, 'buildInfoId');
+  if (typeof buildInfoId === 'string') {
+    const outputFile = await upward(directory, path.join('build-info', `${buildInfoId}.output.json`));
     if (!outputFile) return null;
     const buildOutput = await readJson(outputFile, cache);
-    return contextFrom(buildOutput.output, raw.inputSourceName ?? raw.sourceName, raw.contractName, raw);
+    return contextFrom(field(buildOutput, 'output'), field(raw, 'inputSourceName') ?? field(raw, 'sourceName'), field(raw, 'contractName'), raw);
   }
   const target = compilationTarget(raw);
   if (!target) return null;
@@ -102,7 +117,7 @@ export async function findBuildContext(file: string, raw: unknown, cache: Map<st
   if (!found) return null;
   for (const name of found.files) {
     const buildInfo = await readJson(path.join(found.directory, name), cache);
-    const context = contextFrom(buildInfo.output, target.sourceName, target.contractName, raw);
+    const context = contextFrom(field(buildInfo, 'output'), target.sourceName, target.contractName, raw);
     if (context) return context;
   }
   return null;
@@ -110,18 +125,19 @@ export async function findBuildContext(file: string, raw: unknown, cache: Map<st
 
 /** Loads and normalizes every contract artifact named by a spec. Returns a Map keyed by contract ID. */
 export async function loadArtifacts(spec: ParsedSpec, specFile: string): Promise<Artifacts> {
-  const artifacts = new Map();
-  const normalized = new Map();
-  const cache = new Map();
+  const artifacts: Artifacts = new Map();
+  const normalized = new Map<string, NormalizedArtifact>();
+  const cache = new Map<string, Promise<unknown>>();
   for (const item of spec.contracts) {
     const file = path.resolve(path.dirname(specFile), item.artifact);
     try {
-      if (!normalized.has(file)) {
+      let artifact = normalized.get(file);
+      if (!artifact) {
         const raw = await readJson(file, cache);
         const context = await findBuildContext(file, raw, cache);
-        normalized.set(file, normalizeArtifact(raw, `contract:${item.id} at ${file}`, context ?? {}));
+        artifact = normalizeArtifact(raw, `contract:${item.id} at ${file}`, context ?? {});
+        normalized.set(file, artifact);
       }
-      const artifact = normalized.get(file);
       if (item.name !== undefined) {
         assert(artifact.contractName !== undefined, `Declared name ${item.name} cannot be checked: the artifact has no contract name.`);
         assert(item.name === artifact.contractName, `Artifact expects ${item.name}, but it holds ${artifact.contractName}.`);
@@ -132,13 +148,13 @@ export async function loadArtifacts(spec: ParsedSpec, specFile: string): Promise
       }
       artifacts.set(item.id, artifact);
     } catch (error) {
-      throw new Error(`contract:${item.id} artifact ${file}: ${error.message}`, { cause: error });
+      throw new Error(`contract:${item.id} artifact ${file}: ${(error as Error).message}`, { cause: error });
     }
   }
   return artifacts;
 }
 
-function constant(value) {
+function constant(value: unknown): string {
   return `${JSON.stringify(value, null, 2)} as const`;
 }
 

@@ -1,15 +1,23 @@
-// @ts-nocheck
 import { isAddress, isAddressEqual, keccak256, parseTransaction, recoverTransactionAddress } from 'viem';
+import type { TransactionSerialized } from 'viem';
 import type { PlannedResource } from '../planning/types.ts';
 import type { Address, Client, DecimalString, Hash, Hex } from '../types.ts';
-import type { BroadcastOutcome, EstimateGasInput, FeeOverride, IntentRecord, Receipt, ReceiptJson, ReceiptWait, SignedBytes, SignedRecord, SignerAccount, TransactionEnvelope, WaitForReceiptInput } from './types.ts';
+import type { BroadcastOutcome, EstimateGasInput, FeeOverride, IntentFields, IntentRecord, Receipt, ReceiptJson, ReceiptWait, SignedBytes, SignedRecord, SignerAccount, TransactionEnvelope, WaitForReceiptInput } from './types.ts';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** What a thrown RPC error may carry; each level is read optionally. */
+interface ErrorLike {
+  cause?: unknown;
+  details?: unknown;
+  shortMessage?: unknown;
+  message?: unknown;
+}
 
-function toBigInt(value, name) {
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+function toBigInt(value: unknown, name: string): bigint {
   if (typeof value === 'bigint') return value;
   if (typeof value === 'string' && /^[0-9]+$/.test(value)) return BigInt(value);
-  if (Number.isSafeInteger(value) && value >= 0) return BigInt(value);
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   throw new Error(`${name} must be a non-negative integer.`);
 }
 
@@ -36,7 +44,8 @@ export async function signEnvelope(signer: SignerAccount, envelope: TransactionE
   const result = await signer.signTransaction({ type: 'eip1559', ...envelope });
   const rawTransaction = typeof result === 'string' ? result : result?.rawTransaction;
   if (typeof rawTransaction !== 'string' || !/^0x[0-9a-fA-F]+$/.test(rawTransaction)) throw new Error('Signer did not return a raw transaction.');
-  const parsed = parseTransaction(rawTransaction);
+  // parseTransaction rejects bytes that are not a typed or legacy transaction.
+  const parsed = parseTransaction(rawTransaction as TransactionSerialized);
   const same = parsed.type === 'eip1559' &&
     parsed.chainId === envelope.chainId &&
     parsed.nonce === envelope.nonce &&
@@ -47,7 +56,7 @@ export async function signEnvelope(signer: SignerAccount, envelope: TransactionE
     parsed.maxFeePerGas === envelope.maxFeePerGas &&
     (parsed.maxPriorityFeePerGas ?? 0n) === envelope.maxPriorityFeePerGas;
   if (!same) throw new Error('Signed transaction differs from the requested envelope.');
-  const sender = await recoverTransactionAddress({ serializedTransaction: rawTransaction });
+  const sender = await recoverTransactionAddress({ serializedTransaction: rawTransaction as TransactionSerialized });
   if (!isAddressEqual(sender, signer.address)) throw new Error(`Signed transaction sender ${sender} is not ${signer.address}.`);
   return { rawTransaction, transactionHash: keccak256(rawTransaction) };
 }
@@ -61,28 +70,30 @@ export async function validateSignedTransaction(signed: SignedRecord, intent: In
   if (!isAddress(intent.signer ?? '') || !isAddress(signed.signer ?? '') ||
     !isAddressEqual(intent.signer, signed.signer)) throw new Error('Signed signer differs from the durable intent.');
   // Pipeline records copy the full intent; serial records copy only signer and nonce.
-  const duplicateFields = ['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas', 'replacement', 'replacesTransactionHash', 'maxCostWei'];
+  const duplicateFields: (keyof IntentFields)[] = ['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'nonce', 'to', 'value', 'dataHash', 'gas', 'maxFeePerGas', 'maxPriorityFeePerGas', 'replacement', 'replacesTransactionHash', 'maxCostWei'];
   for (const field of duplicateFields) {
     if ((intent.reservationId || field === 'nonce' || field in signed) &&
       String(signed[field]).toLowerCase() !== String(intent[field]).toLowerCase()) throw new Error(`Signed ${field} differs from the durable intent.`);
   }
-  if (intent.to?.toLowerCase() !== planned.tx.to.toLowerCase() ||
-    String(intent.value) !== String(planned.tx.value) ||
-    intent.dataHash?.toLowerCase() !== keccak256(planned.tx.data).toLowerCase()) throw new Error('Durable intent differs from the saved plan.');
-  let parsed;
-  try { parsed = parseTransaction(signed.rawTransaction); }
+  const tx = planned.tx;
+  if (tx === undefined) throw new Error('Saved plan entry has no transaction payload.');
+  if (intent.to?.toLowerCase() !== tx.to.toLowerCase() ||
+    String(intent.value) !== String(tx.value) ||
+    intent.dataHash?.toLowerCase() !== keccak256(tx.data).toLowerCase()) throw new Error('Durable intent differs from the saved plan.');
+  let parsed: ReturnType<typeof parseTransaction>;
+  try { parsed = parseTransaction(signed.rawTransaction as TransactionSerialized); }
   catch { throw new Error('Saved signed transaction cannot be decoded.'); }
-  let sender;
-  try { sender = await recoverTransactionAddress({ serializedTransaction: signed.rawTransaction }); }
+  let sender: Address;
+  try { sender = await recoverTransactionAddress({ serializedTransaction: signed.rawTransaction as TransactionSerialized }); }
   catch { throw new Error('Saved signed transaction sender cannot be recovered.'); }
   const nonce = Number(intent.nonce);
   if (!Number.isSafeInteger(nonce) || nonce < 0 || String(nonce) !== String(intent.nonce)) throw new Error('Durable intent has an invalid nonce.');
   const expected = {
     chainId,
     nonce,
-    to: planned.tx.to.toLowerCase(),
-    data: planned.tx.data.toLowerCase(),
-    value: toBigInt(planned.tx.value, 'Plan value'),
+    to: tx.to.toLowerCase(),
+    data: tx.data.toLowerCase(),
+    value: toBigInt(tx.value, 'Plan value'),
     gas: toBigInt(intent.gas, 'Intent gas'),
     maxFeePerGas: toBigInt(intent.maxFeePerGas, 'Intent maxFeePerGas'),
     maxPriorityFeePerGas: toBigInt(intent.maxPriorityFeePerGas, 'Intent maxPriorityFeePerGas'),
@@ -96,9 +107,12 @@ export async function validateSignedTransaction(signed: SignedRecord, intent: In
   return maximumCost(expected);
 }
 
-function errorText(error) {
-  const parts = [];
-  for (let item = error; item; item = item.cause) parts.push(item.details, item.shortMessage, item.message);
+function errorText(error: unknown): string {
+  const parts: unknown[] = [];
+  for (let item: unknown = error; item; item = (item as ErrorLike).cause) {
+    const { details, shortMessage, message } = item as ErrorLike;
+    parts.push(details, shortMessage, message);
+  }
   return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{64,}/g, '[redacted hex]');
 }
 
@@ -119,7 +133,7 @@ export async function findReceipt(client: Client, hash: Hash): Promise<Receipt |
   try {
     return await client.getTransactionReceipt({ hash });
   } catch (error) {
-    if (error.name === 'TransactionReceiptNotFoundError') return null;
+    if ((error as Error).name === 'TransactionReceiptNotFoundError') return null;
     throw error;
   }
 }
@@ -140,7 +154,7 @@ export async function nonceConsumed(client: Client, signer: Address, nonce: Deci
 // Waits until the transaction has a receipt, another transaction uses its nonce, or the timeout passes.
 export async function waitForReceipt(client: Client, { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }: WaitForReceiptInput): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
-  const variants = signedVariants ?? [{ transactionHash: hash }];
+  const variants = signedVariants ?? (hash === undefined ? [] : [{ transactionHash: hash }]);
   for (;;) {
     const receipt = await findKnownReceipt(client, variants);
     if (receipt) return { receipt };

@@ -1,34 +1,37 @@
-// @ts-nocheck
 // Parses the subset of HCL native syntax that Etherplan reads: attributes, blocks, comments, quoted
 // strings, whole numbers, booleans, null, lists, objects, and references such as var.owner. A file it
 // accepts means the same thing to HCL. It rejects templates, heredocs, operators, function calls, and
 // other expressions instead of evaluating them. Every node records its file, line, and column.
 
-import type { HclDocument, Located } from './types.ts';
+import type { HclAttribute, HclBlock, HclBody, HclDocument, HclExpression, HclList, HclObject, HclObjectEntry, HclToken, Located, Punctuation, SourcePosition, TokenType } from './types.ts';
 
 const NUMBER = /[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
 const IDENTIFIER = /[\p{ID_Start}_][\p{ID_Continue}-]*/uy;
 const IDENTIFIER_START = /^[\p{ID_Start}_]/u;
 const IDENTIFIER_PART = /^[\p{ID_Continue}]/u;
 const OPERATORS = ['==', '!=', '<=', '>=', '&&', '||', '=>', '...', '+', '*', '/', '%', '<', '>', '!', '?'];
-const PUNCTUATION = new Set(['=', ':', ',', '.', '{', '}', '[', ']', '(', ')', '-']);
-const ESCAPES = { n: '\n', r: '\r', t: '\t', '"': '"', '\\': '\\' };
+const PUNCTUATION: ReadonlySet<string> = new Set<Punctuation>(['=', ':', ',', '.', '{', '}', '[', ']', '(', ')', '-']);
+const ESCAPES = new Map([['n', '\n'], ['r', '\r'], ['t', '\t'], ['"', '"'], ['\\', '\\']]);
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
+
+function isPunctuation(char: string): char is Punctuation {
+  return PUNCTUATION.has(char);
+}
 
 /** Throws an error that starts with the file, line, and column of a parsed node or token. */
 export function fail(node: Located, message: string): never {
   throw new Error(`${node.at.file}:${node.at.line}:${node.at.column}: ${message}`);
 }
 
-function tokenize(file, text) {
-  const tokens = [];
+function tokenize(file: string, text: string): HclToken[] {
+  const tokens: HclToken[] = [];
   let index = text.charCodeAt(0) === 0xfeff ? 1 : 0;
   let line = 1;
   let lineStart = 0;
-  const here = (offset = index) => ({ file, line, column: offset - lineStart + 1 });
-  const error = (message, at) => fail({ at }, message);
+  const here = (offset = index): SourcePosition => ({ file, line, column: offset - lineStart + 1 });
+  const error: (message: string, at: SourcePosition) => never = (message, at) => fail({ at }, message);
 
-  function string(at) {
+  function string(at: SourcePosition): string {
     let value = '';
     let cursor = index + 1;
     for (;;) {
@@ -40,8 +43,9 @@ function tokenize(file, text) {
       }
       if (char === '\\') {
         const escape = text[cursor + 1];
-        if (Object.hasOwn(ESCAPES, escape)) {
-          value += ESCAPES[escape];
+        const replacement = escape === undefined ? undefined : ESCAPES.get(escape);
+        if (replacement !== undefined) {
+          value += replacement;
           cursor += 2;
           continue;
         }
@@ -69,7 +73,7 @@ function tokenize(file, text) {
   }
 
   while (index < text.length) {
-    const char = text[index];
+    const char = text.charAt(index);
     const at = here();
     if (char === ' ' || char === '\t' || (char === '\r' && text[index + 1] === '\n')) {
       index++;
@@ -93,7 +97,7 @@ function tokenize(file, text) {
       tokens.push({ type: 'string', value: string(at), at });
     } else if (char >= '0' && char <= '9') {
       NUMBER.lastIndex = index;
-      const raw = NUMBER.exec(text)[0];
+      const raw = NUMBER.exec(text)?.[0] ?? char;
       index += raw.length;
       if (IDENTIFIER_PART.test(text.slice(index, index + 2))) {
         IDENTIFIER.lastIndex = index;
@@ -103,7 +107,7 @@ function tokenize(file, text) {
       tokens.push({ type: 'number', value: raw, at });
     } else if (IDENTIFIER_START.test(text.slice(index, index + 2))) {
       IDENTIFIER.lastIndex = index;
-      const name = IDENTIFIER.exec(text)[0];
+      const name = IDENTIFIER.exec(text)?.[0] ?? char;
       index += name.length;
       tokens.push({ type: 'ident', value: name, at });
     } else if (text.startsWith('<<', index)) {
@@ -113,11 +117,11 @@ function tokenize(file, text) {
       if (operator) {
         tokens.push({ type: 'operator', value: operator, at });
         index += operator.length;
-      } else if (PUNCTUATION.has(char)) {
+      } else if (isPunctuation(char)) {
         tokens.push({ type: char, value: char, at });
         index++;
       } else {
-        error(`Unexpected character ${JSON.stringify(String.fromCodePoint(text.codePointAt(index)))}.`, at);
+        error(`Unexpected character ${JSON.stringify(String.fromCodePoint(text.codePointAt(index) ?? 0))}.`, at);
       }
     }
   }
@@ -125,21 +129,21 @@ function tokenize(file, text) {
   return tokens;
 }
 
-function describe(token) {
+function describe(token: HclToken): string {
   if (token.type === 'eof') return 'the end of the file';
   if (token.type === 'newline') return 'a new line';
   if (token.type === 'string') return 'a string';
   return `"${token.value}"`;
 }
 
-function rejectOperator(token) {
+function rejectOperator(token: HclToken): void {
   if (token.type !== 'operator' && token.type !== '-') return;
   fail(token, token.value === '?' ? 'Conditional expressions are not supported.'
     : token.value === '...' || token.value === '=>' ? 'For expressions are not supported.'
       : 'Arithmetic and operators are not supported.');
 }
 
-function integer(token, sign) {
+function integer(token: HclToken, sign: 1n | -1n): number {
   const value = BigInt(token.value) * sign;
   const text = `${sign < 0n ? '-' : ''}${token.value}`;
   if (value > MAX_SAFE || value < -MAX_SAFE) fail(token, `Number ${text} is outside JavaScript's safe integer range. Quote it as a decimal string: "${text}".`);
@@ -147,42 +151,48 @@ function integer(token, sign) {
 }
 
 class Parser {
-  constructor(file, tokens) {
+  declare file: string;
+  /** Always ends with an `eof` token, which `next` never moves past. */
+  declare tokens: HclToken[];
+  declare index: number;
+
+  constructor(file: string, tokens: HclToken[]) {
     this.file = file;
     this.tokens = tokens;
     this.index = 0;
   }
 
-  peek(offset = 0) {
-    return this.tokens[Math.min(this.index + offset, this.tokens.length - 1)];
+  peek(offset = 0): HclToken {
+    return this.tokens[Math.min(this.index + offset, this.tokens.length - 1)]!;
   }
 
-  next() {
-    const token = this.tokens[this.index];
+  next(): HclToken {
+    const token = this.peek();
     if (token.type !== 'eof') this.index++;
     return token;
   }
 
-  skipNewlines() {
+  skipNewlines(): void {
     while (this.peek().type === 'newline') this.index++;
   }
 
-  endOfLine(what) {
+  endOfLine(what: string): void {
     const token = this.peek();
     if (token.type === 'newline' || token.type === 'eof') return;
     rejectOperator(token);
     fail(token, token.type === ',' ? `Put each ${what} on its own line; commas do not separate them.` : `Expected a new line after the ${what}, found ${describe(token)}.`);
   }
 
-  body(end, opener) {
-    const attributes = new Map();
-    const blocks = [];
-    const blockTypes = new Set();
+  /** Parses attributes and blocks up to `end`: the closing brace of `opener`, or the end of the file. */
+  body(end: TokenType, opener?: HclToken): HclBody {
+    const attributes = new Map<string, HclAttribute>();
+    const blocks: HclBlock[] = [];
+    const blockTypes = new Set<string>();
     for (;;) {
       this.skipNewlines();
       const token = this.peek();
       if (token.type === end) return { kind: 'body', attributes, blocks, at: opener?.at ?? { file: this.file, line: 1, column: 1 } };
-      if (token.type === 'eof') fail(opener, `This ${opener.value} block has no closing }.`);
+      if (token.type === 'eof' && opener) fail(opener, `This ${opener.value} block has no closing }.`);
       if (token.type !== 'ident') fail(token, token.type === 'string' ? 'Attribute and block names must not be quoted.' : `Expected an attribute or block, found ${describe(token)}.`);
       this.next();
       if (this.peek().type === '=') {
@@ -201,12 +211,12 @@ class Parser {
     }
   }
 
-  block(type) {
-    const labels = [];
+  block(type: HclToken): HclBlock {
+    const labels: string[] = [];
     while (this.peek().type === 'string' || this.peek().type === 'ident') labels.push(this.next().value);
     const open = this.next();
     if (open.type !== '{') fail(open, labels.length ? `Expected { after the block labels, found ${describe(open)}.` : `Expected = or { after ${type.value}, found ${describe(open)}.`);
-    let body;
+    let body: HclBody;
     if (this.peek().type === 'newline') {
       body = this.body('}', type);
       this.next();
@@ -226,9 +236,9 @@ class Parser {
     return { kind: 'block', type: type.value, labels, body, at: type.at };
   }
 
-  expression() {
+  expression(): HclExpression {
     const token = this.next();
-    let node;
+    let node: HclExpression;
     if (token.type === 'string') node = { kind: 'literal', value: token.value, at: token.at };
     else if (token.type === 'number') node = { kind: 'literal', value: integer(token, 1n), at: token.at };
     else if (token.type === '-') {
@@ -247,7 +257,7 @@ class Parser {
     return node;
   }
 
-  reference(first) {
+  reference(first: HclToken): HclExpression {
     if (first.value === 'true' || first.value === 'false') return { kind: 'literal', value: first.value === 'true', at: first.at };
     if (first.value === 'null') return { kind: 'literal', value: null, at: first.at };
     if (this.peek().type === '(') fail(first, `Function calls are not supported (${first.value}).`);
@@ -263,12 +273,12 @@ class Parser {
     return { kind: 'reference', parts, at: first.at };
   }
 
-  rejectFor() {
+  rejectFor(): void {
     if (this.peek().type === 'ident' && this.peek().value === 'for' && this.peek(1).type === 'ident') fail(this.peek(), 'For expressions are not supported.');
   }
 
-  list(open) {
-    const items = [];
+  list(open: HclToken): HclList {
+    const items: HclExpression[] = [];
     this.skipNewlines();
     this.rejectFor();
     while (this.peek().type !== ']') {
@@ -287,9 +297,9 @@ class Parser {
     return { kind: 'list', items, at: open.at };
   }
 
-  object(open) {
-    const entries = [];
-    const keys = new Map();
+  object(open: HclToken): HclObject {
+    const entries: HclObjectEntry[] = [];
+    const keys = new Map<string, HclObjectEntry>();
     this.skipNewlines();
     this.rejectFor();
     while (this.peek().type !== '}') {
@@ -299,8 +309,9 @@ class Parser {
       if (this.peek().type === '.') fail(key, 'Object keys must be names or quoted strings.');
       const equals = this.next();
       if (equals.type !== '=' && equals.type !== ':') fail(equals, `Expected = after the object key ${key.value}, found ${describe(equals)}.`);
-      if (keys.has(key.value)) fail(key, `Duplicate object key ${key.value}; it is first set on line ${keys.get(key.value).at.line}.`);
-      const entry = { key: key.value, value: this.expression(), at: key.at };
+      const first = keys.get(key.value);
+      if (first) fail(key, `Duplicate object key ${key.value}; it is first set on line ${first.at.line}.`);
+      const entry: HclObjectEntry = { key: key.value, value: this.expression(), at: key.at };
       keys.set(key.value, entry);
       entries.push(entry);
       const separator = this.peek();

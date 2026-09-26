@@ -1,6 +1,6 @@
 // The state file. Source of truth: validateState, validateResource, validateRevision, and validateChain in index.ts.
 import type { PreparedContract, PreparedResource } from '../planning/types.ts';
-import type { Address, ChainIdentity, Hash, JsonValue, ResourceId } from '../types.ts';
+import type { Address, CallId, ChainIdentity, ContractId, ExternalId, Hash, JsonValue } from '../types.ts';
 import type { CreationProof, VerificationResult } from '../verification/types.ts';
 
 export type ProvenanceKind = 'apply' | 'import' | 'observed';
@@ -73,6 +73,7 @@ export interface RecordResourceInput {
 export interface StateFile {
   formatVersion: 1;
   chain: ChainIdentity;
-  resources: Record<ResourceId, StateResource>;
+  /** `contract:` records carry every ContractStateResource field; the validator requires them. */
+  resources: Record<ContractId, ContractStateResource> & Record<ExternalId | CallId, StateResource>;
   lastPlanHash?: Hash;
 }
