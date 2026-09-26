@@ -754,39 +754,8 @@ export interface ApplyResult {
   stoppedAt?: { code?: ApplyErrorCode; actionId?: ResourceId; message: string; retryable?: boolean };
 }
 
-/**
- * The apply state applyPlan builds and `run` extends. The collections and state snapshot start empty;
- * `run` fills them during preflight. Phase 4 moves this construction into its own module.
- */
-export interface ApplyContext {
-  plan: Plan;
-  spec: unknown;
-  artifacts: Artifacts;
-  client: Client;
-  lanes: SignerLanes;
-  deps: ApplyDependencies;
-  journal: Journal;
-  journalStore: JournalStore | undefined;
-  lock: Lock;
-  config: ApplyConfig;
-  scope: DeploymentScope | null;
-  remote: boolean;
-  principal: string | undefined;
-  readState(): Promise<{ version: unknown; value: StateFile | null }>;
-  writeState(version: unknown, state: StateFile): Promise<unknown>;
-  stateFile: string | null;
-  parallel: boolean;
-  pipeline: boolean;
-  sent: SentTransaction[];
-  rebroadcasts: { actionId: ResourceId; transactionHash: Hash }[];
-  outcomes: Map<ResourceId, ResourceOutcome>;
-  timings: ApplyTimings;
-  state: StateWriteResult;
-  prepared: Map<ResourceId, PreparedAction>;
-  preflightComplete: boolean;
-  stateSnapshot: StateFile | null;
-  schedule?: Schedule;
-}
+/** The initialized apply context is defined beside its constructor. */
+export type { ApplyContext } from './context.ts';
 
 // Transactions
 
@@ -829,3 +798,20 @@ export interface SignedBytes {
 export type BroadcastOutcome =
   | { accepted: true; known?: true }
   | { accepted: false; error: string; nonceTooLow?: true; replacementUnderpriced?: true };
+
+/** Costed action before any nonce is reserved. */
+export type CostEnvelope = Omit<TransactionEnvelope, 'nonce'> & { nonce?: number };
+export interface FundedJob {
+  item: PreparedAction;
+  entry: import('../scheduling/types.ts').ScheduleEntry;
+  signer: SignerAccount;
+  envelope: CostEnvelope;
+  cost: bigint;
+}
+export type SignedBatchJob = FundedJob & { signed: SignedRecord };
+export type PipelineBatchJob = SignedBatchJob & { intent: IntentRecord; signedIntent: IntentRecord; variants: SignedRecord[] };
+
+/** A pipeline job carries its saved position in the signer group's nonce sequence. */
+export type PipelineFundedJob = FundedJob & {
+  entry: import('../scheduling/types.ts').ScheduleEntry & { nonceOffset: number };
+};
