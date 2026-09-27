@@ -4,9 +4,11 @@ Etherplan is a command-line tool for desired EVM contract state. It reads `.ethp
 
 Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify existing contracts and explicit externals, link libraries, and run declared post-deployment calls. It does not destroy contracts, mutate immutables in place, infer an upgrade policy, or deploy L2 contracts.
 
-## Install and test
+## Install
 
-Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.7-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
+Use Node.js 22.18 or newer. Install this beta from its GitHub tag with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.8-beta'`. The npm registry package is not published yet.
+
+To work from a checkout instead, install it as a CLI with `npm install --global .`. The test suite also needs Foundry's `anvil` on `PATH`.
 
 The source is TypeScript. `npm ci` compiles it into `dist/`, which the CLI, integration tests, and published package run; unit tests import `src/`. Signer modules import the library as `etherplan`. See [the architecture guide](docs/architecture.md) for the module map, durable records, and public API boundary.
 

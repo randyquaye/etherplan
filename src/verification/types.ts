@@ -141,6 +141,8 @@ export interface CreationVerification {
   initcodeHash: Hash | null;
   blockNumber: DecimalString | null;
   reasons: string[];
+  /** A transport or provider failure left creation verification inconclusive. */
+  replayFailure?: 'provider';
   method?: 'pinned-runtime';
   createdCode?: PinnedChildEvidence[];
   proof?: CreationProof;

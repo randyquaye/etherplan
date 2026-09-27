@@ -545,6 +545,7 @@ export type ApplyErrorCode =
   | 'plan-policy'
   | 'previous-failure'
   | 'receipt-timeout'
+  | 'rpc-capability'
   | 'reorg'
   | 'replacement-budget'
   | 'replacement-fees'
@@ -638,6 +639,8 @@ export type PlanIdentityDependencies = Pick<ApplyDependencies, 'parseSpec' | 'gr
 export interface ApplyOptions {
   pollIntervalMs?: number;
   receiptTimeoutMs?: number;
+  /** Maximum time to retry provider failures while verifying a successful deployment. Defaults to five minutes. */
+  verificationTimeoutMs?: number;
   gasMultiplier?: number;
   fees?: FeeOverride | null;
   /** Lowercase address to wei ceiling; the plan's `maxSpendWei` caps it. */
@@ -654,6 +657,7 @@ export interface ApplyOptions {
 export interface ApplyConfig {
   pollIntervalMs: number;
   receiptTimeoutMs: number;
+  verificationTimeoutMs: number;
   gasMultiplier: number;
   fees: FeeOverride | null;
   budgets: Record<string, bigint | number | string>;
@@ -671,6 +675,8 @@ export interface ApplyInput extends ApplyOptions {
   spec: unknown;
   artifacts: Artifacts;
   client: Client;
+  /** Optional independent RPC used for verification when the primary provider cannot complete creation replay. */
+  verificationClient?: Client;
   signers?: Signers;
   signerProvider?: SignerProvider;
   signerRoles?: SignerRoles;

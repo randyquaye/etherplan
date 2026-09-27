@@ -1,4 +1,4 @@
-import { concatHex, keccak256, pad, stringToHex } from 'viem';
+import { concatHex, getContractAddress, getCreate2Address, keccak256, pad, stringToHex } from 'viem';
 import type { Address, Client, Hex } from '../types.ts';
 import type { SimulateCreate2Input, SimulateCreateInput } from './types.ts';
 
@@ -18,10 +18,51 @@ export const PROBE_CODE: Hex = `0x${[
 
 export const PROBE_ADDRESS: Address = `0x${keccak256(stringToHex('etherplan.verification.create2-probe')).slice(-40)}`;
 
+// A CREATE from an account whose nonce is overridden to zero returns this account's nonce-0 child address.
+// This probes code, nonce, and empty-storage overrides on an existing factory without sending a transaction.
+const OVERRIDE_PROBE_CODE: Hex = '0x600060006000f060005260206000f3';
+const REPLAY_PROBE_INITCODE: Hex = '0x6002600c60003960026000f36000';
+const REPLAY_PROBE_SALT: Hex = keccak256(stringToHex('etherplan.verification.override-probe'));
+
 type CallRequest = Parameters<Client['call']>[0];
+
+/** A failed RPC request is inconclusive; an EVM execution revert is a replay result. */
+export function replayProviderFailure(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let provider = false;
+  for (let current = error; current && typeof current === 'object' && !seen.has(current); current = (current as { cause?: unknown }).cause) {
+    seen.add(current);
+    const { name, code } = current as { name?: unknown; code?: unknown };
+    if (name === 'ExecutionRevertedError' || code === 3) return false;
+    if (typeof name === 'string' && /(?:RpcError|HttpRequestError|WebSocketRequestError|TimeoutError|SocketClosedError|ConnectionError|NetworkError|TransportError|FetchError|AbortError)$/.test(name)) provider = true;
+    if (typeof code === 'number' && code < 0) provider = true;
+  }
+  return provider;
+}
 
 function at(blockNumber: bigint | undefined): { blockNumber?: bigint } {
   return blockNumber === undefined ? {} : { blockNumber };
+}
+
+/** Check the historical override combination needed to replay a deployed CREATE2 target. */
+export async function checkCreate2ReplayOverrides(client: Client, factory: Address): Promise<void> {
+  const latest = await client.getBlock({ blockTag: 'latest' });
+  const previous = latest.number > 0n ? latest.number - 1n : latest.number;
+  const earlierCode = await client.getCode({ address: factory, blockNumber: previous });
+  const blockNumber = earlierCode && earlierCode !== '0x' ? previous : latest.number;
+  const { data } = await client.call({
+    to: factory,
+    data: '0x',
+    blockNumber,
+    stateOverride: [{ address: factory, code: OVERRIDE_PROBE_CODE, nonce: 0, state: [] }],
+  });
+  const expected = getContractAddress({ opcode: 'CREATE', from: factory, nonce: 0n }).toLowerCase();
+  if (!data || data.length !== 66 || `0x${data.slice(-40)}`.toLowerCase() !== expected) {
+    throw new Error('RPC did not apply the historical CREATE2 replay overrides.');
+  }
+  const target = getCreate2Address({ from: factory, salt: REPLAY_PROBE_SALT, bytecodeHash: keccak256(REPLAY_PROBE_INITCODE) });
+  const runtime = await simulateCreate2(client, { factory, salt: REPLAY_PROBE_SALT, initcode: REPLAY_PROBE_INITCODE, address: target, blockNumber });
+  if (runtime !== '0x6000') throw new Error('RPC did not apply the CREATE2 replay overrides.');
 }
 
 /**

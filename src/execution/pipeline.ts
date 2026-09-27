@@ -3,11 +3,12 @@ import { keccak256 } from 'viem';
 import { findKnownReceipt, nonceConsumed, broadcast, validateSignedTransaction, waitForReceipt } from './transactions.ts';
 import { intentForSigned, signedVariants } from './journal.ts';
 import { assertPinnedAbsent, assertPinnedSignedIntent, pinnedCommitment, pinnedIntentFields } from '../verification/pinned-runtime.ts';
+import { checkReplayCapabilities } from './preflight.ts';
 import { ApplyError } from './errors.ts';
 import { safeExternalError } from './rpc-error.ts';
 import { transactionFor, pause } from './shared.ts';
 import { commitments, signedSpend, budgetFor } from './funding.ts';
-import { decide, precondition, finish, checkExecutionDependencies } from './outcome.ts';
+import { decide, precondition, finish, checkExecutionDependencies, stableReceipt } from './outcome.ts';
 import { append, fail, report } from './report.ts';
 import { assertSignerHistory, matchingVariant, recordReceipt, replaceSigned, signWithLease } from './settlement.ts';
 import type { ScheduleEntry, ScheduleWave } from '../scheduling/types.ts';
@@ -121,12 +122,23 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   if (new Set([...groups.values()].map(group => group[0]!.intent.reservationId)).size !== groups.size) {
     throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
-  const conflict = jobs.find(job => { const last = job.records.at(-1); return last?.phase === 'failed' && !last.retryable; });
+  const conflict = jobs.find(job => { const last = job.records.at(-1); return last?.phase === 'failed' && !last.retryable &&
+    !(last.code === 'postcondition' && job.item.planned.action === 'deploy' && job.records.some(record => record.phase === 'receipt' &&
+      record.receipt.status === 'success' && record.transactionHash.toLowerCase() === last.transactionHash?.toLowerCase())); });
   const failure = conflict?.records.at(-1);
   if (conflict && failure?.phase === 'failed') throw new ApplyError(failure.code, failure.reason, { actionId: conflict.item.planned.id });
 
   // Check every signer and precondition before adding any signature or broadcast.
   for (const job of jobs) job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
+  for (const job of jobs) {
+    const last = job.records.at(-1);
+    if (last?.phase !== 'failed' || last.code !== 'postcondition' || job.item.planned.action !== 'deploy') continue;
+    const receipt = job.records.findLast(record => record.phase === 'receipt' && record.transactionHash.toLowerCase() === last.transactionHash?.toLowerCase());
+    if (!receipt || receipt.phase !== 'receipt' || receipt.receipt.status !== 'success') {
+      throw new ApplyError('journal', `A failed deployment ${job.item.planned.id} has no successful journaled receipt.`, { actionId: job.item.planned.id });
+    }
+    if (!job.receipt) job.receipt = await stableReceipt(ctx, receipt.transactionHash, receipt.receipt, job.item.planned.id);
+  }
   for (const job of jobs.filter(entry => entry.records.at(-1)?.phase === 'verified')) await decide(ctx, job.item);
   const outstanding = jobs.filter(job => job.records.at(-1)?.phase !== 'verified' && !job.receipt);
   await checkExecutionDependencies(ctx, outstanding, false);
@@ -181,6 +193,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   }
   const activeSignatures = new Set(jobs.filter(job => job.signed && !job.receipt && !job.completed)
     .flatMap(job => job.variants.map(variant => variant.transactionHash.toLowerCase())));
+  await checkReplayCapabilities(ctx.client, jobs.filter(job => !job.signed).map(job => job.item), ctx.verificationClient, ctx.plan.chain);
   await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address), activeSignatures);
   for (const job of jobs.filter(entry => !entry.signed)) {
     const { intent, item, signer } = job;
@@ -228,6 +241,7 @@ export interface PipelineSigningInput {
 }
 
 export async function signPipelineBatch(ctx: ApplyContext, { wave, work }: PipelineSigningInput): Promise<PipelineBatchJob[]> {
+  await checkReplayCapabilities(ctx.client, work.map(job => job.item), ctx.verificationClient, ctx.plan.chain);
   await checkExecutionDependencies(ctx, work);
   await assertSignerHistory(ctx, work.map(job => job.signer.address));
   const groups = new Map<string, FundedJob[]>();

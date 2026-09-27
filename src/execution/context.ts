@@ -20,6 +20,7 @@ export interface ApplyContext {
   spec: unknown;
   artifacts: Artifacts;
   client: Client;
+  verificationClient: Client | null;
   lanes: SignerLanes;
   deps: ApplyDependencies;
   journal: Journal;
@@ -44,7 +45,7 @@ export interface ApplyContext {
   schedule: Schedule | null;
 }
 
-const DEFAULTS = { pollIntervalMs: 250, receiptTimeoutMs: 120_000, gasMultiplier: 1.2, fees: null, budgets: {}, hooks: {}, dependencies: {} };
+const DEFAULTS = { pollIntervalMs: 250, receiptTimeoutMs: 120_000, verificationTimeoutMs: 300_000, gasMultiplier: 1.2, fees: null, budgets: {}, hooks: {}, dependencies: {} };
 
 function lanesFrom(signers: Signers | undefined, parallel: boolean): SignerLanes {
   if (!signers || !Array.isArray(signers.deployer) || signers.deployer.length === 0) throw new ApplyError('signer', 'Apply needs signers.deployer with at least one account.');
@@ -83,13 +84,18 @@ export interface OpenedApplyContext {
   close(): Promise<void>;
 }
 
-export async function openApplyContext({ plan, spec, artifacts, client, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }: ApplyInput): Promise<OpenedApplyContext> {
+export async function openApplyContext({ plan, spec, artifacts, client, verificationClient, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }: ApplyInput): Promise<OpenedApplyContext> {
+  if (options.verificationTimeoutMs !== undefined &&
+    (!Number.isSafeInteger(options.verificationTimeoutMs) || options.verificationTimeoutMs < 0)) {
+    throw new ApplyError('config', 'verificationTimeoutMs must be a non-negative integer in milliseconds.');
+  }
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
   if (options.replacementFees !== undefined && (!options.replacementFees ||
     (['maxFeePerGas', 'maxPriorityFeePerGas', 'maxCostWei'] as const).some(field => !/^[0-9]+$/.test(String(options.replacementFees?.[field] ?? ''))))) {
     throw new ApplyError('config', 'replacementFees needs maxFeePerGas, maxPriorityFeePerGas, and maxCostWei as non-negative wei integers.');
   }
   const config: ApplyConfig = { ...DEFAULTS, ...options, confirmations: options.confirmations ?? 1,
+    verificationTimeoutMs: options.verificationTimeoutMs ?? DEFAULTS.verificationTimeoutMs,
     hooks: { ...options.hooks }, budgets: Object.fromEntries(Object.entries(options.budgets ?? {}).map(([address, wei]) => [address.toLowerCase(), wei])) };
   const remote = Boolean(stateStore || journalStore || lockProvider || journalCipher || scopeInput);
   if (remote && (!stateStore || !journalStore || !lockProvider || !journalCipher || !scopeInput)) throw new ApplyError('config', 'Production apply needs stateStore, journalStore, lockProvider, journalCipher, and scope together.');
@@ -128,7 +134,7 @@ export async function openApplyContext({ plan, spec, artifacts, client, signers,
     const writeState: ApplyContext['writeState'] = backend
       ? (version, state) => backend.stateStore.compareAndSwap(backend.scope, version, validateState(state), { fence })
       : (_version, state) => deps.writeStateAtomic(stateFile!, state);
-    const ctx: ApplyContext = { plan, spec, artifacts, client, lanes, deps, journal, journalStore: backend?.journalStore, lock, config, scope, remote,
+    const ctx: ApplyContext = { plan, spec, artifacts, client, verificationClient: verificationClient ?? null, lanes, deps, journal, journalStore: backend?.journalStore, lock, config, scope, remote,
       principal: 'principal' in lock.holder ? lock.holder.principal : principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline,
       sent: [], rebroadcasts: [], outcomes: new Map<ResourceId, ResourceOutcome>(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 },
       state: { file: stateFile ?? null, written: false }, prepared: new Map<ResourceId, PreparedAction>(), stateSnapshot: null, schedule: null };

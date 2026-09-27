@@ -1,6 +1,6 @@
 {
   "name": "etherplan",
-  "version": "0.0.7-beta",
+  "version": "0.0.8-beta",
   "description": "Plan, apply, and verify desired EVM contract state",
   "license": "MIT",
   "type": "module",
@@ -34,7 +34,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.ts test/integration/*.test.ts",
     "prepare": "npm run build",
-    "lint": "eslint src test"
+    "lint": "eslint src test",
+    "release:beta": "npm publish --tag beta"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1140.0",

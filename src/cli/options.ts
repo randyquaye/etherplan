@@ -6,6 +6,7 @@ export type CliOptions = {
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
   'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
+  'verification-timeout-ms'?: string;
   var?: string[]; 'var-file'?: string[]; workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
@@ -20,7 +21,7 @@ export const COMMANDS = {
   graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
   impact: { description: 'Show resources affected by a named value.', options: ['value', ...INPUTS] },
   plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', ...INPUTS] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', ...INPUTS] },
   verify: { description: 'Verify desired state against the chain.', options: ['state', 'backend', ...INPUTS] },
   schedule: { description: 'Preview signer assignments and execution waves.', options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
   import: { description: 'Record a verified existing contract in local state.', options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
@@ -46,13 +47,14 @@ const OPTION_HELP = {
   'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
+  'verification-timeout-ms': 'Time to retry provider errors after a successful deployment (default: 300000 ms)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
   'var-file': 'Read variable values from an .ethpvars file; repeatable, later files win',
   workspace: 'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
-const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'workspace']);
+const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', 'workspace']);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline', 'reconfigure']);
 export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
@@ -69,8 +71,9 @@ export function usage(command?: CommandName): string {
       : name === 'plan' && command === 'apply' ? 'Saved plan file; omit to create and approve a fresh plan'
         : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
           : OPTION_HELP[name];
-  const environment = ['init', 'plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
-    ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
+  const environment = command === 'apply' ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
+    : ['init', 'plan', 'verify', 'schedule', 'import'].includes(command)
+      ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
     ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
   const project = command === 'status' ? '' : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';

@@ -6,6 +6,16 @@ By default, after a CREATE2 deployment, Etherplan runs the constructor again wit
 
 This is a limit of receipt-block replay. A replay failure does **not** by itself establish that the constructor is stateful. It can also mean that the RPC cannot run the simulation, the artifact or inputs are wrong, or the deployed code differs from the spec. Etherplan does not automatically accept code at the predicted address as proof that its planned transaction created it.
 
+## Recover from an RPC replay error
+
+Before signing a CREATE2 deployment, apply tests historical code, nonce, and storage overrides on the configured RPC. This probe can detect unsupported overrides, but it cannot guarantee that a provider will accept every real constructor replay. An incompatible endpoint stops before a transaction is signed. After a successful receipt, transient provider failures during creation verification are retried for up to five minutes, starting at 500 ms between attempts and capping the delay at 10 seconds. `etherplan apply --verification-timeout-ms <milliseconds>` changes that window. Each retry keeps the original receipt's canonical block as its anchor; a different runtime or an EVM constructor revert is not treated as a provider failure.
+
+For a second RPC provider, set `ETH_VERIFICATION_RPC_URL` before `etherplan apply`. Apply checks its chain identity and replay overrides before signing. If the primary RPC cannot verify a deployment, apply checks that the second provider agrees on the receipt block and uses it to verify the original transaction. The primary RPC still sends the transaction and tracks its receipt. A failed fallback or a provider outage lasting beyond the retry window leaves the transaction recoverable from the saved plan and journal; no RPC configuration can guarantee that provider failures never happen.
+
+If the endpoint remains unavailable, the saved plan can retry verification of the same signed transaction. Keep the original plan and journal, set `ETH_RPC_URL` to an endpoint that supports historical state overrides, and run `etherplan apply --plan path/to/plan.json` with the same local `--state` and `--journal` options, or the same production `--backend` and `--signer-module` options. Include `--pipeline` if the saved plan used a pipeline. A successful retry validates the journaled signature and canonical receipt, runs creation verification again, and records the original transaction without signing or broadcasting another deployment.
+
+This path also works for a prior terminal `postcondition` failure when the journal contains the signed deployment and its successful receipt. If the receipt is no longer canonical, the transaction evidence disagrees, or replay still cannot prove the runtime, apply stops without adopting the address. A constructor that replays to different code remains subject to the limitation below and [issue #28](https://github.com/randyquaye/etherplan/issues/28).
+
 ## Pin the runtime before a new deployment
 
 For a constructor that creates a child with `CREATE`, opt into a different creation proof before planning or signing:
