@@ -588,7 +588,7 @@ test('workspaces select separate default and configured state files', () => {
   assert.equal(inWorkspace('/p/deploy/state.json', 'default'), '/p/deploy/default/state.json');
 });
 
-test('--var and --var-file repeat, and every command that reads a spec accepts them with --workspace', () => {
+test('--var and --var-file repeat, and every command that compiles a spec accepts them with --workspace', () => {
   assert.deepEqual(parseOptions(['--var', 'a=1', '--workspace', 'prod', '--var-file', 'x.ethpvars', '--var', 'b=2', '--var-file', 'y.ethpvars']), {
     var: ['a=1', 'b=2'], workspace: 'prod', 'var-file': ['x.ethpvars', 'y.ethpvars'],
   });
@@ -597,7 +597,7 @@ test('--var and --var-file repeat, and every command that reads a spec accepts t
   assert.throws(() => validateOptions('validate', { var: ['1=2'] }), /--var 1=2 must be name=value/);
   assert.throws(() => validateOptions('status', { workspace: 'prod' }), /--workspace is not an option for status/);
   for (const [command, details] of Object.entries(COMMANDS)) {
-    if (!details.options.includes('spec')) continue;
+    if (!details.options.includes('spec') || command === 'output') continue; // output uses the spec path only to locate state.
     for (const option of ['var', 'var-file', 'workspace']) assert.ok(details.options.includes(option), `${command} --${option}`);
     assert.match(usage(command), /--var-file/);
   }

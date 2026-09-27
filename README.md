@@ -241,6 +241,16 @@ etherplan apply --spec path/to/spec.json --plan plan.json
 etherplan verify --spec path/to/spec.json
 ```
 
+After apply or import records state, `output` prints saved contract and external addresses as JSON without an RPC connection:
+
+```sh
+etherplan output --spec path/to/spec.json
+etherplan output --id contract:registry
+etherplan output --workspace sepolia
+```
+
+Without `--spec`, Etherplan looks in the current directory for `spec.json` or one `.ethp` file. The selected workspace determines the default state path. The JSON includes `chain` and an `addresses` map keyed by resource ID; `--id` filters it to one resource. Use `etherplan output --id contract:registry | jq -r '.addresses["contract:registry"]'` to extract the address in a shell script. `--state path/to/state.json` reads that file directly without a spec. `--backend backend.json` reads production state and requires `ETH_RPC_URL`. These are recorded addresses; run `verify` to check current on-chain state. Call records are omitted because they repeat the target contract address.
+
 Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. `plan --signer-module` obtains the addresses from the same module, so they need not be entered separately. Pipeline applies still require an explicit saved pipeline plan.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/<workspace>/` beside the spec, which is `.etherplan/default/` without `--workspace`; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
