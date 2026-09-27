@@ -8,7 +8,7 @@ import { hashJson, canonicalJson } from '../identity.ts';
 import { scopeKey } from './backends.ts';
 import type { AwsBackend, AwsBackendOptions, AwsJournalCiphertext, DeploymentScope, FenceEntry, JournalCipher, JournalStore, LockProvider, LockScope, PlanStore, StateStore } from './types.ts';
 
-const lockKey = (scope: LockScope) => `LOCK#${(scope.kind === 'deployment'
+export const lockKey = (scope: LockScope) => `LOCK#${(scope.kind === 'deployment'
   ? [scope.project, scope.environment, scope.chainId, scope.genesisHash.toLowerCase(), scope.kind, scope.label]
   : [scope.chainId, scope.genesisHash.toLowerCase(), scope.kind, scope.address.toLowerCase()]).map(encodeURIComponent).join('/')}`;
 const deploymentKey = (scope: DeploymentScope) => `DEPLOY#${scopeKey(scope)}`;

@@ -2,8 +2,12 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createPublicClient, http } from 'viem';
+import { DescribeTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DescribeKeyCommand, KMSClient } from '@aws-sdk/client-kms';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createAwsBackend } from '../execution/aws.ts';
+import { hashJson } from '../identity.ts';
+import { validateState } from '../state/index.ts';
 import { deploymentScope, readStoredJournal } from '../execution/backends.ts';
 import { readLocalJournal } from '../execution/journal.ts';
 import { safeExternalError } from '../execution/rpc-error.ts';
@@ -19,6 +23,49 @@ export type SignerModuleSource = { signerProvider: SignerProvider; signerRoles?:
 export type LocalSignerSource = { signers: Signers; signerProvider?: never; signerRoles?: never };
 export type SignerSource = SignerModuleSource | LocalSignerSource;
 export type Backend = AwsBackend & { scope: DeploymentScope; ttlMs?: number; confirmations?: number };
+export interface AwsBackendConfig {
+  kind: 'aws'; tableName: string; kmsKeyId: string; bucket?: string; prefix?: string;
+  scope: unknown; ttlMs?: number; confirmations?: number;
+}
+
+export function awsBackendConfigHash(config: AwsBackendConfig, scope: DeploymentScope): string {
+  return hashJson({ kind: config.kind, tableName: config.tableName, kmsKeyId: config.kmsKeyId,
+    bucket: config.bucket ?? null, prefix: config.prefix ?? 'etherplan', scope,
+    confirmations: config.confirmations ?? null, ttlMs: config.ttlMs ?? null });
+}
+
+export async function assertAwsBackendInitialized(file: string, projectDirectory: string, workspace = DEFAULT_WORKSPACE): Promise<void> {
+  const markerFile = path.join(projectDirectory, '.etherplan', workspace, 'backend-init.json');
+  let marker: { formatVersion?: number; configHash?: string; chain?: ChainIdentity;
+    identity?: { tableArn?: string; kmsKeyArn?: string; bucketRegion?: string } };
+  try { marker = JSON.parse(await readFile(markerFile, 'utf8')) as typeof marker; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error(`AWS backend is not initialized here. Run etherplan init --backend ${file} --workspace ${workspace}.`);
+    throw error;
+  }
+  const config = await readAwsBackendConfig(file);
+  if (marker.formatVersion !== 1 || !marker.chain ||
+    marker.configHash !== awsBackendConfigHash(config, deploymentScope(config.scope, marker.chain))) {
+    throw new Error('AWS backend configuration changed. Run etherplan init --reconfigure before using it.');
+  }
+  const [table, key] = await Promise.all([
+    new DynamoDBClient({}).send(new DescribeTableCommand({ TableName: config.tableName })),
+    new KMSClient({}).send(new DescribeKeyCommand({ KeyId: config.kmsKeyId })),
+  ]);
+  if (!marker.identity?.tableArn || !marker.identity.kmsKeyArn ||
+    marker.identity.tableArn !== table.Table?.TableArn || marker.identity.kmsKeyArn !== key.KeyMetadata?.Arn) {
+    throw new Error('AWS table or KMS key identity changed. Run etherplan init --reconfigure before using it.');
+  }
+  const scope = deploymentScope(config.scope, marker.chain);
+  const stored = await createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId }).stateStore.read(scope);
+  if (!stored) throw new Error('Initialized AWS state is missing. Run etherplan init to inspect the scope before continuing.');
+  if (typeof stored.version !== 'string' || !stored.version) throw new Error('Initialized AWS state has no storage version.');
+  const state = validateState(stored.value);
+  if (state.chain.id !== marker.chain.id || state.chain.genesisHash.toLowerCase() !== marker.chain.genesisHash.toLowerCase()) {
+    throw new Error('Initialized AWS state belongs to a different chain.');
+  }
+}
+
 function isPrivateKey(value: string): value is Hex {
   return /^0x[0-9a-fA-F]{64}$/.test(value);
 }
@@ -61,12 +108,16 @@ export function signersFromEnvironment(): Signers {
   return { deployer: keys.map(key => privateKeyToAccount(key as Hex)), ...(ownerKey ? { owner: privateKeyToAccount(ownerKey as Hex) } : {}) };
 }
 
-export async function backendFromFile(file: string, chain: ChainIdentity, { requireBucket = false }: { requireBucket?: boolean } = {}): Promise<Backend> {
-  const config = JSON.parse(await readFile(path.resolve(file), 'utf8')) as {
-    kind: string; tableName: string; kmsKeyId: string; bucket?: string; prefix?: string;
-    scope: unknown; ttlMs?: number; confirmations?: number;
-  };
+export async function readAwsBackendConfig(file: string): Promise<AwsBackendConfig> {
+  const config = JSON.parse(await readFile(path.resolve(file), 'utf8')) as AwsBackendConfig;
   if (config.kind !== 'aws') throw new Error('Backend config kind must be aws.');
+  if (typeof config.tableName !== 'string' || !config.tableName || typeof config.kmsKeyId !== 'string' || !config.kmsKeyId) throw new Error('AWS backend needs tableName and kmsKeyId.');
+  if (config.bucket !== undefined && (typeof config.bucket !== 'string' || !config.bucket)) throw new Error('AWS backend bucket must be a nonempty string.');
+  return config;
+}
+
+export async function backendFromFile(file: string, chain: ChainIdentity, { requireBucket = false }: { requireBucket?: boolean } = {}): Promise<Backend> {
+  const config = await readAwsBackendConfig(file);
   if (requireBucket && !config.bucket) throw new Error('AWS plan and apply need an immutable plan bucket in backend config.');
   const scope = deploymentScope(config.scope, chain);
   return { ...createAwsBackend({ tableName: config.tableName, kmsKeyId: config.kmsKeyId, ...(config.bucket ? { bucket: config.bucket } : {}), ...(config.prefix ? { prefix: config.prefix } : {}) }), scope,

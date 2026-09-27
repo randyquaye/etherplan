@@ -22,7 +22,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
 
   const overview = cli('--help');
   assert.equal(overview.status, 0, overview.stderr);
-  for (const command of ['validate', 'compile', 'graph', 'impact', 'plan', 'apply', 'verify', 'schedule', 'import', 'output', 'adapters', 'status']) {
+  for (const command of ['init', 'validate', 'compile', 'graph', 'impact', 'plan', 'apply', 'verify', 'schedule', 'import', 'output', 'adapters', 'status']) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(command, '--help');
     assert.equal(help.status, 0, help.stderr);
@@ -32,6 +32,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('import', '--help').stdout, /--rebaseline/);
   assert.match(cli('apply', '--help').stdout, /--signer-module/);
   assert.match(cli('status', '--help').stdout, /--backend/);
+  assert.match(cli('init', '--help').stdout, /--reconfigure/);
   assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);
 });
