@@ -3,14 +3,7 @@ import type { TransactionSerialized } from 'viem';
 import type { PlannedResource } from '../planning/types.ts';
 import type { Address, Client, DecimalString, Hash, Hex } from '../types.ts';
 import type { BroadcastOutcome, EstimateGasInput, FeeOverride, IntentFields, IntentRecord, Receipt, ReceiptJson, ReceiptWait, SignedBytes, SignedRecord, SignerAccount, TransactionEnvelope, WaitForReceiptInput } from './types.ts';
-
-/** What a thrown RPC error may carry; each level is read optionally. */
-interface ErrorLike {
-  cause?: unknown;
-  details?: unknown;
-  shortMessage?: unknown;
-  message?: unknown;
-}
+import { classifyRpcFailure, safeRpcMessage } from './rpc-error.ts';
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -107,25 +100,16 @@ export async function validateSignedTransaction(signed: SignedRecord, intent: In
   return maximumCost(expected);
 }
 
-function errorText(error: unknown): string {
-  const parts: unknown[] = [];
-  for (let item: unknown = error; item; item = (item as ErrorLike).cause) {
-    const { details, shortMessage, message } = item as ErrorLike;
-    parts.push(details, shortMessage, message);
-  }
-  return parts.filter(Boolean).join(' ').replace(/0x[0-9a-fA-F]{64,}/g, '[redacted hex]');
-}
-
 export async function broadcast(client: Client, rawTransaction: Hex): Promise<BroadcastOutcome> {
   try {
     await client.request({ method: 'eth_sendRawTransaction', params: [rawTransaction] });
     return { accepted: true };
   } catch (error) {
-    const text = errorText(error);
-    if (/already known|known transaction|already imported|alreadyknown/i.test(text)) return { accepted: true, known: true };
-    if (/nonce too low|nonce is too low|noncetoolow|old nonce/i.test(text)) return { accepted: false, nonceTooLow: true, error: text };
-    if (/underpriced/i.test(text)) return { accepted: false, replacementUnderpriced: true, error: text };
-    return { accepted: false, error: text };
+    const failure = classifyRpcFailure(error);
+    if (failure === 'already-known') return { accepted: true, known: true };
+    if (failure === 'nonce-too-low') return { accepted: false, nonceTooLow: true, error: safeRpcMessage(failure) };
+    if (failure === 'replacement-underpriced') return { accepted: false, replacementUnderpriced: true, error: safeRpcMessage(failure) };
+    return { accepted: false, error: safeRpcMessage(failure, 'broadcast') };
   }
 }
 

@@ -94,16 +94,14 @@ export interface DeploymentScope {
 /** What deploymentScope accepts: chain fields default from the plan chain. */
 export type DeploymentScopeInput = Partial<DeploymentScope>;
 
-interface LockScopeBase {
-  project: string;
-  environment: string;
+interface ChainLockScope {
   chainId: number;
   genesisHash: Hash;
 }
 
-/** One deployment lease covers the label; one signer lease per address covers every label. */
-export type DeploymentLockScope = LockScopeBase & { kind: 'deployment'; label: string };
-export type SignerLockScope = LockScopeBase & { kind: 'signer'; address: Address };
+/** A signer lease covers its address across every deployment in the shared table. */
+export type DeploymentLockScope = ChainLockScope & { kind: 'deployment'; project: string; environment: string; label: string };
+export type SignerLockScope = ChainLockScope & { kind: 'signer'; address: Address };
 export type LockScope = DeploymentLockScope | SignerLockScope;
 
 /** Written into the local `<state>.lock` file. */
@@ -208,6 +206,8 @@ export interface JournalHead {
 
 /** The signer-wide index entry written with every signed record. */
 export interface SignedIndexEntry {
+  project: string;
+  environment: string;
   label: string;
   planHash: Hash;
   actionId: ResourceId;
@@ -366,6 +366,7 @@ export interface IntentFields {
   pooled?: boolean;
   reservationId?: string;
   waveAttemptId?: string;
+  attemptId?: string;
   nonceOffset?: number;
   replacement?: true;
   replacesTransactionHash?: Hash;

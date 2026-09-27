@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
 import { keccak256 } from 'viem';
 import { estimateGasLimit, feesFor, maximumCost } from './transactions.ts';
+import { safeExternalError, safeRpcMessage } from './rpc-error.ts';
 import { ApplyError } from './errors.ts';
 import { transactionFor } from './shared.ts';
 import { decide, checkExecutionDependencies, finish } from './outcome.ts';
@@ -29,9 +31,8 @@ export async function prepareBatch(ctx: ApplyContext, batch: ScheduleEntry[]): P
     let gas: bigint;
     try {
       gas = await estimateGasLimit(ctx.client, { from: job.signer.address, tx, gasMultiplier: ctx.config.gasMultiplier });
-    } catch (error) {
-      const message = error instanceof Error ? ('shortMessage' in error ? error.shortMessage : error.message) : String(error);
-      return fail(ctx, job.item, 'estimate-failed', `Gas estimation failed: ${message}`, { retryable: true, signer: job.signer.address });
+    } catch {
+      return fail(ctx, job.item, 'estimate-failed', safeRpcMessage('request-failed', 'estimate'), { retryable: true, signer: job.signer.address });
     }
     const envelope: CostEnvelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(tx.value), gas, ...fees };
     work.push({ ...job, envelope, cost: maximumCost(envelope as TransactionEnvelope) });
@@ -66,15 +67,16 @@ export async function signBatch(ctx: ApplyContext, { wave, work }: SerialSigning
     const nonce = job.envelope.nonce;
     if (nonce === undefined) throw new ApplyError('nonce-race', `Signer ${job.signer.address} has no reserved nonce.`, { actionId: item.planned.id });
     const envelope: TransactionEnvelope = { ...job.envelope, nonce };
+    const attemptId = randomUUID();
     await ctx.lock.assertHeld?.();
-    await append(ctx, item.planned.id, { phase: 'intent', wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas), maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) });
+    await append(ctx, item.planned.id, { phase: 'intent', attemptId, wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas), maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) });
     let signed: SignedBytes;
     try {
       signed = await signWithLease(ctx, item.planned.id, job.signer, envelope);
     } catch (error) {
-      return fail(ctx, item, 'signer', error instanceof Error ? error.message : String(error), { retryable: true, signer: job.signer.address });
+      return fail(ctx, item, 'signer', safeExternalError(error), { retryable: true, signer: job.signer.address });
     }
-    const signedRecord = await append(ctx, item.planned.id, { phase: 'signed', signer: job.signer.address, nonce: String(envelope.nonce), ...signed });
+    const signedRecord = await append(ctx, item.planned.id, { phase: 'signed', attemptId, signer: job.signer.address, nonce: String(envelope.nonce), ...signed });
     signedWork.push({ ...job, signed: signedRecord });
     ctx.sent.push({ actionId: item.planned.id, wave, signer: job.signer.address.toLowerCase(), nonce: String(envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() as Hash });
   }

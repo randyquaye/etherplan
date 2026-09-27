@@ -7,6 +7,7 @@ import { after, afterEach, before, beforeEach, describe, test } from 'node:test'
 import { fileURLToPath } from 'node:url';
 import { createWalletClient, http, keccak256, pad } from 'viem';
 import { acquireLock, applyPlan } from '../src/execution/index.ts';
+import { localSignerJournals } from '../src/execution/local-signer.ts';
 import { estimateGasLimit } from '../src/execution/transactions.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan } from '../src/planning/index.ts';
@@ -508,12 +509,13 @@ describe('apply on a private automining chain', () => {
     assert.equal(await nonce(deployerA), 0);
   });
 
-  test('a nonce used by another writer stops safely, and the next run deploys once', async () => {
+  test('a nonce used by another writer keeps the original signature live until its fate is known', async () => {
     const input = await planFor();
     const ws = await workspace();
     await writeFile(ws.planFile, JSON.stringify(input.plan));
     const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0], owner: 3, fixture: { withCall: callPlanned }, crash: { phase: 'signed', actionId: 'contract:alpha' } });
     assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const beforeUnknown = await chain.rpc('evm_snapshot');
     const wallet = createWalletClient({ account: deployerA, transport: http(chain.url) });
     await wallet.sendTransaction({ to: deployerA.address, value: 0n, nonce: 0, chain: null });
 
@@ -521,12 +523,50 @@ describe('apply on a private automining chain', () => {
     const failed = (await journalOf(ws.journalFile)).filter(record => record.phase === 'failed');
     assert.equal(failed.at(-1).retryable, true);
 
+    await rejectsWith(apply(input, ws), 'nonce-race', 'contract:alpha');
+    assert.equal(count(await journalOf(ws.journalFile), 'signed', 'contract:alpha'), 1);
+
+    await chain.rpc('evm_revert', [beforeUnknown]);
     const result = await apply(input, ws);
     assert.equal(result.status, 'applied');
     const records = await journalOf(ws.journalFile);
-    assert.equal(count(records, 'signed', 'contract:alpha'), 2);
+    assert.equal(count(records, 'signed', 'contract:alpha'), 1);
     assert.equal(count(records, 'receipt', 'contract:alpha'), 1);
-    assert.equal(await nonce(deployerA), 5);
+    assert.equal(await nonce(deployerA), 4);
+  });
+
+  test('a completed local deployment reorg blocks a competing signature in another or the same journal', async () => {
+    const base = fixture({ withCall: false });
+    const one = id => ({ spec: { ...base.spec, contracts: base.spec.contracts.filter(contract => contract.id === id) },
+      artifacts: new Map([[id, base.artifacts.get(id)]]) });
+    const alpha = one('alpha');
+    const ws = await workspace();
+    const first = await createPlan({ ...alpha, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+    assert.equal(first.resources.find(resource => resource.id === 'contract:alpha').action, 'deploy');
+    const beforeFirst = await chain.rpc('evm_snapshot');
+    await applyPlan({ ...alpha, plan: first, client: chain.client, signers: { deployer: [deployerA] },
+      stateFile: ws.stateFile, journalFile: ws.journalFile });
+    const firstSigned = (await journalOf(ws.journalFile)).find(record => record.phase === 'signed');
+    assert.ok(firstSigned);
+    const identity = { id: await chain.client.getChainId(), genesisHash: (await chain.client.getBlock({ blockNumber: 0n })).hash };
+    assert.ok((await localSignerJournals(identity, deployerA.address)).some(file => path.basename(file) === path.basename(ws.journalFile)));
+    // Keep the signer registry: chain.rpc('evm_revert') clears it for ordinary test isolation.
+    await chain.client.request({ method: 'evm_revert', params: [beforeFirst] });
+    assert.equal(await chain.client.getCode({ address: first.resources.find(resource => resource.id === 'contract:alpha').address }), undefined);
+    await assert.rejects(chain.client.getTransactionReceipt({ hash: firstSigned.transactionHash }));
+    const afterIdentity = { id: await chain.client.getChainId(), genesisHash: (await chain.client.getBlock({ blockNumber: 0n })).hash };
+    assert.deepEqual(afterIdentity, identity);
+    assert.ok((await localSignerJournals(afterIdentity, deployerA.address)).some(file => path.basename(file) === path.basename(ws.journalFile)));
+
+    const beta = one('beta');
+    const second = await createPlan({ ...beta, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+    assert.equal(second.resources.find(resource => resource.id === 'contract:beta').action, 'deploy');
+    for (const journalFile of [path.join(ws.dir, 'beta-journal.jsonl'), ws.journalFile]) {
+      const outcome = await applyPlan({ ...beta, plan: second, client: chain.client, signers: { deployer: [deployerA] },
+        stateFile: path.join(ws.dir, 'beta-state.json'), journalFile }).then(() => 'applied', error => error.code);
+      assert.equal(outcome, 'foreign-outstanding', journalFile);
+      assert.equal(count(await journalOf(journalFile), 'signed', 'contract:beta'), 0);
+    }
   });
 
   test('an unsent transaction from an older plan blocks a newer plan until the older plan resumes', async () => {

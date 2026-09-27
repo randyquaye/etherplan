@@ -1,10 +1,12 @@
-import { isAddress, keccak256 } from 'viem';
+import { keccak256 } from 'viem';
+import { isUserAddress } from '../address.ts';
 import { hashJson } from '../identity.ts';
 import { dependencyGraphs, dependencyMode, dependencyWarnings, executionOrder, graph, parseSpec, usesDependencyPlan } from '../spec/index.ts';
 import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
 import { createSchedule } from '../scheduling/index.ts';
 import { verifyResource } from '../verification/index.ts';
+import { recoveryProof } from '../recovery.ts';
 import type { Block } from 'viem';
 import type { ContractStateResource, StateFile } from '../state/types.ts';
 import type { Address, ChainIdentity, ContractId, DistributiveOmit, Hash, ResourceId } from '../types.ts';
@@ -147,7 +149,7 @@ function assertStateChain(state: StateFile | null, chain: ChainIdentity): void {
  * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null, pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, journalRecords = [], pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const described = usesDependencyPlan(spec);
@@ -177,9 +179,10 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
   for (const resource of resources) {
     const options: VerifyOptions = { blockNumber: observed.number };
     const saved = state?.resources[resource.id];
-    const transactionHash = saved?.creationProof?.transactionHash ?? saved?.provenance?.creationTransactionHash ?? saved?.transactions?.at(-1);
+    const recovered = resource.kind === 'contract' && !saved ? recoveryProof(journalRecords, resource, chain) : null;
+    const transactionHash = saved?.creationProof?.transactionHash ?? saved?.provenance?.creationTransactionHash ?? saved?.transactions?.at(-1) ?? recovered?.transactionHash;
     if (transactionHash) options.transactionHash = transactionHash;
-    if (saved?.creationProof) options.creationProof = saved.creationProof;
+    if (saved?.creationProof || recovered) options.creationProof = saved?.creationProof ?? recovered!;
     options.chain = chain;
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
@@ -192,6 +195,19 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     const { verification, stateComparison } = observed;
     let { observation } = observed;
     let action: PlanAction = stateComparison?.conflict ? 'conflict' : decide(resource, verification, plannedById);
+    // A predicted CREATE2 address is not an adopted deployment merely because
+    // its runtime matches. Another account can submit the same factory calldata
+    // while giving constructor-dependent storage a different value.
+    const imported = state?.resources[resource.id]?.provenance?.kind === 'import' &&
+      stateComparison?.addressMatches && stateComparison.identityMatches;
+    if (resource.kind === 'contract' && resource.initcode !== undefined && action === 'reuse' &&
+      !verification.creationProof && !imported) {
+      action = 'unverified';
+      observation = { ...observation, status: 'unverified', missingProofs: [
+        ...observation.missingProofs,
+        'The CREATE2 address has code but no verified creation transaction or explicit import. Resume its deployment or import it deliberately.',
+      ] };
+    }
     const unsafeDependencies = resource.dependencies.filter(dependency => {
       const planned = plannedById.get(dependency)?.action;
       return planned === 'conflict' || planned === 'unverified';
@@ -239,8 +255,8 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
   if (signers && pipeline) throw new Error('Supply signer addresses through either signers or pipeline.');
   if (signers) {
     const deployers = (signers.parallel ? signers.deployers : signers.deployers?.slice(0, 1))?.map(address => address.toLowerCase() as Address);
-    assert(deployers?.length && deployers.every(address => isAddress(address, { strict: false })) && new Set(deployers).size === deployers.length, 'Plan needs distinct deployer addresses.');
-    assert(signers.owner == null || isAddress(signers.owner, { strict: false }), 'Plan owner must be an Ethereum address.');
+    assert(deployers?.length && deployers.every(isUserAddress) && new Set(deployers).size === deployers.length, 'Plan needs distinct deployer addresses with valid mixed-case checksums.');
+    assert(signers.owner == null || isUserAddress(signers.owner), 'Plan owner must be an Ethereum address with a valid mixed-case checksum.');
     const needsOwner = planned.some(resource => ['deploy', 'call'].includes(resource.action) && resource.signerRole === 'owner');
     assert(!needsOwner || signers.owner, 'Plan with owner actions needs --owner <address>.');
     fields.signers = { deployers, owner: needsOwner && signers.owner ? signers.owner.toLowerCase() as Address : null, parallel: signers.parallel ?? false };

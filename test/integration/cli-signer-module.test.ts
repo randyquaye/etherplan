@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -44,6 +44,36 @@ test('CLI plans and applies parallel deployers through a signer module with loca
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(JSON.parse(applied.stdout).transactionsSigned, 3);
     assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[0], 'latest'])), 2n);
+    assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[1], 'latest'])), 1n);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await stopAnvil(anvil);
+  }
+});
+
+test('owner-role deployment with no calls works through a signer module in plan and fresh apply', async () => {
+  const anvil = await startAnvil();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-owner-deploy-'));
+  try {
+    const specFile = path.join(directory, 'spec.json');
+    const planFile = path.join(directory, 'plan.json');
+    const stateFile = path.join(directory, 'state.json');
+    const source = JSON.parse(await readFile(spec, 'utf8'));
+    source.contracts[0].signerRole = 'owner';
+    for (const contract of source.contracts) contract.artifact = path.join(project, 'test/fixtures/StateFixture.json');
+    await writeFile(specFile, JSON.stringify(source));
+    const cli = (args, input) => spawnSync(process.execPath, [path.join(project, 'dist/cli.js'), ...args], {
+      cwd: project, encoding: 'utf8', input,
+      env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl, TEST_DEPLOYER_KEYS: keys[0], TEST_OWNER_KEY: keys[1],
+        DEPLOYER_PRIVATE_KEY: '', DEPLOYER_PRIVATE_KEYS: '', OWNER_PRIVATE_KEY: '' },
+    });
+    const planned = cli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+      '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000']);
+    assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+    assert.equal(JSON.parse(planned.stdout).signers.owner, addresses[1]);
+    const applied = cli(['apply', '--spec', specFile, '--state', stateFile,
+      '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000'], 'yes\n');
+    assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[1], 'latest'])), 1n);
   } finally {
     await rm(directory, { recursive: true, force: true });

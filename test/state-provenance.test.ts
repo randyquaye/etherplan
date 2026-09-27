@@ -50,6 +50,7 @@ test('state accepts a structured creation proof, validates identity, and drops i
   const creationProof = {
     chain: plan.chain,
     transactionHash: creationTransactionHash,
+    creator: '0x0000000000000000000000000000000000000001',
     blockNumber: '7',
     blockHash: `0x${'66'.repeat(32)}`,
     address: preparedResource.address,

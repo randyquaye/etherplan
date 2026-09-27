@@ -6,10 +6,12 @@ import { readState, validateState } from '../../state/index.ts';
 import type { ReplacementFees } from '../../execution/types.ts';
 import type { StateFile } from '../../state/types.ts';
 import type { Plan } from '../../planning/types.ts';
-import { addressesFromModule, backendFromFile, signerFromModule, signersFromEnvironment } from '../environment.ts';
+import { addressesFromModule, backendFromFile, planningJournal, signerFromModule, signersFromEnvironment, specNeedsOwner } from '../environment.ts';
 import type { Backend, SignerModuleSource, SignerSource } from '../environment.ts';
-import { approvePlan, print, writeJsonAtomic } from '../shared.ts';
+import { approvePlan, defaultJournalFile, print, writeJsonAtomic } from '../shared.ts';
 import type { ChainCommandContext } from './context.ts';
+
+export { defaultJournalFile } from '../shared.ts';
 
 export async function apply(context: ChainCommandContext): Promise<void> {
   const { options, spec, artifacts, client, stateFile } = context;
@@ -36,10 +38,11 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       state = stored == null ? null : validateState(stored);
     } else state = await readState(stateFile);
     if (!options['max-spend-wei']) throw new Error('Fresh apply needs --max-spend-wei <amount>.');
-    const addresses = signerSource.signerProvider ? await addressesFromModule(signerSource as SignerModuleSource, spec.calls.length > 0) : {
+    const addresses = signerSource.signerProvider ? await addressesFromModule(signerSource as SignerModuleSource, specNeedsOwner(spec)) : {
       deployers: signerSource.signers.deployer.map(account => account.address), owner: signerSource.signers.owner?.address ?? null,
     };
-    plan = await createPlan({ spec, artifacts, client, state, signers: { ...addresses, parallel: options.parallel ?? false }, maxSpendWei: options['max-spend-wei'] });
+    const journalRecords = await planningJournal(stateFile, options, planningBackend);
+    plan = await createPlan({ spec, artifacts, client, state, journalRecords, signers: { ...addresses, parallel: options.parallel ?? false }, maxSpendWei: options['max-spend-wei'] });
     await approvePlan(plan);
     if (planningBackend?.planStore) {
       await planningBackend.planStore.put(planningBackend.scope, plan);
@@ -55,7 +58,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...signerSource, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
     return;
   }
-  const journalFile = path.resolve(options.journal ?? path.join(path.dirname(stateFile), 'journal.jsonl'));
+  const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
   print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
   return;
 }

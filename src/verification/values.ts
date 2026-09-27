@@ -1,5 +1,5 @@
-import { isAddress } from 'viem';
 import type { AbiParameter } from 'viem';
+import { isUserAddress } from '../address.ts';
 import type { JsonValue } from '../types.ts';
 
 const HEX = /^0x[0-9a-fA-F]*$/;
@@ -48,7 +48,7 @@ export function normalizeAbiValue(parameter: AbiParameter, value: unknown, label
     return value.map((item, index) => normalizeAbiValue({ ...parameter, type: array.inner }, item, `${label}[${index}]`));
   }
   if (type === 'address') {
-    if (typeof value !== 'string' || !isAddress(value, { strict: false })) return fail(label, value, type);
+    if (!isUserAddress(value)) return fail(label, value, type);
     return value.toLowerCase();
   }
   if (/^u?int(\d+)?$/.test(type ?? '')) return integer(value, label, type);
@@ -135,12 +135,7 @@ export function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/**
- * Returns a short error message for reports. It removes RPC URLs and request bodies, because an RPC URL can contain
- * an access key and must not enter a plan or report.
- */
-export function safeError(error: unknown): string {
-  const details = error as { shortMessage?: unknown; message?: unknown } | null | undefined;
-  const text = String(details?.shortMessage ?? details?.message ?? error ?? 'Unknown error.').split('\n')[0] ?? '';
-  return text.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '<url>').slice(0, 300);
+/** Fixed text for untrusted RPC failures in verification reports and plans. */
+export function safeError(_error: unknown): string {
+  return 'RPC request failed.';
 }

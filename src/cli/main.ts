@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
+import { isRpcError, safeRpcMessage } from '../execution/rpc-error.ts';
+import { ApplyError } from '../execution/errors.ts';
 import { loadArtifacts } from '../artifacts.ts';
 import { findSpecFile, loadConfig, loadSpec, withConfig } from '../input/project.ts';
 import { graph } from '../spec/index.ts';
@@ -71,9 +73,9 @@ export async function main(): Promise<void> {
       validateOptions(command, options);
       await run(command, options);
     } catch (error) {
-      const failure = error as { result?: unknown; code?: string; message?: string };
-      if (failure?.result) print(failure.result);
-      console.error(`${failure?.code ? `${failure.code}: ` : ''}${failure?.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
+      const failure = error as { message?: string };
+      if (error instanceof ApplyError && error.result) print(error.result);
+      console.error(`${error instanceof ApplyError ? `${error.code}: ` : ''}${isRpcError(error) ? safeRpcMessage('request-failed') : failure?.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
       process.exitCode = error instanceof UsageError ? 2 : 1;
     }
   }

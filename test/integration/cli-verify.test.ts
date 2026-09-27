@@ -30,7 +30,7 @@ after(async () => {
   await stopAnvil(anvil);
 });
 
-test('verify fails on absent or wrong runtime and accepts exact runtime without a write', async () => {
+test('verify fails on absent, wrong, or unproven CREATE2 runtime without a write', async () => {
   const blockBefore = await anvil.rpc('eth_blockNumber');
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [signer, 'latest']);
 
@@ -47,9 +47,9 @@ test('verify fails on absent or wrong runtime and accepts exact runtime without 
 
   await anvil.rpc('anvil_setCode', [predictedAddress, '0x6000']);
   const exact = runVerify();
-  assert.equal(exact.status, 0, exact.stderr);
+  assert.equal(exact.status, 1, exact.stderr);
   assert.match(exact.stdout, /contract:minimal/);
-  assert.match(exact.stdout, /verified|reuse|exact/i);
+  assert.match(exact.stdout, /unverified|creation|import/i);
 
   assert.equal(await anvil.rpc('eth_blockNumber'), blockBefore);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [signer, 'latest']), nonceBefore);

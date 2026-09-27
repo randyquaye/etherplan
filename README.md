@@ -6,7 +6,7 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install and test
 
-Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.2-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
+Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.3-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
 
 The source is TypeScript. `npm ci` compiles it into `dist/`, which the CLI, integration tests, and published package run; unit tests import `src/`. Signer modules import the library as `etherplan`. See [the architecture guide](docs/architecture.md) for the module map, durable records, and public API boundary.
 
@@ -151,6 +151,12 @@ Without `--plan`, `apply` gets signer addresses from the configured keys or sign
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
+If a later action fails after a contract was deployed, correct the spec and create a new plan using the same state and journal. Planning reads verified creation evidence from the journal, rechecks it against the chain and current contract inputs, and can reuse that deployment without sending it again. Apply checks the journal proof again under its writer lock before accepting the saved plan. Pass `--journal path/to/journal.jsonl` to `plan` when apply used a custom journal path. The production backend uses its shared journal for this recovery. A missing or mismatched creation proof leaves the resource unverified.
+
+A planned CREATE2 deployment stops if its predicted address acquires code without that plan settling a successful deployment transaction. A reverted deployment is not accepted as already satisfied, even if matching code appears. If an address was deployed outside Etherplan, adopt it deliberately with `import` before planning; declare getter checks for constructor-initialized storage that must hold.
+
+Automated CREATE2 apply requires the bundled factory bytecode (at its default address or another address with the same runtime). Etherplan rejects deployment through an arbitrary factory before signing because a factory that returns success when CREATE2 fails cannot prove which transaction created the code. Contracts deployed through another factory can be adopted with `import` after reviewing their live state.
+
 A saved plan pins the state it observed. Apply rejects it with `stale-state` if another plan or import changed that state; create a new plan from the current state to proceed. An interrupted apply can resume its own saved plan.
 
 If a signed transaction remains unmined because its fee cap is too low, rerun the saved plan with `--replace-max-fee-per-gas`, `--replace-priority-fee-per-gas`, and `--replace-max-cost-wei` (all in wei). The two fee caps must each rise by at least 10%; the cost ceiling is the maximum gas cost plus value allowed for each replacement. For example: `etherplan apply --spec spec.json --plan plan.json --replace-max-fee-per-gas 20000000000 --replace-priority-fee-per-gas 4000000000 --replace-max-cost-wei 2000000000000000`. Apply checks the old transaction's receipt and nonce before signing at the same nonce, saves the replacement link before broadcast, and accepts a receipt from either signed variant. Rerunning with the same fees resends the saved replacement. Review the fee caps and ceiling against the plan's gas and payload before applying.
@@ -179,7 +185,9 @@ Use `--parallel` when creating a pipeline plan to distribute eligible deployment
 
 Checks must name `view` or `pure` ABI functions. A check proves the declared return value at the block used for verification.
 
-For a deployment with creation transaction evidence, Etherplan records a `creationProof` in the verified journal entry and state. It binds the transaction, canonical receipt block, initcode, address, and exact runtime hash; CREATE2 also binds the factory and salt. Later plan, verify, and apply recheck that identity, the current code and artifact runtime, and all declared getters. This keeps immutables derived from the deployment block verified after time or block number changes. An old state file without this field remains readable. If its creation transaction and receipt-block data are still available, Etherplan can reconstruct the proof; otherwise declare an expected code hash or getter checks for the missing immutable values. A legacy `proofHash` alone does not prove them.
+For a deployment with creation transaction evidence, Etherplan records a `creationProof` in the verified journal entry and state. It binds the transaction sender, canonical receipt block, initcode, address, and exact runtime hash; CREATE2 also binds the factory and salt. Later plan, verify, and apply recheck that identity, the current code and artifact runtime, and all declared getters. An unavailable or orphaned saved creation transaction makes verification incomplete even if runtime bytes match. This keeps immutables derived from the deployment block verified after time or block number changes. If a deployment has no saved creation proof but its creation transaction and receipt-block data are still available, Etherplan can reconstruct the proof. A legacy `proofHash` alone does not prove them.
+
+Known limitation: [CREATE2 constructors that change external state used by their own execution](https://github.com/randyquaye/etherplan/issues/28) can deploy successfully but fail creation-proof replay. Affected applies stop without recording verified state; review the deployed code and use explicit import to recover. Constructors that use fixed inputs and initialize only their own storage are unaffected.
 
 Use `import --spec path/to/spec.json --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
 

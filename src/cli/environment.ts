@@ -4,10 +4,15 @@ import { pathToFileURL } from 'node:url';
 import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { createAwsBackend } from '../execution/aws.ts';
-import { deploymentScope } from '../execution/backends.ts';
+import { deploymentScope, readStoredJournal } from '../execution/backends.ts';
+import { readLocalJournal } from '../execution/journal.ts';
+import { safeExternalError } from '../execution/rpc-error.ts';
 import type { AwsBackend, DeploymentScope, SignerProvider, SignerRoles, Signers } from '../execution/types.ts';
 import type { Address, ChainIdentity, Client, Hex } from '../types.ts';
 import type { CliOptions } from './options.ts';
+import type { RecoveryRecord } from '../recovery.ts';
+import type { ParsedSpec } from '../spec/types.ts';
+import { defaultJournalFile } from './shared.ts';
 
 export type SignerModuleSource = { signerProvider: SignerProvider; signerRoles?: SignerRoles; signers?: never };
 export type LocalSignerSource = { signers: Signers; signerProvider?: never; signerRoles?: never };
@@ -23,6 +28,20 @@ export function publicClient(): Client {
 
 export function stateFileFor(specFile: string, options: CliOptions): string {
   return path.resolve(options.state ?? path.join(path.dirname(specFile), '.etherplan/state.json'));
+}
+
+export async function planningJournal(stateFile: string, options: CliOptions, backend?: Backend): Promise<RecoveryRecord[]> {
+  if (backend) return readStoredJournal(backend.journalStore, backend.scope);
+  try { return await readLocalJournal(path.resolve(options.journal ?? defaultJournalFile(stateFile))); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+export function specNeedsOwner(spec: ParsedSpec): boolean {
+  return spec.contracts.some(contract => contract.signerRole === 'owner') ||
+    spec.calls.some(call => (call.signerRole ?? 'owner') === 'owner');
 }
 
 export function signersFromEnvironment(): Signers {
@@ -56,8 +75,12 @@ export async function signerFromModule(file: string): Promise<SignerModuleSource
 
 export async function addressesFromModule(source: SignerModuleSource, needsOwner: boolean): Promise<{ deployers: Address[]; owner: Address | null }> {
   const roles = source.signerRoles ?? {};
+  const address = async (role: string): Promise<Address> => {
+    try { return await source.signerProvider.address(role); }
+    catch (error) { throw new Error(`Signer address request failed: ${safeExternalError(error)}`); }
+  };
   return {
-    deployers: await Promise.all((roles.deployer ?? ['deployer']).map(role => source.signerProvider.address(role))),
-    owner: needsOwner ? await source.signerProvider.address(roles.owner ?? 'owner') : null,
+    deployers: await Promise.all((roles.deployer ?? ['deployer']).map(address)),
+    owner: needsOwner ? await address(roles.owner ?? 'owner') : null,
   };
 }

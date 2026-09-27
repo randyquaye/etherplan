@@ -1,4 +1,5 @@
-import { concatHex, isAddress, keccak256, stringToHex } from 'viem';
+import { concatHex, keccak256, stringToHex } from 'viem';
+import { isUserAddress } from '../address.ts';
 import { isRecord } from '../json.ts';
 import { decodeMetadataTail } from './metadata.ts';
 import type { ImmutableReferences, LinkReferences } from '../artifacts/types.ts';
@@ -88,7 +89,8 @@ export function linkBytecode(object: string, linkReferences: LinkReferences = {}
   const used = new Set<string>();
   for (const range of rangesOf(linkReferences, 'Link references')) {
     const address = libraries[range.key];
-    assert(address !== undefined && isAddress(address, { strict: false }), `Missing linked library ${range.key}.`);
+    assert(address !== undefined, `Missing linked library ${range.key}.`);
+    assert(isUserAddress(address), `Linked library ${range.key} has an invalid address or checksum.`);
     used.add(range.key);
     assert((range.start + range.length) * 2 <= text.length, `Link reference for ${range.key} exceeds the bytecode.`);
     text = `${text.slice(0, range.start * 2)}${address.slice(2).toLowerCase()}${text.slice((range.start + range.length) * 2)}`;

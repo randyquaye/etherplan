@@ -98,6 +98,8 @@ export type SimulationEvidence =
 interface CreationProofBase {
   chain: ChainIdentity;
   transactionHash: Hash;
+  /** The account that submitted the creation transaction. */
+  creator: Address;
   blockNumber: DecimalString;
   blockHash: Hash;
   address: Address;
@@ -163,6 +165,8 @@ export interface VerifyOptions {
   simulate?: boolean;
   /** Simulated transaction origin. */
   account?: Address;
+  /** Require the creation transaction to come from this signer. */
+  expectedCreator?: Address;
   chain?: ChainIdentity;
 }
 
@@ -172,6 +176,7 @@ export interface VerifyCreationOptions {
   chain?: ChainIdentity;
   /** Current runtime, when the caller already read it. */
   liveCode?: Hex;
+  expectedCreator?: Address;
 }
 
 export interface SimulateCreate2Input {

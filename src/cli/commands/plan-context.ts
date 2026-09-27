@@ -6,7 +6,7 @@ import { graph, parseSpec } from '../../spec/index.ts';
 import { readState, validateState } from '../../state/index.ts';
 import type { StateFile } from '../../state/types.ts';
 import type { Plan } from '../../planning/types.ts';
-import { addressesFromModule, backendFromFile, signerFromModule } from '../environment.ts';
+import { addressesFromModule, backendFromFile, planningJournal, signerFromModule, specNeedsOwner } from '../environment.ts';
 import type { Backend } from '../environment.ts';
 import type { ChainCommandContext } from './context.ts';
 
@@ -26,7 +26,7 @@ export async function planFor(command: 'plan' | 'verify' | 'schedule', { options
       state = stored == null ? null : validateState(stored);
     } else state = await readState(stateFile);
     const moduleAddresses = command === 'plan' && options['signer-module']
-      ? await addressesFromModule(await signerFromModule(options['signer-module']), spec.calls.length > 0) : null;
+      ? await addressesFromModule(await signerFromModule(options['signer-module']), specNeedsOwner(spec)) : null;
     const deployers = moduleAddresses?.deployers ?? options.deployers?.split(',');
     const owner = moduleAddresses?.owner ?? options.owner ?? null;
     const pipeline = options.pipeline ? {
@@ -35,7 +35,8 @@ export async function planFor(command: 'plan' | 'verify' | 'schedule', { options
     const signers = command === 'plan' && !pipeline && deployers ? {
       deployers, owner, parallel: options.parallel ?? false,
     } : null;
-    plan = await createPlan({ spec, artifacts, client, state, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
+    const journalRecords = command === 'plan' ? await planningJournal(stateFile, options, backend) : [];
+    plan = await createPlan({ spec, artifacts, client, state, journalRecords, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
   }
   return { plan, backend };
 }

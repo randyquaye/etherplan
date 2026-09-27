@@ -6,7 +6,7 @@ import { field } from '../json.ts';
 import { jsonSafe } from './preflight.ts';
 import { validateJournalCreationProof } from '../verification/creation-proof.ts';
 import type { Address, ChainIdentity, DecimalString, DistributiveOmit, Hash, Hex, ResourceId } from '../types.ts';
-import type { AcquireLeasesInput, DeploymentLockScope, DeploymentScope, DeploymentStatus, EncryptionContext, InspectDeploymentInput, Journal, JournalRecord, Lease, LeaseHolder, Leases, LockScope, OpenStoredJournalInput, SignerLockScope, StoredJournalRecord } from './types.ts';
+import type { AcquireLeasesInput, DeploymentLockScope, DeploymentScope, DeploymentStatus, EncryptionContext, InspectDeploymentInput, Journal, JournalRecord, JournalStore, Lease, LeaseHolder, Leases, LockScope, OpenStoredJournalInput, SignerLockScope, StoredJournalRecord } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SCOPE_PART = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -33,10 +33,10 @@ export function scopeKey(scope: DeploymentScope): string {
 
 /** The deployment lease first, then one signer lease per distinct lowercase address. */
 export function lockScopes(scope: DeploymentScope, addresses: Address[]): [DeploymentLockScope, ...SignerLockScope[]] {
-  const base = { project: scope.project, environment: scope.environment, chainId: scope.chainId, genesisHash: scope.genesisHash };
+  const chain = { chainId: scope.chainId, genesisHash: scope.genesisHash.toLowerCase() as Hash };
   return [
-    { ...base, kind: 'deployment', label: scope.label },
-    ...[...new Set(addresses.map(address => address.toLowerCase() as Address))].sort().map((address): SignerLockScope => ({ ...base, kind: 'signer', address })),
+    { ...chain, project: scope.project, environment: scope.environment, kind: 'deployment', label: scope.label },
+    ...[...new Set(addresses.map(address => address.toLowerCase() as Address))].sort().map((address): SignerLockScope => ({ ...chain, kind: 'signer', address })),
   ];
 }
 
@@ -63,14 +63,22 @@ export function validateJournal(records: StoredJournalRecord[], scope: Deploymen
   }
 }
 
-export async function openStoredJournal({ journalStore, journalCipher, scope, fence, assertHeld }: OpenStoredJournalInput): Promise<Journal> {
-  const persisted: StoredJournalRecord[] = [];
-  for await (const record of journalStore.read(scope)) persisted.push(record);
-  validateJournal(persisted, scope);
-  if (typeof journalStore.head === 'function') {
+/** Read and validate journal evidence for read-only planning without decrypting signed bytes. */
+export async function readStoredJournal(journalStore: JournalStore, scope: DeploymentScope): Promise<StoredJournalRecord[]> {
+  const records: StoredJournalRecord[] = [];
+  for await (const record of journalStore.read(scope)) records.push(record);
+  validateJournal(records, scope);
+  if (journalStore.head) {
     const head = await journalStore.head(scope);
-    if ((head?.sequence ?? 0) !== persisted.length || (head?.recordHash ?? null) !== (persisted.at(-1)?.recordHash ?? null)) throw new Error('Journal head differs from its records.');
+    if ((head?.sequence ?? 0) !== records.length || (head?.recordHash ?? null) !== (records.at(-1)?.recordHash ?? null)) {
+      throw new Error('Journal head differs from its records.');
+    }
   }
+  return records;
+}
+
+export async function openStoredJournal({ journalStore, journalCipher, scope, fence, assertHeld }: OpenStoredJournalInput): Promise<Journal> {
+  const persisted = await readStoredJournal(journalStore, scope);
   const records: JournalRecord[] = [];
   for (const item of persisted) {
     if (item.phase !== 'signed') { records.push(item); continue; }
@@ -147,7 +155,7 @@ export async function acquireLeases({ lockProvider, scope, addresses, planHash, 
   }, Math.floor(ttlMs / 3));
   timer.unref?.();
   function assertRenewed(): void {
-    if (lost) throw new Error(`Writer lease renewal failed: ${lost.message}`);
+    if (lost) throw new Error('Writer lease renewal failed.');
   }
   const fence = acquired.map(({ scope: lockScope, lease }) => ({ scope: lockScope, token: lease.fencingToken, holderId: holder.id, principal: holder.principal }));
   if (fence.some(entry => !Number.isSafeInteger(entry.token) || entry.token < 1)) {

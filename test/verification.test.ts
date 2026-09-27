@@ -159,7 +159,7 @@ test('a wrong getter, a failed getter, and a wrong immutable word are conflicts'
 
   const failed = await verifyResource(imported('Sample', HERE, { checks: SAMPLE_CHECKS }), mockClient({ codes: { [HERE]: code }, reads: sampleReads(HERE, { [`${HERE}:LABEL`]: new Error('execution reverted at https://rpc.example/v2/secret-key') }) }));
   assert.equal(failed.status, 'conflict');
-  assert.match(failed.reasons[0], /Getter LABEL read failed: execution reverted at <url>/);
+  assert.equal(failed.reasons[0], 'Getter LABEL read failed: RPC request failed.');
   assert.doesNotMatch(canonicalJson(failed), /secret-key/);
 
   const lyingGetter = await verifyResource(imported('Sample', HERE, { checks: SAMPLE_CHECKS }), mockClient({ codes: { [HERE]: sampleCode(HERE, { UPSTREAM: TWO }) }, reads: sampleReads(HERE) }));
@@ -219,7 +219,7 @@ test('a CREATE2 simulation proves private immutables and reports context-depende
 
   const unsupported = await verifyResource(resource, mockClient({ codes, reads: sampleReads(resource.address.toLowerCase()) }));
   assert.equal(unsupported.status, 'unverified');
-  assert.match(unsupported.proofs.find(proof => proof.method === 'create2-simulation').error, /not supported at <url>/);
+  assert.equal(unsupported.proofs.find(proof => proof.method === 'create2-simulation').error, 'RPC request failed.');
 
   const wrongFactory = await verifyResource(resource, mockClient({ codes: { ...codes, [factory.address.toLowerCase()]: '0x6001' }, reads: sampleReads(resource.address.toLowerCase()), call: async () => ({ data: live }) }));
   assert.equal(wrongFactory.status, 'unverified');

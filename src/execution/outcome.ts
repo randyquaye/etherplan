@@ -4,6 +4,7 @@ import { LIVE_PHASES, latestRecord } from './journal.ts';
 import { findReceipt } from './transactions.ts';
 import { ApplyError } from './errors.ts';
 import { pause } from './shared.ts';
+import { recoveryProof, sameRecoveryProof } from '../recovery.ts';
 import { append, fail, summarizeVerification } from './report.ts';
 import type { Hash, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
@@ -14,9 +15,12 @@ const lower = (value: string | null | undefined): string | null => typeof value 
 export async function verify(ctx: ApplyContext, item: PreparedAction, options: import('../verification/types.ts').VerifyOptions = {}): Promise<VerificationResult> {
   const id = item.planned.id;
   const outcome = ctx.outcomes.get(id);
-  const saved = options.creationProof ?? (outcome && 'verification' in outcome ? outcome.verification.creationProof : undefined) ?? ctx.stateSnapshot?.resources?.[id]?.creationProof;
+  const saved = options.creationProof ?? (outcome && 'verification' in outcome ? outcome.verification.creationProof : undefined) ??
+    ctx.stateSnapshot?.resources?.[id]?.creationProof ?? (item.planned.action === 'reuse' ? item.planned.observation.creationProof : undefined);
   const transactionHash = options.transactionHash ?? saved?.transactionHash ?? ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ?? ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
-  const creationProof = saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined;
+  // An explicit journal proof must be checked even if its hash disagrees with
+  // the record. A proof from previous state may belong to a replaced address.
+  const creationProof = options.creationProof ?? (saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined);
   return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
@@ -36,9 +40,7 @@ export async function precondition(ctx: ApplyContext, item: PreparedAction): Pro
     await checkFactory(ctx.client, planned.factory);
     const code = await ctx.client.getCode({ address: planned.address });
     if (!code || code === '0x') return { satisfied: false };
-    const verification = await verify(ctx, item);
-    if (verification.status === 'verified') return { satisfied: true, verification };
-    return fail(ctx, item, verification.status === 'unverified' ? 'unverified' : 'conflict', `The target address already has code, and it is ${verification.status}.`, { evidence: summarizeVerification(verification) });
+    return fail(ctx, item, 'conflict', 'The planned CREATE2 address acquired code without this plan settling a successful deployment transaction. Review and import it explicitly if it is intended.', { evidence: { status: 'conflict', address: planned.address } });
   }
   const verification = await verify(ctx, item);
   const observed = (verification.bindingChecks ?? []).map(check => check.observed);
@@ -76,11 +78,51 @@ export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
   }
 }
 
+/** Read every completed resource at one canonical block before persisting or reporting success. */
+export async function revalidateDesiredState(ctx: ApplyContext): Promise<{ number: bigint; hash: Hash }> {
+  const block = await ctx.client.getBlock({ blockTag: 'latest' });
+  const fresh = new Map<ResourceId, VerificationResult>();
+  for (const resource of ctx.plan.resources) {
+    const item = ctx.prepared.get(resource.id);
+    const outcome = ctx.outcomes.get(resource.id);
+    if (!item || !outcome || !('verification' in outcome)) {
+      throw new ApplyError('postcondition', `Resource ${resource.id} has no completed verification.`, { actionId: resource.id });
+    }
+    const verificationStart = Date.now();
+    const verification = await verify(ctx, item, { blockNumber: block.number });
+    ctx.timings.verificationMs += Date.now() - verificationStart;
+    if (verification.status !== 'verified') {
+      throw new ApplyError('postcondition', `The final desired condition is ${verification.status}.`, {
+        actionId: resource.id, evidence: { blockNumber: String(block.number), blockHash: block.hash, verification: summarizeVerification(verification) },
+      });
+    }
+    fresh.set(resource.id, verification);
+  }
+  await assertCanonicalSnapshot(ctx, block);
+  for (const [id, verification] of fresh) {
+    const outcome = ctx.outcomes.get(id)!;
+    if ('verification' in outcome) ctx.outcomes.set(id, { ...outcome, verification });
+  }
+  return { number: block.number, hash: block.hash };
+}
+
+export async function assertCanonicalSnapshot(ctx: ApplyContext, snapshot: { number: bigint; hash: Hash }): Promise<void> {
+  const block = await ctx.client.getBlock({ blockNumber: snapshot.number });
+  if (block.hash.toLowerCase() !== snapshot.hash.toLowerCase()) {
+    throw new ApplyError('reorg', `Final verification block ${snapshot.number} is no longer canonical.`, {
+      retryable: true, evidence: { expected: snapshot.hash, actual: block.hash },
+    });
+  }
+}
+
 // A receipt does not complete an action. Verify the postcondition at its canonical block.
 export async function finish(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, receipt: Receipt): Promise<void> {
   const transactionHash = signed.transactionHash;
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id, true);
   if (receipt.status !== 'success') {
+    if (item.planned.action === 'deploy') {
+      return fail(ctx, item, 'reverted', `Deployment transaction ${transactionHash} reverted; matching code at the target cannot establish this plan's creator.`, { transactionHash });
+    }
     const verificationStart = Date.now();
     const verification = await verify(ctx, item, { blockNumber: receipt.blockNumber, transactionHash, account: signed.signer });
     ctx.timings.verificationMs += Date.now() - verificationStart;
@@ -89,11 +131,17 @@ export async function finish(ctx: ApplyContext, item: PreparedAction, signed: Si
     await fail(ctx, item, 'reverted', `Transaction ${transactionHash} reverted in block ${receipt.blockNumber}.`, { transactionHash, evidence: summarizeVerification(verification) });
   }
   const verificationStart = Date.now();
-  const verification = await verify(ctx, item, { blockNumber: receipt.blockNumber, transactionHash, account: signed.signer });
+  const verification = await verify(ctx, item, { blockNumber: receipt.blockNumber, transactionHash, account: signed.signer,
+    ...(item.planned.action === 'deploy' ? { expectedCreator: signed.signer } : {}) });
   ctx.timings.verificationMs += Date.now() - verificationStart;
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
   if (verification.status !== 'verified') {
     await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.`, { transactionHash, evidence: summarizeVerification(verification) });
+  }
+  if (item.planned.action === 'deploy' &&
+    (verification.creationProof?.kind !== 'create2' || verification.creationProof.transactionHash.toLowerCase() !== transactionHash.toLowerCase() ||
+      verification.creationProof.creator.toLowerCase() !== signed.signer.toLowerCase())) {
+    return fail(ctx, item, 'postcondition', 'Deployment verification has no creation proof from the planned signer.', { transactionHash, evidence: summarizeVerification(verification) });
   }
   await markVerified(ctx, item, verification, { outcome: 'applied', transactionHash, blockNumber: String(receipt.blockNumber) });
 }
@@ -119,12 +167,32 @@ function checkArtifactDrift(ctx: ApplyContext, item: PreparedAction, verificatio
   return { previousArtifactHash: drift.previousArtifactHash, artifactHash: drift.artifactHash };
 }
 
+/** Reject a saved recovered proof before settling or sending any transaction. */
+export function assertRecoveryEvidence(ctx: ApplyContext): void {
+  for (const item of ctx.prepared.values()) {
+    if (item.planned.action !== 'reuse') continue;
+    if (item.resource.kind === 'contract' && item.resource.initcode && !ctx.stateSnapshot?.resources?.[item.planned.id]) {
+      const recovered = recoveryProof(ctx.journal.records, item.resource, ctx.plan.chain);
+      if (!sameRecoveryProof(recovered, item.planned.observation.creationProof)) {
+        throw new ApplyError('journal', `The recovered creation proof for ${item.planned.id} is absent or differs from the saved plan.`, { actionId: item.planned.id });
+      }
+    }
+  }
+}
+
 export async function recheckReused(ctx: ApplyContext): Promise<void> {
   for (const item of ctx.prepared.values()) {
     if (item.planned.action !== 'reuse') continue;
     const verification = await verify(ctx, item);
     if (verification.status !== 'verified') {
       throw new ApplyError('drift', `A resource that the plan reuses is now ${verification.status}. Create a new plan.`, { actionId: item.planned.id, evidence: summarizeVerification(verification) });
+    }
+    if (item.resource.kind === 'contract' && item.resource.initcode !== undefined && !verification.creationProof) {
+      const imported = ctx.stateSnapshot?.resources[item.planned.id];
+      if (imported?.provenance?.kind !== 'import' || imported.address.toLowerCase() !== item.resource.address.toLowerCase() ||
+        imported.initcodeHash?.toLowerCase() !== item.resource.initcodeHash?.toLowerCase() || imported.inputsHash !== item.resource.inputsHash) {
+        throw new ApplyError('unverified', 'A reused CREATE2 deployment has no verified creation transaction or explicit import.', { actionId: item.planned.id });
+      }
     }
     const artifactDrift = checkArtifactDrift(ctx, item, verification);
     ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification, ...(artifactDrift ? { artifactDrift } : {}) });
@@ -137,9 +205,23 @@ export async function decide(ctx: ApplyContext, item: PreparedAction): Promise<P
   const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
   const latest = latestRecord(records);
   if (latest?.phase === 'verified') {
-    const verification = await verify(ctx, item, { ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), ...(latest.creationProof ? { creationProof: latest.creationProof } : {}) });
+    const signed = item.planned.action === 'deploy' && latest.transactionHash
+      ? records.find(record => record.phase === 'signed' && record.transactionHash.toLowerCase() === latest.transactionHash?.toLowerCase())
+      : undefined;
+    const expectedCreator = signed?.phase === 'signed' ? signed.signer : null;
+    if (item.planned.action === 'deploy' && (!latest.transactionHash || !expectedCreator)) {
+      throw new ApplyError('journal', 'A verified deployment has no matching signed transaction.', { actionId: item.planned.id });
+    }
+    const verification = await verify(ctx, item, { ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}),
+      ...(latest.creationProof ? { creationProof: latest.creationProof } : {}),
+      ...(expectedCreator ? { expectedCreator } : {}) });
     if (verification.status !== 'verified') {
       await fail(ctx, item, 'drift', `The action verified earlier but is now ${verification.status}.`, { evidence: summarizeVerification(verification) });
+    }
+    if (item.planned.action === 'deploy' &&
+      (verification.creationProof?.kind !== 'create2' || verification.creationProof.transactionHash.toLowerCase() !== latest.transactionHash?.toLowerCase() ||
+        verification.creationProof.creator.toLowerCase() !== expectedCreator?.toLowerCase())) {
+      throw new ApplyError('journal', 'A verified deployment has no valid creation proof from its signed transaction.', { actionId: item.planned.id });
     }
     ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: latest.outcome, address: item.planned.address,
       ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), verification, resumed: true });

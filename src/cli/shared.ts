@@ -8,6 +8,10 @@ export function print(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
+export function defaultJournalFile(stateFile: string): string {
+  return `${path.resolve(stateFile)}.journal.jsonl`;
+}
+
 export async function approvePlan(plan: Plan): Promise<void> {
   process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
   const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
