@@ -103,7 +103,7 @@ test('output reports absent or invalid state and unknown addresses without print
 
     const backend = cli(directory, 'output', '--backend', 'backend.json');
     assert.equal(backend.status, 1);
-    assert.match(backend.stderr, /Set ETH_RPC_URL for output --backend/);
+    assert.match(backend.stderr, /AWS backend is not initialized here/);
 
     await writeFile(stateFile, JSON.stringify(state));
     const unknown = cli(directory, 'output', '--state', stateFile, '--id', 'contract:missing');

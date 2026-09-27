@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { isRpcError, safeRpcMessage } from '../execution/rpc-error.ts';
 import { ApplyError } from '../execution/errors.ts';
 import { loadArtifacts } from '../artifacts.ts';
@@ -11,13 +12,14 @@ import { compile } from './commands/compile.ts';
 import { graphCommand } from './commands/graph.ts';
 import { impact } from './commands/impact.ts';
 import { importCommand } from './commands/import.ts';
+import { init } from './commands/init.ts';
 import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
 import { status } from './commands/status.ts';
 import { validate } from './commands/validate.ts';
 import { verify } from './commands/verify.ts';
-import { inWorkspace, publicClient, stateFileFor } from './environment.ts';
+import { assertAwsBackendInitialized, inWorkspace, publicClient, stateFileFor } from './environment.ts';
 import { COMMANDS, SPEC_COMMANDS, isCommand, parseOptions, usage, UsageError, validateCombination, validateOptions } from './options.ts';
 import type { CliOptions, CommandName } from './options.ts';
 import { print } from './shared.ts';
@@ -43,11 +45,13 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
     if (merged.configured.includes(name) && configured && configured !== '-') options[name] = inWorkspace(configured, workspace);
   }
   if (workspace !== DEFAULT_WORKSPACE) process.stderr.write(`Using workspace ${workspace}.\n`);
+  if (options.backend && command !== 'init') await assertAwsBackendInitialized(options.backend, path.dirname(specFile), workspace);
   if (command === 'output') {
     return output(options, stateFileFor(specFile, options, workspace));
   }
   const { spec, variables } = await loadProject(specFile, { workspace, varFiles: options['var-file'] ?? [], vars: options.var ?? [], env: process.env });
   if (variables.length) process.stderr.write(variableReport(variables));
+  if (command === 'init') return init({ options, specFile, spec, client: publicClient(), stateFile: stateFileFor(specFile, options, workspace), workspace });
   const ordered = graph(spec);
   const context = { options, specFile, spec, ordered };
   if (command === 'compile') return compile(context);

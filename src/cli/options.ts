@@ -5,7 +5,7 @@ export type CliOptions = {
   value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
   'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
-  'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean;
+  'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
   var?: string[]; 'var-file'?: string[]; workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
@@ -14,6 +14,7 @@ export function isCommand(value: string | undefined): value is CommandName {
 // Options that choose the spec's variable values and state. Every command that reads a spec takes them.
 const INPUTS = ['var', 'var-file', 'workspace'];
 export const COMMANDS = {
+  init: { description: 'Initialize and check the configured AWS state backend.', options: ['backend', 'state', 'journal', 'reconfigure', ...INPUTS] },
   validate: { description: 'Check the project and artifacts without an RPC connection.', options: [...INPUTS] },
   compile: { description: 'Print the project\'s canonical JSON spec.', options: [...INPUTS] },
   graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
@@ -38,6 +39,7 @@ const OPTION_HELP = {
   id: 'Resource ID, for example contract:registry',
   'creation-tx': 'Creation transaction hash used as import proof',
   rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
+  reconfigure: 'Accept a changed backend configuration for this project',
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
@@ -52,7 +54,7 @@ const OPTION_HELP = {
 };
 const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'workspace']);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
-const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline']);
+const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline', 'reconfigure']);
 export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
 
 export class UsageError extends Error {}
@@ -67,7 +69,7 @@ export function usage(command?: CommandName): string {
       : name === 'plan' && command === 'apply' ? 'Saved plan file; omit to create and approve a fresh plan'
         : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
           : OPTION_HELP[name];
-  const environment = ['plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
+  const environment = ['init', 'plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
     ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
     ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
