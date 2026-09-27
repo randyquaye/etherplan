@@ -1,4 +1,5 @@
 import { canonicalJson } from './identity.ts';
+import { pinnedJournalCommitment, samePinnedCommitments } from './verification/pinned-runtime.ts';
 import type { PreparedContract } from './planning/types.ts';
 import type { ChainIdentity } from './types.ts';
 import type { JournalRecord, StoredJournalRecord } from './execution/types.ts';
@@ -23,6 +24,13 @@ export function recoveryProof(records: readonly RecoveryRecord[], resource: Prep
       !same(verified.address, resource.address) || !same(verified.codeHash, proof.codeHash) ||
       !same(proof.initcodeHash, resource.initcodeHash) || !same(proof.salt, resource.salt) ||
       !same(proof.factory.address, resource.factory.address) || !same(proof.factory.codeHash, resource.factory.codeHash)) continue;
+    if ((proof.method === 'pinned-runtime') !== (resource.creationProofMode === 'pinned-runtime')) continue;
+    if (proof.method === 'pinned-runtime') {
+      const lineage = pinnedJournalCommitment(records, resource, proof.transactionHash, proof.originPlanHash, proof.creator,
+        { blockHash: proof.blockHash, blockNumber: proof.blockNumber }, chain);
+      if (!samePinnedCommitments(proof, resource) || !lineage || !same(lineage.commitment, proof.intentCommitment) ||
+        !same(verified.planHash, proof.originPlanHash)) continue;
+    }
     const earlier = records.slice(0, index).filter(record => record.planHash === verified.planHash && record.actionId === resource.id &&
       record.chain.id === chain.id && same(record.chain.genesisHash, chain.genesisHash));
     const receipt = earlier.findLast(record => record.phase === 'receipt' && same(record.transactionHash, proof.transactionHash));

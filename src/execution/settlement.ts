@@ -10,6 +10,7 @@ import { transactionFor } from './shared.ts';
 import { budgetFor, commitments, spendWithVariant } from './funding.ts';
 import { checkExecutionDependencies, finish, stableReceipt } from './outcome.ts';
 import { append, fail, report } from './report.ts';
+import { assertPinnedSignedIntent } from '../verification/pinned-runtime.ts';
 import type { Address, Hash, ResourceId } from '../types.ts';
 import type { ApplyContext, IntentRecord, JournalRecord, PreparedAction, Receipt, SignedBytes, SignedFields, SignedIndexEntry, SignedRecord, SignerAccount, StoredJournalRecord, TransactionEnvelope } from './types.ts';
 
@@ -149,6 +150,7 @@ async function awaitReceipt(ctx: ApplyContext, item: PreparedAction, signed: Sig
 }
 
 export async function send(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, { rebroadcast = false, variants = [signed] }: { rebroadcast?: boolean; variants?: SignedRecord[] } = {}): Promise<Receipt> {
+  assertPinnedSignedIntent(ctx.journal.records, ctx.plan.planHash, item, signed);
   await ctx.lock.assertHeld?.();
   await append(ctx, item.planned.id, { phase: 'broadcast-attempt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, rebroadcast });
   await ctx.lock.assertHeld?.();
@@ -187,6 +189,7 @@ export async function replaceSigned(ctx: ApplyContext, item: PreparedAction, sig
   const requested = ctx.config.replacementFees;
   if (!orphan && !requested) return signed;
   const oldIntent = intentForSigned(ctx.journal.records, signed);
+  assertPinnedSignedIntent(ctx.journal.records, ctx.plan.planHash, item, signed);
   const tx = transactionFor(item);
   if (orphan && (pending.signer?.toLowerCase() !== signed.signer.toLowerCase() || pending.nonce !== signed.nonce ||
     pending.to?.toLowerCase() !== tx.to.toLowerCase() || String(pending.value) !== String(tx.value) ||
@@ -224,7 +227,7 @@ export async function replaceSigned(ctx: ApplyContext, item: PreparedAction, sig
       maxCostWei: String(ceiling), signer: signed.signer, nonce: signed.nonce, to: envelope.to,
       value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas),
       maxFeePerGas: String(fees.maxFeePerGas), maxPriorityFeePerGas: String(fees.maxPriorityFeePerGas),
-      ...Object.fromEntries((['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId', 'attemptId'] as const)
+      ...Object.fromEntries((['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId', 'attemptId', 'pinnedCommitment'] as const)
         .filter(field => oldIntent[field] !== undefined).map(field => [field, oldIntent[field]])) });
   }
   let bytes: SignedBytes;

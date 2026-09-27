@@ -344,6 +344,7 @@ export interface VerificationSummary {
   reasons: string[];
   failedProofs: { name: string; method: ProofMethod }[];
   bindingChecks: { name: ResourceId; functionName: string; observed: BindingObservation; actual: JsonValue; error?: string }[];
+  creation?: { method: 'replay' | 'pinned-runtime'; parentCodeHash: Hash; createdCode?: import('../verification/types.ts').PinnedChildEvidence[] };
 }
 
 /**
@@ -353,6 +354,7 @@ export interface VerificationSummary {
  */
 export interface IntentFields {
   phase: 'intent';
+  pinnedCommitment?: Hash;
   signer: Address;
   nonce: DecimalString;
   to: Address;

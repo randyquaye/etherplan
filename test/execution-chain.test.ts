@@ -12,6 +12,7 @@ import { estimateGasLimit } from '../src/execution/transactions.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan } from '../src/planning/index.ts';
 import { verifyResource } from '../src/verification/index.ts';
+import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../src/verification/limitations.ts';
 import { deployerA, deployerB, fixture, owner, outsider, startAnvil, TEST_KEYS } from './execution/chain.ts';
 
 const CHILD = fileURLToPath(new URL('./execution/apply-child.ts', import.meta.url));
@@ -145,6 +146,35 @@ describe('apply on a private automining chain', () => {
       if (record.phase === 'verified') await writeFile(ws.stateFile, JSON.stringify(changed));
     } } }), 'stale-state');
     assert.deepEqual(JSON.parse(await readFile(ws.stateFile, 'utf8')), changed);
+  });
+
+  test('a creation replay failure links to the operator recovery guide in the apply error', async () => {
+    for (const status of ['unverified', 'conflict']) {
+      const snapshot = await chain.rpc('evm_snapshot');
+      try {
+        const input = fixture({ withCall: false });
+        input.spec.contracts = input.spec.contracts.slice(0, 1);
+        input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
+        input.plan = await createPlan({ ...input, client: chain.client, signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+        const ws = await workspace();
+        const dependencies = { async verifyResource(resource, client, options) {
+          const result = await verifyResource(resource, client, options);
+          if (resource.id !== 'contract:alpha' || !options?.transactionHash) return result;
+          return { ...result, status, creationProof: undefined, missingProofs: [
+            ...result.missingProofs,
+            `Creation simulation at the receipt block failed: RPC request failed. See ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`,
+          ] };
+        } };
+        await assert.rejects(apply(input, ws, { dependencies }), error => {
+          assert.equal(error.code, 'postcondition');
+          assert.match(error.message, new RegExp(`Transaction .* succeeded, but the result is ${status}`));
+          assert.ok(error.message.includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL));
+          assert.ok(error.result.stoppedAt.message.includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL));
+          return true;
+        });
+        assert.equal(count(await journalOf(ws.journalFile), 'verified'), 0);
+      } finally { await chain.rpc('evm_revert', [snapshot]); }
+    }
   });
 
   test('a mined call with decoded secret-like fields is journaled and resumes', async t => {

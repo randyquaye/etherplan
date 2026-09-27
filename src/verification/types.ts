@@ -26,6 +26,7 @@ export type ProofMethod =
   | 'expected-code-hash'
   | 'create-transaction'
   | 'create2-transaction'
+  | 'pinned-runtime'
   | 'code-hash'
   | 'create2-simulation'
   | 'immutable-word';
@@ -110,7 +111,23 @@ interface CreationProofBase {
 /** Persisted creation facts, lowercase hex throughout. Never trusted without revalidation against the chain. */
 export type CreationProof =
   | (CreationProofBase & { kind: 'create' })
-  | (CreationProofBase & { kind: 'create2'; factory: Factory; salt: Hash });
+  | (CreationProofBase & { kind: 'create2'; factory: Factory; salt: Hash; method?: never })
+  | (CreationProofBase & { kind: 'create2'; factory: Factory; salt: Hash; method: 'pinned-runtime'; originPlanHash: Hash; intentCommitment: Hash; createdCode: PinnedCreatedCode[] });
+
+export interface PinnedCreatedCode {
+  getter: string;
+  createNonce: number;
+  address: Address;
+  codeHash: Hash;
+}
+
+export interface PinnedChildEvidence extends PinnedCreatedCode {
+  receiptCodeHash: Hash | null;
+  currentCodeHash: Hash | null;
+  receiptGetter: Address | null;
+  currentGetter: Address | null;
+  matched: boolean;
+}
 
 /** What verifyCreation returns. `proof` is present only when `status` is `verified`. */
 export interface CreationVerification {
@@ -124,6 +141,8 @@ export interface CreationVerification {
   initcodeHash: Hash | null;
   blockNumber: DecimalString | null;
   reasons: string[];
+  method?: 'pinned-runtime';
+  createdCode?: PinnedChildEvidence[];
   proof?: CreationProof;
 }
 
@@ -168,6 +187,8 @@ export interface VerifyOptions {
   /** Require the creation transaction to come from this signer. */
   expectedCreator?: Address;
   chain?: ChainIdentity;
+  /** Durable pre-sign journal history, required for pinned-runtime proofs. */
+  journalRecords?: readonly import('../recovery.ts').RecoveryRecord[];
 }
 
 export interface VerifyCreationOptions {
@@ -177,6 +198,7 @@ export interface VerifyCreationOptions {
   /** Current runtime, when the caller already read it. */
   liveCode?: Hex;
   expectedCreator?: Address;
+  journalRecords?: readonly import('../recovery.ts').RecoveryRecord[];
 }
 
 export interface SimulateCreate2Input {

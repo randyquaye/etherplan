@@ -6,6 +6,7 @@ import { ApplyError } from './errors.ts';
 import { transactionFor } from './shared.ts';
 import { decide, checkExecutionDependencies, finish } from './outcome.ts';
 import { append, fail } from './report.ts';
+import { assertPinnedAbsent, pinnedIntentFields } from '../verification/pinned-runtime.ts';
 import { assertSignerHistory, recordReceipt, send, signWithLease } from './settlement.ts';
 import type { Hash } from '../types.ts';
 import type { ScheduleEntry } from '../scheduling/types.ts';
@@ -68,8 +69,9 @@ export async function signBatch(ctx: ApplyContext, { wave, work }: SerialSigning
     if (nonce === undefined) throw new ApplyError('nonce-race', `Signer ${job.signer.address} has no reserved nonce.`, { actionId: item.planned.id });
     const envelope: TransactionEnvelope = { ...job.envelope, nonce };
     const attemptId = randomUUID();
+    if (item.resource.kind === 'contract') await assertPinnedAbsent(ctx.client, item.resource);
     await ctx.lock.assertHeld?.();
-    await append(ctx, item.planned.id, { phase: 'intent', attemptId, wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas), maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) });
+    await append(ctx, item.planned.id, { phase: 'intent', ...pinnedIntentFields(ctx.plan.planHash, item), attemptId, wave, signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled, nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas), maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) });
     let signed: SignedBytes;
     try {
       signed = await signWithLease(ctx, item.planned.id, job.signer, envelope);

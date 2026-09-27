@@ -3,7 +3,7 @@
 import { prepareResources, transactionFor } from '../planning/index.ts';
 import { graph, parseSpec } from '../spec/index.ts';
 import { readState, recordResource, writeStateAtomic } from '../state/index.ts';
-import { verifyResource } from '../verification/index.ts';
+import { verifyResourceForApply } from '../verification/index.ts';
 import type { ApplyDependencies } from './types.ts';
 
 export function loadDependencies(override: Partial<ApplyDependencies> = {}): ApplyDependencies {
@@ -12,7 +12,7 @@ export function loadDependencies(override: Partial<ApplyDependencies> = {}): App
     graph: override.graph ?? graph,
     prepareResources: override.prepareResources ?? prepareResources,
     transactionFor: override.transactionFor ?? transactionFor,
-    verifyResource: override.verifyResource ?? verifyResource,
+    verifyResource: override.verifyResource ?? verifyResourceForApply,
     readState: override.readState ?? readState,
     writeStateAtomic: override.writeStateAtomic ?? writeStateAtomic,
     recordResource: override.recordResource ?? recordResource,

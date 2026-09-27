@@ -7,6 +7,7 @@ import { prepareResources, transactionFor } from './resources.ts';
 import { createSchedule } from '../scheduling/index.ts';
 import { verifyResource } from '../verification/index.ts';
 import { recoveryProof } from '../recovery.ts';
+import { assertPinnedAbsent } from '../verification/pinned-runtime.ts';
 import type { Block } from 'viem';
 import type { ContractStateResource, StateFile } from '../state/types.ts';
 import type { Address, ChainIdentity, ContractId, DistributiveOmit, Hash, ResourceId } from '../types.ts';
@@ -44,7 +45,7 @@ function planResource(resource: PreparedResource, observation: PlanObservation, 
   };
   copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
-    copyDefined(result, resource, ['artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent']);
+    copyDefined(result, resource, ['artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']);
   } else if (resource.kind === 'external') {
     copyDefined(result, resource, ['expectedCodeHash', 'checks']);
     result.signerRole = null;
@@ -184,6 +185,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     if (transactionHash) options.transactionHash = transactionHash;
     if (saved?.creationProof || recovered) options.creationProof = saved?.creationProof ?? recovered!;
     options.chain = chain;
+    options.journalRecords = journalRecords;
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
     const observation: PlanObservation = stateComparison ? { ...verification, stateComparison } : verification;
@@ -191,10 +193,11 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
   }
   for (const node of executionOrder(ordered)) {
     const resource = lookup(resourceById, node.id);
-    const observed = lookup(observations, node.id);
-    const { verification, stateComparison } = observed;
-    let { observation } = observed;
+    const observedEntry = lookup(observations, node.id);
+    const { verification, stateComparison } = observedEntry;
+    let { observation } = observedEntry;
     let action: PlanAction = stateComparison?.conflict ? 'conflict' : decide(resource, verification, plannedById);
+    if (resource.kind === 'contract' && action === 'deploy') await assertPinnedAbsent(client, resource, observed.number);
     // A predicted CREATE2 address is not an adopted deployment merely because
     // its runtime matches. Another account can submit the same factory calldata
     // while giving constructor-dependent storage a different value.

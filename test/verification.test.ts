@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { concatHex, encodeDeployData, keccak256, pad } from 'viem';
 import { normalizeArtifact } from '../src/artifacts.ts';
 import { canonicalJson, hashJson } from '../src/identity.ts';
+import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../src/verification/limitations.ts';
 import {
   PROBE_ADDRESS,
   abiArguments,
@@ -343,6 +344,12 @@ test('direct CREATE and CREATE2 transactions are creation evidence only when the
   const different = mockClient({ codes, transactions, receipts, call: async () => ({ data: sampleCode(create2.address, { SELF: TWO }) }) });
   const replayDiffers = await verifyCreation(different, create2, '0xc2');
   assert.deepEqual([replayDiffers.status, replayDiffers.matched, replayDiffers.exactRuntime], ['unverified', true, false]);
+  assert.match(replayDiffers.reasons[0], /returned different runtime code/);
+  assert.ok(replayDiffers.reasons[0].includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL));
+
+  const failedReplay = await verifyCreation(mockClient({ codes, transactions, receipts, call: async () => { throw new Error('reverted'); } }), create2, '0xc2');
+  assert.equal(failedReplay.status, 'unverified');
+  assert.ok(failedReplay.reasons[0].includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL));
 });
 
 test('verification results are plain JSON and deterministic', async () => {

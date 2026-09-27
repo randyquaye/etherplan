@@ -21,6 +21,11 @@ export function summarizeVerification(verification: VerificationResult): Verific
     reasons: verification.reasons,
     failedProofs: (verification.proofs ?? []).filter(proof => !proof.matched).map(({ name, method }) => ({ name, method })),
     bindingChecks: (verification.bindingChecks ?? []).map(({ name, functionName, observed, actual, error }) => ({ name, functionName, observed, actual, error })),
+    ...(verification.creationProof ? { creation: {
+      method: verification.creationProof.kind === 'create2' && verification.creationProof.method === 'pinned-runtime' ? 'pinned-runtime' : 'replay',
+      parentCodeHash: verification.creationProof.codeHash,
+      ...(verification.evidence?.creation?.createdCode ? { createdCode: verification.evidence.creation.createdCode } : {}),
+    } } : {}),
   });
 }
 

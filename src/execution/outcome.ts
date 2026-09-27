@@ -5,6 +5,8 @@ import { findReceipt } from './transactions.ts';
 import { ApplyError } from './errors.ts';
 import { pause } from './shared.ts';
 import { recoveryProof, sameRecoveryProof } from '../recovery.ts';
+import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../verification/limitations.ts';
+import { assertPinnedAbsent, pinnedJournalCommitment } from '../verification/pinned-runtime.ts';
 import { append, fail, summarizeVerification } from './report.ts';
 import type { Hash, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
@@ -21,7 +23,8 @@ export async function verify(ctx: ApplyContext, item: PreparedAction, options: i
   // An explicit journal proof must be checked even if its hash disagrees with
   // the record. A proof from previous state may belong to a replaced address.
   const creationProof = options.creationProof ?? (saved && (!transactionHash || saved.transactionHash.toLowerCase() === transactionHash.toLowerCase()) ? saved : undefined);
-  return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
+  return ctx.deps.verifyResource(item.resource, ctx.client, { ...options, chain: ctx.plan.chain, journalRecords: ctx.journal.records,
+    ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) });
 }
 
 export async function markVerified(ctx: ApplyContext, item: PreparedAction, verification: VerificationResult, fields: Pick<VerifiedFields, 'outcome'> & Partial<Pick<VerifiedFields, 'transactionHash' | 'blockNumber' | 'revertedTransaction' | 'unsentTransaction'>>): Promise<void> {
@@ -39,7 +42,10 @@ export async function precondition(ctx: ApplyContext, item: PreparedAction): Pro
     if (!planned.factory) throw new ApplyError('plan-format', `Action ${planned.id} has no CREATE2 factory.`, { actionId: planned.id });
     await checkFactory(ctx.client, planned.factory);
     const code = await ctx.client.getCode({ address: planned.address });
-    if (!code || code === '0x') return { satisfied: false };
+    if (!code || code === '0x') {
+      await assertPinnedAbsent(ctx.client, item.resource as import('../planning/types.ts').PreparedContract);
+      return { satisfied: false };
+    }
     return fail(ctx, item, 'conflict', 'The planned CREATE2 address acquired code without this plan settling a successful deployment transaction. Review and import it explicitly if it is intended.', { evidence: { status: 'conflict', address: planned.address } });
   }
   const verification = await verify(ctx, item);
@@ -136,12 +142,24 @@ export async function finish(ctx: ApplyContext, item: PreparedAction, signed: Si
   ctx.timings.verificationMs += Date.now() - verificationStart;
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
   if (verification.status !== 'verified') {
-    await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.`, { transactionHash, evidence: summarizeVerification(verification) });
+    const replayHelp = item.planned.action === 'deploy' &&
+      verification.missingProofs.some(reason => reason.includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL))
+      ? ` See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}` : '';
+    await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.${replayHelp}`, { transactionHash, evidence: summarizeVerification(verification) });
   }
   if (item.planned.action === 'deploy' &&
     (verification.creationProof?.kind !== 'create2' || verification.creationProof.transactionHash.toLowerCase() !== transactionHash.toLowerCase() ||
       verification.creationProof.creator.toLowerCase() !== signed.signer.toLowerCase())) {
     return fail(ctx, item, 'postcondition', 'Deployment verification has no creation proof from the planned signer.', { transactionHash, evidence: summarizeVerification(verification) });
+  }
+  if (item.resource.kind === 'contract' && item.resource.creationProofMode === 'pinned-runtime') {
+    const proof = verification.creationProof;
+    const commitment = pinnedJournalCommitment(ctx.journal.records, item.resource, transactionHash, ctx.plan.planHash, signed.signer,
+      { blockHash: receipt.blockHash, blockNumber: receipt.blockNumber }, ctx.plan.chain);
+    if (proof?.kind !== 'create2' || proof.method !== 'pinned-runtime' || !commitment ||
+      lower(proof.originPlanHash) !== lower(ctx.plan.planHash) || lower(proof.intentCommitment) !== lower(commitment.commitment)) {
+      return fail(ctx, item, 'postcondition', 'Deployment verification lacks this plan’s pre-sign pinned-runtime commitment.', { transactionHash, evidence: summarizeVerification(verification) });
+    }
   }
   await markVerified(ctx, item, verification, { outcome: 'applied', transactionHash, blockNumber: String(receipt.blockNumber) });
 }
