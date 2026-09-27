@@ -23,6 +23,7 @@ export const COMMANDS = {
   verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend', ...INPUTS] },
   schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
   import: { description: 'Record a verified existing contract in local state.', options: ['spec', 'state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
+  output: { description: 'Print recorded contract and external addresses as JSON.', options: ['spec', 'state', 'backend', 'id', 'workspace'] },
   adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['spec', 'out', ...INPUTS] },
   status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
 };
@@ -35,7 +36,7 @@ const OPTION_HELP = {
   journal: 'Journal file (default: <state-file>.journal.jsonl)',
   backend: 'Production backend config file',
   'signer-module': 'Signer module for plan or apply',
-  id: 'Contract resource ID, for example contract:registry',
+  id: 'Resource ID, for example contract:registry',
   'creation-tx': 'Creation transaction hash used as import proof',
   rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
   deployers: 'Comma-separated deployer addresses',
@@ -68,7 +69,7 @@ export function usage(command?: CommandName): string {
         : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
           : OPTION_HELP[name];
   const environment = ['plan', 'apply', 'verify', 'schedule', 'import'].includes(command)
-    ? '\n\nRequires ETH_RPC_URL.' : '';
+    ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
     ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
   return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
@@ -110,6 +111,9 @@ export function validateOptions(command: CommandName, options: CliOptions): void
   }
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
+  }
+  if (command === 'output' && options.id && !/^(contract|external):[a-z][a-zA-Z0-9_]*$/.test(options.id)) {
+    throw new UsageError('output --id needs contract:<name> or external:<name>.');
   }
 }
 

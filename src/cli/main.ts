@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile } from 'node:fs/promises';
+import path from 'node:path';
 import { isRpcError, safeRpcMessage } from '../execution/rpc-error.ts';
 import { ApplyError } from '../execution/errors.ts';
 import { loadArtifacts } from '../artifacts.ts';
@@ -11,6 +12,7 @@ import { compile } from './commands/compile.ts';
 import { graphCommand } from './commands/graph.ts';
 import { impact } from './commands/impact.ts';
 import { importCommand } from './commands/import.ts';
+import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
 import { status } from './commands/status.ts';
@@ -29,6 +31,10 @@ function variableReport(variables: VariableValue[]): string {
 async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
+  if (command === 'output' && !options.spec && (options.state || options.backend)) {
+    const workspace = selectWorkspace(options.workspace);
+    return output(options, path.resolve(options.state ?? path.join('.etherplan', workspace, 'state.json')));
+  }
   const specFile = await findSpecFile(options.spec);
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
@@ -42,6 +48,10 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
     if (merged.configured.includes(name) && configured && configured !== '-') options[name] = inWorkspace(configured, workspace);
   }
   if (workspace !== DEFAULT_WORKSPACE) process.stderr.write(`Using workspace ${workspace}.\n`);
+  if (command === 'output') {
+    await access(specFile);
+    return output(options, stateFileFor(specFile, options, workspace));
+  }
   const { spec, variables } = await loadProject(specFile, { workspace, varFiles: options['var-file'] ?? [], vars: options.var ?? [], env: process.env });
   if (variables.length) process.stderr.write(variableReport(variables));
   const ordered = graph(spec);
