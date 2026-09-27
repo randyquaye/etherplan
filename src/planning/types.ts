@@ -14,6 +14,13 @@ export type PreparedCheck = {
   expected: JsonValue;
 };
 
+export interface PreparedCreatedCode {
+  getter: string;
+  createNonce: number;
+  address: Address;
+  codeHash: Hash;
+}
+
 export type PreparedCallCheck = {
   functionName: string;
   args: JsonValue[];
@@ -59,6 +66,8 @@ export interface PreparedContract extends PreparedBase {
   /** Present only when nonempty. */
   libraries?: Record<string, Address>;
   expectedCodeHash?: Hash;
+  creationProofMode?: 'pinned-runtime';
+  createdCode?: PreparedCreatedCode[];
   /** The next four are present together, for a CREATE2 deployment; absent for an imported address. */
   initcode?: Hex;
   initcodeHash?: Hash;
@@ -168,6 +177,8 @@ export interface PlannedContract extends PlannedBase {
   checks: PreparedCheck[];
   libraries?: Record<string, Address>;
   expectedCodeHash?: Hash;
+  creationProofMode?: 'pinned-runtime';
+  createdCode?: PreparedCreatedCode[];
   signerRole: string;
   senderIndependent: boolean;
 }

@@ -24,6 +24,12 @@ export type SpecValue = JsonPrimitive | SpecValue[] | SpecObject;
 /** Getter name to expected value. Names are validated as nonempty strings only. */
 export type SpecChecks = Record<string, SpecValue>;
 
+export interface SpecCreatedCode {
+  getter: string;
+  createNonce: number;
+  codeHash: Hash;
+}
+
 export interface SpecContract {
   id: string;
   /** Path ending in `.json`, relative to the spec file. */
@@ -40,6 +46,8 @@ export interface SpecContract {
   checks?: SpecChecks;
   after?: ResourceId[];
   codeHash?: Hash;
+  creationProofMode?: 'pinned-runtime';
+  createdCode?: SpecCreatedCode[];
   /** Matches `/^[a-z][a-z0-9_-]*$/`; the scheduler has lanes only for `deployer` and `owner`. */
   signerRole?: string;
   senderIndependent?: boolean;

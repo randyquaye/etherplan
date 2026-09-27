@@ -35,7 +35,7 @@ export async function planFor(command: 'plan' | 'verify' | 'schedule', { options
     const signers = command === 'plan' && !pipeline && deployers ? {
       deployers, owner, parallel: options.parallel ?? false,
     } : null;
-    const journalRecords = command === 'plan' ? await planningJournal(stateFile, options, backend) : [];
+    const journalRecords = await planningJournal(stateFile, options, backend);
     plan = await createPlan({ spec, artifacts, client, state, journalRecords, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
   }
   return { plan, backend };

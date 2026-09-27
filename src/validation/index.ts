@@ -114,6 +114,11 @@ export function validateResources(resources: PreparedResource[]): PreparedResour
         encodeConstructor(artifact, resource.inputs, resource.libraries ?? {}, resource.id);
       }
       for (const check of resource.checks ?? []) validateCheck(artifact.abi, check, `${resource.id} check ${check.functionName}`);
+      for (const child of resource.createdCode ?? []) {
+        const fn = abiFunction(artifact.abi, child.getter, 0, `${resource.id} createdCode`);
+        assert(['view', 'pure'].includes(fn.stateMutability) && fn.outputs?.length === 1 && fn.outputs[0]?.type === 'address',
+          `${resource.id} createdCode getter ${child.getter} must be view or pure with one address output.`);
+      }
     } else if (resource.kind === 'external') {
       if (resource.abi !== undefined) assertAbi(resource.abi, resource.id);
       for (const check of resource.checks ?? []) validateCheck(resource.abi, check, `${resource.id} check ${check.functionName}`);

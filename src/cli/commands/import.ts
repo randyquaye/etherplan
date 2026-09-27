@@ -8,6 +8,7 @@ import type { ChainIdentity, Client, ResourceId } from '../../types.ts';
 import type { VerificationResult } from '../../verification/types.ts';
 import type { CliOptions } from '../options.ts';
 import { print } from '../shared.ts';
+import { planningJournal } from '../environment.ts';
 import type { ChainCommandContext } from './context.ts';
 
 async function importOne({ spec, ordered, artifacts, client, options, stateFile }: {
@@ -27,6 +28,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
     if (!genesis.hash || !observed.hash || observed.number === null) throw new Error('Chain block is missing its hash or number.');
     const chain: ChainIdentity = { id: chainId, genesisHash: genesis.hash };
     const current = await readState(stateFile);
+    const journalRecords = await planningJournal(stateFile, options);
     const checked = new Map<ResourceId, VerificationResult>();
     async function verifyDependency(id: ResourceId): Promise<VerificationResult> {
       const previous = checked.get(id);
@@ -37,6 +39,7 @@ async function importOne({ spec, ordered, artifacts, client, options, stateFile 
       const verification = await verifyResource(resource, client, {
         blockNumber: observed.number,
         chain,
+        journalRecords,
         ...(current?.resources?.[id]?.creationProof ? { creationProof: current.resources[id].creationProof } : {}),
         ...(id === options.id && options['creation-tx'] ? { transactionHash: options['creation-tx'] } :
           current?.resources?.[id]?.provenance?.creationTransactionHash ? { transactionHash: current.resources[id].provenance.creationTransactionHash } : {}),

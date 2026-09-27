@@ -214,7 +214,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
   const ids = new Set<string>();
   for (const item of spec.contracts) {
     assert(isObject(item), 'Every contract must be an object.');
-    assertKeys(item, new Set(['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'signerRole', 'senderIndependent']), `Contract ${item.id ?? '<unknown>'}`);
+    assertKeys(item, new Set(['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']), `Contract ${item.id ?? '<unknown>'}`);
     assertId(item.id, 'Contract ID');
     const fullId = `contract:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
@@ -231,6 +231,27 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.checks !== undefined) assertChecks(item.checks, `${fullId} checks`);
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.codeHash !== undefined) assertHash(item.codeHash, `${fullId} codeHash`);
+    assert(item.creationProofMode === undefined || item.creationProofMode === 'pinned-runtime', `${fullId} creationProofMode must be pinned-runtime.`);
+    if (item.creationProofMode === 'pinned-runtime') {
+      assert(item.salt !== undefined && item.address === undefined, `${fullId} pinned-runtime requires a CREATE2 deployment.`);
+      assert(item.codeHash !== undefined, `${fullId} pinned-runtime requires a parent codeHash.`);
+      assert(Array.isArray(item.createdCode) && item.createdCode.length > 0, `${fullId} pinned-runtime requires createdCode.`);
+    } else assert(item.createdCode === undefined, `${fullId} createdCode requires pinned-runtime mode.`);
+    if (item.createdCode !== undefined) {
+      assert(Array.isArray(item.createdCode), `${fullId} createdCode must be an array.`);
+      const getters = new Set<string>();
+      const nonces = new Set<number>();
+      for (const child of item.createdCode) {
+        assert(isObject(child), `${fullId} createdCode entry must be an object.`);
+        assertKeys(child, new Set(['getter', 'createNonce', 'codeHash']), `${fullId} createdCode entry`);
+        assert(typeof child.getter === 'string' && child.getter.length > 0, `${fullId} createdCode getter is invalid.`);
+        assert(typeof child.createNonce === 'number' && Number.isSafeInteger(child.createNonce) && child.createNonce > 0, `${fullId} createdCode createNonce must be a positive safe integer.`);
+        assertHash(child.codeHash, `${fullId} createdCode codeHash`);
+        assert(!getters.has(child.getter) && !nonces.has(child.createNonce), `${fullId} createdCode has a duplicate getter or CREATE nonce.`);
+        getters.add(child.getter);
+        nonces.add(child.createNonce);
+      }
+    }
     if (item.signerRole !== undefined) assert(typeof item.signerRole === 'string' && ROLE.test(item.signerRole), `${fullId} signerRole is invalid.`);
     if (item.senderIndependent !== undefined) assert(typeof item.senderIndependent === 'boolean', `${fullId} senderIndependent must be boolean.`);
   }
@@ -265,6 +286,9 @@ export function parseSpec(raw: unknown): ParsedSpec {
     assertKeys(spec.factory, new Set(['address', 'codeHash']), 'Factory');
     assert(typeof spec.factory.address === 'string' && isAddress(spec.factory.address), 'Factory needs an address.');
     assertHash(spec.factory.codeHash, 'Factory codeHash');
+    assert(!spec.contracts.some(item => isObject(item) && item.creationProofMode === 'pinned-runtime') ||
+      (spec.factory.address.toLowerCase() === DEFAULT_FACTORY.address.toLowerCase() && spec.factory.codeHash.toLowerCase() === DEFAULT_FACTORY.codeHash.toLowerCase()),
+    'Pinned-runtime requires the bundled atomic CREATE2 factory.');
   } else {
     assert(spec.factory === undefined, 'Factory is allowed only when a contract uses CREATE2.');
   }

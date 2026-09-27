@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { keccak256 } from 'viem';
 import { findKnownReceipt, nonceConsumed, broadcast, validateSignedTransaction, waitForReceipt } from './transactions.ts';
 import { intentForSigned, signedVariants } from './journal.ts';
+import { assertPinnedAbsent, assertPinnedSignedIntent, pinnedCommitment, pinnedIntentFields } from '../verification/pinned-runtime.ts';
 import { ApplyError } from './errors.ts';
 import { safeExternalError } from './rpc-error.ts';
 import { transactionFor, pause } from './shared.ts';
@@ -84,6 +85,10 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       !/^[0-9]+$/.test(String(intent.maxFeePerGas)) || !/^[0-9]+$/.test(String(intent.maxPriorityFeePerGas)) ||
       !Number.isSafeInteger(Number(intent.nonce)) ||
       !intent.reservationId) throw new ApplyError('journal', `Wave ${wave.wave} has an invalid intent for ${entry.id}.`, { actionId: entry.id });
+    if (item.resource.kind === 'contract' && item.resource.creationProofMode === 'pinned-runtime' &&
+      intent.pinnedCommitment?.toLowerCase() !== pinnedCommitment(ctx.plan.planHash, item.resource).toLowerCase()) {
+      throw new ApplyError('journal', `Wave ${wave.wave} has no matching pinned-runtime intent for ${entry.id}.`, { actionId: entry.id });
+    }
     const group = groups.get(entry.signer) ?? [];
     if (group.length && (intent.reservationId !== group[0]!.intent.reservationId ||
       BigInt(intent.nonce) !== BigInt(group[0]!.intent.nonce) + BigInt(entry.nonceOffset))) {
@@ -179,13 +184,14 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address), activeSignatures);
   for (const job of jobs.filter(entry => !entry.signed)) {
     const { intent, item, signer } = job;
+    if (item.resource.kind === 'contract') await assertPinnedAbsent(ctx.client, item.resource);
     const tx = transactionFor(item);
     const envelope: TransactionEnvelope = { chainId: ctx.plan.chain.id, to: tx.to, data: tx.data, value: BigInt(intent.value),
       gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
     let signed: SignedBytes;
     try { signed = await signWithLease(ctx, item.planned.id, signer, envelope); }
     catch (error) { throw new ApplyError('signer', safeExternalError(error), { actionId: item.planned.id, retryable: true }); }
-    const signedRecord = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId!, attemptId), phase: 'signed', ...signed });
+    const signedRecord = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer, item }, wave.wave, intent.reservationId!, attemptId, ctx.plan.planHash), phase: 'signed', ...signed });
     job.signed = signedRecord;
     job.signedIntent = intent;
     job.variants = [signedRecord];
@@ -206,10 +212,10 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   return true;
 }
 
-function intentFields(job: { envelope: CostEnvelope; entry: ScheduleEntry; signer: SignerAccount }, wave: number, reservationId: string, waveAttemptId: string | null = null): import('./types.ts').IntentFields {
+function intentFields(job: { envelope: CostEnvelope; entry: ScheduleEntry; signer: SignerAccount; item: PreparedAction }, wave: number, reservationId: string, waveAttemptId: string | null = null, planHash?: Hash): import('./types.ts').IntentFields {
   const { envelope, entry } = job;
   if (envelope.nonce === undefined) throw new ApplyError('nonce-conflict', `Signer ${job.signer.address} has no reserved pipeline nonce.`, { actionId: entry.id });
-  return { phase: 'intent', wave, reservationId, ...(waveAttemptId ? { waveAttemptId } : {}), signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled,
+  return { phase: 'intent', ...(planHash ? pinnedIntentFields(planHash, job.item) : {}), wave, reservationId, ...(waveAttemptId ? { waveAttemptId } : {}), signer: job.signer.address, signerRole: entry.signerRole, pooled: entry.pooled,
     ...(entry.nonceOffset === undefined ? {} : { nonceOffset: entry.nonceOffset }), nonce: String(envelope.nonce), to: envelope.to, value: String(envelope.value),
     dataHash: keccak256(envelope.data), gas: String(envelope.gas), maxFeePerGas: String(envelope.maxFeePerGas),
     maxPriorityFeePerGas: String(envelope.maxPriorityFeePerGas) };
@@ -247,17 +253,21 @@ export async function signPipelineBatch(ctx: ApplyContext, { wave, work }: Pipel
   const intents = new Map<FundedJob, IntentRecord>();
   for (const jobs of groups.values()) {
     const reservationId = randomUUID();
-    for (const job of jobs) intents.set(job, await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId, waveAttemptId)));
+    for (const job of jobs) {
+      if (job.item.resource.kind === 'contract') await assertPinnedAbsent(ctx.client, job.item.resource);
+      intents.set(job, await append(ctx, job.item.planned.id, intentFields(job, wave, reservationId, waveAttemptId, ctx.plan.planHash)));
+    }
   }
   // The lock remains held and no broadcast starts until every signed record is synced.
   const signedWork: PipelineBatchJob[] = [];
   for (const job of work) {
     const intent = intents.get(job);
     if (!intent?.reservationId || job.envelope.nonce === undefined) throw new ApplyError('journal', `Wave ${wave} has no durable intent for ${job.item.planned.id}.`, { actionId: job.item.planned.id });
+    if (job.item.resource.kind === 'contract') await assertPinnedAbsent(ctx.client, job.item.resource);
     let signed: SignedBytes;
     try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, { ...job.envelope, nonce: job.envelope.nonce }); }
     catch (error) { throw new ApplyError('signer', safeExternalError(error), { actionId: job.item.planned.id, retryable: true }); }
-    const signedRecord = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
+    const signedRecord = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, intent.reservationId, waveAttemptId, ctx.plan.planHash), phase: 'signed', ...signed });
     signedWork.push({ ...job, intent, signedIntent: intent, signed: signedRecord, variants: [signedRecord] });
     const signer = job.signer.address.toLowerCase();
     ctx.sent.push({ actionId: job.item.planned.id, wave, signer, nonce: String(job.envelope.nonce), transactionHash: signed.transactionHash.toLowerCase() as Hash });
@@ -341,6 +351,7 @@ export async function settlePipelineBatch(ctx: ApplyContext, work: ActivePipelin
   for (const job of work) {
     try { await validateSignedTransaction(job.signed, job.signedIntent ?? job.intent, job.item.planned, ctx.plan.chain.id); }
     catch (error) { throw new ApplyError('journal', `${job.item.planned.id}: ${error instanceof Error ? error.message : String(error)}`, { actionId: job.item.planned.id }); }
+    assertPinnedSignedIntent(ctx.journal.records, ctx.plan.planHash, job.item, job.signed);
   }
   const submitStart = Date.now();
   // Reconcile the complete group first. Then initiate all raw requests in plan

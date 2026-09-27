@@ -11,7 +11,7 @@ import type { VariableInputs, VariableValue } from './variables.ts';
 import type { CommandOptions, CompiledConfig, CompiledSpec, ConfigOptionName, ConfigOptions, HclAttribute, HclBlock, HclBody, HclDocument, HclExpression, Located } from './types.ts';
 
 type ResourceType = 'contract' | 'external' | 'call' | 'check';
-type DecoderKind = 'constant' | 'value' | 'target' | 'after';
+type DecoderKind = 'constant' | 'value' | 'target' | 'after' | 'creationMode' | 'createdCode';
 type FieldMap = Record<string, readonly [string, DecoderKind]>;
 type Decoder = (node: HclExpression, name: string) => JsonValue;
 type DraftResource = Record<string, JsonValue | undefined> & {
@@ -39,6 +39,8 @@ const CONTRACT_FIELDS: FieldMap = {
   libraries: ['libraries', 'value'],
   after: ['after', 'after'],
   code_hash: ['codeHash', 'constant'],
+  creation_proof_mode: ['creationProofMode', 'creationMode'],
+  created_code: ['createdCode', 'createdCode'],
   signer_role: ['signerRole', 'constant'],
   sender_independent: ['senderIndependent', 'constant'],
 };
@@ -58,7 +60,7 @@ const CALL_FIELDS: FieldMap = {
 };
 const FACTORY_FIELDS: FieldMap = { address: ['address', 'constant'], code_hash: ['codeHash', 'constant'] };
 // JSON field order for readable compile output. Key order does not affect spec hashes.
-const CONTRACT_ORDER = ['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'signerRole', 'senderIndependent'];
+const CONTRACT_ORDER = ['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent'];
 const EXTERNAL_ORDER = ['address', 'codeHash', 'abi', 'checks'];
 const CALL_ORDER = ['id', 'target', 'method', 'args', 'check', 'before', 'after', 'signerRole', 'ownerOnly', 'transfersOwnership'];
 const TOP_ATTRIBUTES = new Set(['chain_id', 'dependency_mode', 'execution_assumptions']);
@@ -325,6 +327,24 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
   const decoders: Record<DecoderKind, Decoder> = {
     constant: (node, name) => evaluator.constant(node, name),
     value: (node, name) => evaluator.value(node, name),
+    creationMode: (node, name) => {
+      const mode = evaluator.constant(node, name);
+      if (mode === null) return null;
+      assert(mode === 'pinned_runtime', node, `${name} must be pinned_runtime.`);
+      return 'pinned-runtime';
+    },
+    createdCode: (node, name) => {
+      const entries = evaluator.constant(node, name);
+      if (entries === null) return null;
+      assert(Array.isArray(entries), node, `${name} must be a list of objects.`);
+      return entries.map((entry, index) => {
+        const location = node.kind === 'list' ? node.items[index] ?? node : node;
+        assert(entry !== null && typeof entry === 'object' && !Array.isArray(entry), location, `${name} entries must be objects.`);
+        for (const key of Object.keys(entry)) assert(['getter', 'create_nonce', 'code_hash'].includes(key), location, `${name} has unknown field ${key}.`);
+        assert(['getter', 'create_nonce', 'code_hash'].every(key => Object.hasOwn(entry, key)), location, `${name} entries need getter, create_nonce, and code_hash.`);
+        return { getter: entry.getter!, createNonce: entry.create_nonce!, codeHash: entry.code_hash! };
+      });
+    },
     target: (node, name) => evaluator.resource(node, name, ['contracts']).name,
     after: (node, name) => evaluator.resources(node, name, ['contracts', 'externals', 'calls']).map(target => target.id),
   };

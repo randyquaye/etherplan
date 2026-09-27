@@ -1,4 +1,4 @@
-import { concatHex, isAddress, keccak256 } from 'viem';
+import { concatHex, getContractAddress, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
@@ -84,6 +84,15 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
   };
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
+  if (item.creationProofMode === 'pinned-runtime') {
+    resource.creationProofMode = item.creationProofMode;
+    resource.createdCode = item.createdCode!.map(child => ({
+      getter: child.getter,
+      createNonce: child.createNonce,
+      address: getContractAddress({ from: address as Address, nonce: BigInt(child.createNonce) }).toLowerCase() as Address,
+      codeHash: child.codeHash,
+    }));
+  }
   if (deployment !== undefined) {
     resource.initcode = deployment.initcode;
     resource.initcodeHash = keccak256(deployment.initcode);

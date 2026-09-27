@@ -22,7 +22,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function validateCreationProof(proof: unknown, label = 'Creation proof'): CreationProof {
   assert(isRecord(proof), `${label} must be an object.`);
   const create2 = proof.kind === 'create2';
-  const keys = ['chain', 'transactionHash', 'creator', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : [])];
+  const pinned = create2 && proof.method === 'pinned-runtime';
+  const keys = ['chain', 'transactionHash', 'creator', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : []), ...(pinned ? ['method', 'originPlanHash', 'intentCommitment', 'createdCode'] : [])];
   assert((proof.kind === 'create' || create2) && Object.keys(proof).length === keys.length && keys.every(key => Object.hasOwn(proof, key)), `${label} has invalid fields.`);
   const chain = proof.chain;
   assert(isRecord(chain) && Object.keys(chain).length === 2 &&
@@ -37,6 +38,20 @@ export function validateCreationProof(proof: unknown, label = 'Creation proof'):
       typeof factory.address === 'string' && isAddress(factory.address) && isHash(factory.codeHash), `${label} has invalid factory.`);
     assert(isHash(proof.salt), `${label} has invalid salt.`);
   }
+  if (pinned) {
+    assert(isHash(proof.originPlanHash) && isHash(proof.intentCommitment), `${label} has invalid pinned commitment.`);
+    assert(Array.isArray(proof.createdCode) && proof.createdCode.length > 0, `${label} needs createdCode.`);
+    const getters = new Set<string>();
+    const addresses = new Set<string>();
+    for (const child of proof.createdCode) {
+      assert(isRecord(child) && Object.keys(child).length === 4 && ['getter', 'createNonce', 'address', 'codeHash'].every(key => Object.hasOwn(child, key)), `${label} has invalid child fields.`);
+      assert(typeof child.getter === 'string' && child.getter.length > 0 && typeof child.createNonce === 'number' &&
+        Number.isSafeInteger(child.createNonce) && child.createNonce > 0 && typeof child.address === 'string' && isAddress(child.address) && isHash(child.codeHash), `${label} has invalid child commitment.`);
+      assert(!getters.has(child.getter) && !addresses.has(child.address.toLowerCase()), `${label} has duplicate children.`);
+      getters.add(child.getter);
+      addresses.add(child.address.toLowerCase());
+    }
+  }
   return proof as unknown as CreationProof;
 }
 
@@ -49,4 +64,9 @@ export function validateJournalCreationProof(record: JournalRecord | StoredJourn
   assert(proof.chain.id === record.chain.id && proof.chain.genesisHash.toLowerCase() === record.chain.genesisHash.toLowerCase() &&
     proof.address.toLowerCase() === record.address.toLowerCase() && proof.codeHash.toLowerCase() === record.codeHash?.toLowerCase(),
   `${label} creationProof differs from verified deployment.`);
+  if (proof.kind === 'create2' && proof.method === 'pinned-runtime' && record.outcome === 'applied') {
+    assert(proof.originPlanHash.toLowerCase() === record.planHash.toLowerCase() &&
+      proof.transactionHash.toLowerCase() === record.transactionHash?.toLowerCase(),
+    `${label} pinned creationProof differs from the originating plan or transaction.`);
+  }
 }

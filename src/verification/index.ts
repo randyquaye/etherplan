@@ -5,16 +5,25 @@ import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts
 import { abiFunction } from '../validation/index.ts';
 import { DEFAULT_FACTORY } from '../spec/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
+import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from './limitations.ts';
+import { pinnedChildAddress, pinnedJournalCommitment, samePinnedCommitments } from './pinned-runtime.ts';
 import type { AbiFunction } from 'viem';
 import type { NormalizedArtifact, NamedImmutable } from '../artifacts/types.ts';
 import type { DeployableContract, PreparedCall, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource } from '../planning/types.ts';
 import type { Address, Client, Hash, Hex, JsonValue } from '../types.ts';
-import type { BindingCheck, CreationEvidence, CreationProof, CreationVerification, Proof, ProofMethod, RuntimeComparison, RuntimeDifference, SimulationEvidence, VerificationEvidence, VerificationResult, VerificationStatus, VerifyCreationOptions, VerifyOptions } from './types.ts';
+import type { BindingCheck, CreationEvidence, CreationProof, CreationVerification, PinnedChildEvidence, Proof, ProofMethod, RuntimeComparison, RuntimeDifference, SimulationEvidence, VerificationEvidence, VerificationResult, VerificationStatus, VerifyCreationOptions, VerifyOptions } from './types.ts';
 
 export { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, linkBytecode, linkedLibraries, linkPlaceholder, normalizeCode } from './bytecode.ts';
 export { cidV0, decodeMetadataTail, ipfsMetadataHash } from './metadata.ts';
 export { PROBE_ADDRESS, PROBE_CODE, simulateCreate, simulateCreate2 } from './simulate.ts';
 export { abiArguments, normalizeAbiValue, normalizeOutputs, safeError } from './values.ts';
+
+const PINNED_MINT = Symbol('pinned-runtime apply mint');
+
+/** Internal apply entry point. A public verification call can revalidate a saved pin but cannot mint one. */
+export async function verifyResourceForApply(resource: PreparedResource, client: Client, options: VerifyOptions = {}): Promise<VerificationResult> {
+  return verifyResource(resource, client, { ...options, [PINNED_MINT]: true } as VerifyOptions);
+}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -147,7 +156,7 @@ function immutableLabel(info: NamedImmutable | undefined, id: string): string {
 
 async function creationEvidence(result: VerificationResult, resource: PreparedContract, client: Client, transactionHash: Hash, options: VerifyOptions, code: Hex): Promise<ProofMethod | null> {
   const creation = await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
-  const method = creation.kind === 'create2' ? 'create2-transaction' : 'create-transaction';
+  const method = creation.method === 'pinned-runtime' ? 'pinned-runtime' : creation.kind === 'create2' ? 'create2-transaction' : 'create-transaction';
   result.proofs.push({ name: 'creation', method, expected: creation.initcodeHash ?? null, actual: transactionHash, matched: creation.status === 'verified' });
   const { proof, ...evidence }: CreationEvidence & { proof?: CreationProof } = creation;
   if (result.evidence) result.evidence.creation = evidence;
@@ -490,6 +499,16 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.reasons.push('The CREATE2 factory does not have the bundled atomic bytecode, so a successful call cannot prove this signer created the contract.');
     return result;
   }
+  const pinned = resource.creationProofMode === 'pinned-runtime';
+  if (pinned && (kind !== 'create2' || lower(resource.factory?.address) !== lower(DEFAULT_FACTORY.address) ||
+    lower(resource.factory?.codeHash) !== lower(DEFAULT_FACTORY.codeHash))) {
+    result.reasons.push('Pinned-runtime requires a deployment through the bundled atomic CREATE2 factory.');
+    return result;
+  }
+  if (saved && ((saved.kind === 'create2' && saved.method === 'pinned-runtime') !== pinned)) {
+    result.reasons.push('Saved creation proof method differs from the resource proof mode.');
+    return result;
+  }
   assert(chain.genesisHash && result.blockNumber && result.initcodeHash && result.codeHash, 'Creation proof is missing chain or runtime identity.');
   const base = {
     chain: { id: chain.id, genesisHash: lower(chain.genesisHash) }, transactionHash: lower(transactionHash), creator: lower(transaction.from),
@@ -508,13 +527,13 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     let receiptFactory;
     try {
       currentFactory = await client.getCode({ address: factory.address, ...at(blockOf(options.blockNumber)) });
-      if (!saved) receiptFactory = await client.getCode({ address: factory.address, blockNumber: receipt.blockNumber });
+      if (!saved || pinned) receiptFactory = await client.getCode({ address: factory.address, blockNumber: receipt.blockNumber });
     } catch (error) {
       result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
       return result;
     }
     if (!hasCode(currentFactory) || keccak256(currentFactory) !== (proof as Extract<CreationProof, { kind: 'create2' }>).factory.codeHash ||
-      (!saved && (!hasCode(receiptFactory) || keccak256(receiptFactory) !== (proof as Extract<CreationProof, { kind: 'create2' }>).factory.codeHash))) {
+      ((!saved || pinned) && (!hasCode(receiptFactory) || keccak256(receiptFactory) !== (proof as Extract<CreationProof, { kind: 'create2' }>).factory.codeHash))) {
       result.reasons.push('CREATE2 factory code differs from its declared hash.');
       return result;
     }
@@ -529,10 +548,12 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
       result.reasons.push('Saved creation proof differs from canonical deployment identity or current runtime.');
       return result;
     }
-    result.exactRuntime = true;
-    result.status = 'verified';
-    result.proof = proof;
-    return result;
+    if (!pinned) {
+      result.exactRuntime = true;
+      result.status = 'verified';
+      result.proof = proof;
+      return result;
+    }
   }
   let receiptCode;
   try { receiptCode = await client.getCode({ address: resource.address, blockNumber: receipt.blockNumber }); }
@@ -550,16 +571,95 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.proof = proof;
     return result;
   }
+  if (pinned) {
+    if (!saved && (options as VerifyCreationOptions & { [PINNED_MINT]?: boolean })[PINNED_MINT] !== true) {
+      result.reasons.push('A new pinned-runtime proof can be created only during apply from a pre-sign journal intent.');
+      return result;
+    }
+    if (!resource.expectedCodeHash || !resource.createdCode?.length ||
+      lower(result.codeHash) !== lower(resource.expectedCodeHash)) {
+      result.reasons.push('Parent runtime does not match the precommitted pinned-runtime hash.');
+      return result;
+    }
+    const artifactRuntime = expectedRuntime(resource, resource.artifact);
+    const artifactMatch = compareRuntime(artifactRuntime, receiptCode, resource.artifact.deployedBytecode.immutableReferences ?? {},
+      resource.artifact.deployedBytecode.linkReferences ?? {});
+    if (artifactMatch.mode === 'mismatch') {
+      result.reasons.push('Pinned parent runtime does not match the planned artifact skeleton.');
+      return result;
+    }
+    for (const check of resource.checks) {
+      for (const checkBlock of [receipt.blockNumber, blockOf(options.blockNumber)]) {
+        const { proof: getter } = await getterProof(client, resource, check, resource.artifact.abi, checkBlock);
+        if (!getter.matched) {
+          result.reasons.push(`Pinned parent getter ${check.functionName} differs at ${checkBlock?.toString() ?? 'current'}: ${getter.error ?? 'wrong value'}.`);
+          return result;
+        }
+      }
+    }
+    if (saved && !samePinnedCommitments(saved, resource)) {
+      result.reasons.push('Saved pinned-runtime child or parent commitment differs from the current resource.');
+      return result;
+    }
+    const origin = saved?.kind === 'create2' && saved.method === 'pinned-runtime' ? saved.originPlanHash : undefined;
+    const journal = pinnedJournalCommitment(options.journalRecords, resource, transactionHash, origin, transaction.from,
+      { blockHash: receipt.blockHash, blockNumber: receipt.blockNumber }, { id: chain.id, genesisHash: chain.genesisHash });
+    if (!journal || (saved?.kind === 'create2' && saved.method === 'pinned-runtime' &&
+      lower(saved.intentCommitment) !== lower(journal.commitment))) {
+      result.reasons.push('Pinned-runtime creation has no matching pre-sign journal commitment and signed receipt.');
+      return result;
+    }
+    result.method = 'pinned-runtime';
+    result.createdCode = [];
+    for (const child of resource.createdCode) {
+      const address = pinnedChildAddress(resource.address, child.createNonce);
+      if (lower(address) !== lower(child.address)) {
+        result.reasons.push(`Created child ${child.getter} has a different derived CREATE address.`);
+        return result;
+      }
+      const evidence: PinnedChildEvidence = { ...child, receiptCodeHash: null, currentCodeHash: null, receiptGetter: null, currentGetter: null, matched: false };
+      result.createdCode.push(evidence);
+      try {
+        const fn = abiFunction(resource.artifact.abi, child.getter, 0, resource.id);
+        if (fn.outputs?.length !== 1 || fn.outputs[0]?.type !== 'address') throw new Error('getter must return one address');
+        const currentBlock = blockOf(options.blockNumber);
+        const [receiptGetter, currentGetter, receiptChildCode, currentChildCode] = await Promise.all([
+          readFunction(client, { address: resource.address, fn, args: [], blockNumber: receipt.blockNumber }),
+          readFunction(client, { address: resource.address, fn, args: [], blockNumber: currentBlock }),
+          client.getCode({ address, blockNumber: receipt.blockNumber }),
+          client.getCode({ address, ...at(currentBlock) }),
+        ]);
+        evidence.receiptGetter = typeof receiptGetter === 'string' ? receiptGetter as Address : null;
+        evidence.currentGetter = typeof currentGetter === 'string' ? currentGetter as Address : null;
+        evidence.receiptCodeHash = hasCode(receiptChildCode) ? keccak256(receiptChildCode) : null;
+        evidence.currentCodeHash = hasCode(currentChildCode) ? keccak256(currentChildCode) : null;
+        evidence.matched = lower(evidence.receiptGetter) === lower(address) && lower(evidence.currentGetter) === lower(address) &&
+          lower(evidence.receiptCodeHash) === lower(child.codeHash) && lower(evidence.currentCodeHash) === lower(child.codeHash);
+      } catch (error) {
+        result.reasons.push(`Created child ${child.getter} cannot be checked at receipt and current blocks: ${safeError(error)}`);
+        return result;
+      }
+      if (!evidence.matched) {
+        result.reasons.push(`Created child ${child.getter} at ${address} differs from its getter address or precommitted runtime hash.`);
+        return result;
+      }
+    }
+    result.exactRuntime = true;
+    result.status = 'verified';
+    result.proof = { ...base, kind: 'create2', factory: resource.factory!, salt: resource.salt!, method: 'pinned-runtime', originPlanHash: journal.planHash,
+      intentCommitment: journal.commitment, createdCode: resource.createdCode };
+    return result;
+  }
   try {
     const runtime = await simulateCreate2(client, { factory: resource.factory!.address, salt: resource.salt!, initcode, address: resource.address, blockNumber: receipt.blockNumber, account: transaction.from });
     result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
-    result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)}`);
+    result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)} See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
     return result;
   }
   if (result.exactRuntime) {
     result.status = 'verified';
     result.proof = proof;
-  } else result.reasons.push('Creation simulation at the receipt block returned different runtime code.');
+  } else result.reasons.push(`Creation simulation at the receipt block returned different runtime code. See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
   return result;
 }

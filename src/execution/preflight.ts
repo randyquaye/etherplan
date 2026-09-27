@@ -10,7 +10,7 @@ import type { Address, Client, ContractId, Hash, Hex, JsonSafe, ResourceId } fro
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
 const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
-const IDENTITY_FIELDS = ['kind', 'dependencies', 'resolutionDependencies', 'executionEdges', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after', 'ownerOnly', 'transfersOwnership'];
+const IDENTITY_FIELDS = ['kind', 'dependencies', 'resolutionDependencies', 'executionEdges', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after', 'ownerOnly', 'transfersOwnership'];
 
 function convert(value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString();
