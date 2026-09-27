@@ -8,7 +8,7 @@ import { pause } from './shared.ts';
 import { recoveryProof, sameRecoveryProof } from '../recovery.ts';
 import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../verification/limitations.ts';
 import { assertPinnedAbsent, pinnedJournalCommitment } from '../verification/pinned-runtime.ts';
-import { append, fail, summarizeVerification } from './report.ts';
+import { append, fail, report, summarizeVerification } from './report.ts';
 import type { Client, Hash, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
 import type { ApplyContext, JournalRecord, PreparedAction, Receipt, ReceiptJson, SignedRecord, VerifiedFields } from './types.ts';
@@ -273,6 +273,7 @@ export async function recheckReused(ctx: ApplyContext): Promise<void> {
     }
     const artifactDrift = checkArtifactDrift(ctx, item, verification);
     ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: 'reuse', outcome: 'reused', address: item.planned.address, verification, ...(artifactDrift ? { artifactDrift } : {}) });
+    await report(ctx, 'resource-reused', { actionId: item.planned.id });
   }
 }
 
@@ -302,6 +303,7 @@ export async function decide(ctx: ApplyContext, item: PreparedAction): Promise<P
     }
     ctx.outcomes.set(item.planned.id, { id: item.planned.id, action: item.planned.action, outcome: latest.outcome, address: item.planned.address,
       ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}), verification, resumed: true });
+    await report(ctx, 'resource-resumed', { actionId: item.planned.id });
     return null;
   }
   if (latest?.phase === 'failed' && !latest.retryable) {

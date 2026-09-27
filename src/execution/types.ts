@@ -598,6 +598,7 @@ export type ReportEvent = ReportEventBase & (
   | ({ type: 'broadcast-result'; actionId: ResourceId; transactionHash: Hash; rebroadcast: boolean; accepted: boolean; broadcastLatencyMs: number })
   | ({ type: 'receipt-observed'; actionId: ResourceId; transactionHash: Hash; receiptLatencyMs: number })
   | ({ type: 'recovery'; actionId: ResourceId; transactionHash: Hash; reservationId?: string })
+  | ({ type: 'resource-reused' | 'resource-resumed'; actionId: ResourceId })
 );
 
 export type ReportEventType = ReportEvent['type'];
