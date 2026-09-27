@@ -6,7 +6,7 @@ export type CliOptions = {
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
   'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
-  'verification-timeout-ms'?: string;
+  'verification-timeout-ms'?: string; quiet?: boolean;
   var?: string[]; 'var-file'?: string[]; workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
@@ -21,7 +21,7 @@ export const COMMANDS = {
   graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
   impact: { description: 'Show resources affected by a named value.', options: ['value', ...INPUTS] },
   plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', ...INPUTS] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'quiet', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', ...INPUTS] },
   verify: { description: 'Verify desired state against the chain.', options: ['state', 'backend', ...INPUTS] },
   schedule: { description: 'Preview signer assignments and execution waves.', options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
   import: { description: 'Record a verified existing contract in local state.', options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
@@ -48,6 +48,7 @@ const OPTION_HELP = {
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
   'verification-timeout-ms': 'Time to retry provider errors after a successful deployment (default: 300000 ms)',
+  quiet: 'Suppress live apply progress (final JSON, approval prompts, and errors still appear)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
@@ -56,7 +57,7 @@ const OPTION_HELP = {
 };
 const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', 'workspace']);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
-const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline', 'reconfigure']);
+const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'quiet', 'rebaseline', 'reconfigure']);
 export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
 
 export class UsageError extends Error {}

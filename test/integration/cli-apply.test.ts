@@ -81,6 +81,13 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   ], true, 'yes\n');
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
   assert.match(applied.stderr, new RegExp(plan.planHash));
+  assert.match(applied.stderr, /Applying plan .*\(chain 31337, 2 resources\)/);
+  assert.match(applied.stderr, /Apply lock acquired\. Checking plan and chain/);
+  assert.match(applied.stderr, /contract:stateFixture: preparing transaction/);
+  assert.match(applied.stderr, /contract:stateFixture: signed 0x[0-9a-f]{64}/);
+  assert.match(applied.stderr, /contract:stateFixture: receipt recorded; confirming and verifying/);
+  assert.match(applied.stderr, /contract:stateFixture: verified/);
+  assert.match(applied.stderr, /Apply complete: 2 resources, 2 transactions signed/);
   assert.deepEqual(JSON.parse(await readFile(recoveryPlanFile, 'utf8')), plan);
   const first = JSON.parse(applied.stdout);
   assert.equal(first.status, 'applied');
@@ -110,10 +117,11 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
   const rerun = runCli([
-    'apply', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile,
+    'apply', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile, '--quiet',
   ], true);
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
   assert.match(rerun.stderr, /^Variables:\n/);
+  assert.doesNotMatch(rerun.stderr, /Applying plan|Apply lock acquired|Still applying|Apply complete/);
   const second = JSON.parse(rerun.stdout);
   assert.equal(second.transactionsSigned, 0);
   assert.equal(second.transactions.length, 0);
@@ -167,6 +175,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
   const applied = runCli(['apply', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
+  assert.match(applied.stderr, /contract:stateFixture: reused and verified/);
   assert.equal(JSON.parse(applied.stdout).transactionsSigned, 0);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
 

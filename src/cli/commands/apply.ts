@@ -11,6 +11,7 @@ import { addressesFromModule, backendFromFile, planningJournal, signerFromModule
 import type { Backend, SignerModuleSource, SignerSource } from '../environment.ts';
 import { approvePlan, defaultJournalFile, print, writeJsonAtomic } from '../shared.ts';
 import type { ChainCommandContext } from './context.ts';
+import { createApplyProgress } from '../progress.ts';
 
 export { defaultJournalFile } from '../shared.ts';
 
@@ -59,13 +60,25 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       process.stderr.write(`Approved plan saved for recovery: ${recoveryPlanFile}\n`);
     }
   }
-  if (options.backend) {
-    const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
-    if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-    print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...signerSource, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions }));
-    return;
+  const progress = options.quiet ? null : createApplyProgress(plan);
+  progress?.start();
+  try {
+    const common = { plan, spec, artifacts, client, ...signerSource, parallel: options.parallel ?? false,
+      pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions,
+      ...(progress ? { reporter: progress.reporter } : {}) };
+    if (options.backend) {
+      const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
+      if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
+      const result = await applyPlan({ ...common, ...backend });
+      progress?.complete(result);
+      print(result);
+      return;
+    }
+    const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
+    const result = await applyPlan({ ...common, stateFile, journalFile });
+    progress?.complete(result);
+    print(result);
+  } finally {
+    progress?.stop();
   }
-  const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
-  print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions }));
-  return;
 }
