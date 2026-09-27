@@ -6,7 +6,7 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install and test
 
-Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.4-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
+Use Node.js 22.18 or newer. Install the checkout as a CLI with `npm install --global .`. In another repository, install the tagged beta with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.5-beta'`. The test suite also needs Foundry's `anvil` on `PATH`.
 
 The source is TypeScript. `npm ci` compiles it into `dist/`, which the CLI, integration tests, and published package run; unit tests import `src/`. Signer modules import the library as `etherplan`. See [the architecture guide](docs/architecture.md) for the module map, durable records, and public API boundary.
 
