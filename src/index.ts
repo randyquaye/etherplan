@@ -1,4 +1,5 @@
 export { DEFAULT_FACTORY, parseSpec, graph, dependencyGraphs, dependencyMode, dependencyWarnings, impact, resolve, usesDependencyPlan } from './spec/index.ts';
+export { deriveSalt } from './spec/salt.ts';
 export { prepareResources, transactionFor, createPlan } from './planning/index.ts';
 export { validateResources } from './validation/index.ts';
 export { create2Address, linkBytecode, compareRuntime, verifyResource, verifyCreation } from './verification/index.ts';
@@ -12,7 +13,7 @@ export { createKmsSignerProvider } from './execution/kms-signer.ts';
 
 // Type-only exports for signer-module authors and reporter consumers. These erase at run time.
 export type { Abi, Address, ChainIdentity, Client, Hash, Hex, JsonValue, ResourceId, ResourceKind } from './types.ts';
-export type { DependencyGraphs, DependencyMode, ExecutionAssumption, Factory, OrderedNode, ParsedSpec, SpecCall, SpecContract, SpecExternal } from './spec/types.ts';
+export type { DependencyGraphs, DependencyMode, ExecutionAssumption, Factory, OrderedNode, ParsedSpec, SaltDerivation, SpecCall, SpecContract, SpecExternal } from './spec/types.ts';
 export type { Artifacts, NormalizedArtifact } from './artifacts/types.ts';
 export type { CreatePlanInput, Plan, PlanAction, PlannedResource, PreparedResource, PreparedResources } from './planning/types.ts';
 export type { RecoveryRecord } from './recovery.ts';

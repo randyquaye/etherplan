@@ -1,6 +1,7 @@
 // The state file. Source of truth: validateState, validateResource, validateRevision, and validateChain in index.ts.
 import type { PreparedContract, PreparedResource } from '../planning/types.ts';
 import type { Address, CallId, ChainIdentity, ContractId, ExternalId, Hash, JsonValue } from '../types.ts';
+import type { SaltDerivation } from '../spec/types.ts';
 import type { CreationProof, VerificationResult } from '../verification/types.ts';
 
 export type ProvenanceKind = 'apply' | 'import' | 'observed';
@@ -36,6 +37,8 @@ export interface StateResource {
   priorInputs?: JsonValue;
   priorInputsHash?: Hash | null;
   salt?: Hash | null;
+  /** Contracts only; present when the salt was derived from a mixer. */
+  saltDerivation?: SaltDerivation;
   codeHash?: Hash | null;
   priorCodeHash?: Hash | null;
   proofHash?: Hash;

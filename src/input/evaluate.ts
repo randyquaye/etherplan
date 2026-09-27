@@ -2,7 +2,9 @@
 // JSON. Value fields keep var.<name> and resource addresses as references for parseSpec, so the compiled
 // spec holds only concrete values and references.
 import { fail } from './hcl.ts';
-import type { JsonValue, ResourceId } from '../types.ts';
+import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
+import type { SaltDerivation } from '../spec/types.ts';
+import type { Hash, JsonValue, ResourceId } from '../types.ts';
 import type { HclAttribute, HclBinary, HclExpression, HclReference, Located } from './types.ts';
 
 export type Root = 'contracts' | 'externals' | 'calls';
@@ -63,12 +65,33 @@ export function literal(node: HclExpression, name: string): JsonValue {
   fail(node, `${name} must be a literal, not an expression.`);
 }
 
+/** A salt that `derive` produced, with the derivation the compiled spec records beside it. */
+export class DerivedSalt {
+  declare salt: Hash;
+  declare derivation: SaltDerivation;
+
+  constructor(salt: Hash, derivation: SaltDerivation) {
+    this.salt = salt;
+    this.derivation = derivation;
+  }
+}
+
+/** `derive` or `derive("label")`, or null for any other expression. */
+function deriveNode(node: HclExpression): { label?: HclExpression } | null {
+  if (node.kind === 'reference') return node.parts.length === 1 && node.parts[0] === 'derive' ? {} : null;
+  if (node.kind !== 'call' || node.name !== 'derive') return null;
+  const [label] = node.args;
+  if (node.args.length !== 1 || label === undefined) fail(node, 'derive takes one label, such as derive("second-instance"). Write derive alone for the default salt.');
+  return { label };
+}
+
 /**
  * Checks every reference in an expression, including branches that evaluation will not take: variables and
- * locals must exist, resources must be declared, and function calls are rejected. Calls `use` for each
+ * locals must exist, resources must be declared, and function calls other than derive are rejected. `salt` is
+ * given for a salt field, where derive is valid; it is called for each derive. Calls `use` for each
  * var.<name> and local.<name>, which drives the unused checks and local cycle detection.
  */
-export function checkReferences(node: HclExpression, what: string, scope: NameScope, use: (root: 'var' | 'local', name: string) => void): void {
+export function checkReferences(node: HclExpression, what: string, scope: NameScope, use: (root: 'var' | 'local', name: string) => void, salt?: (node: Located) => void): void {
   switch (node.kind) {
     case 'literal':
       return;
@@ -79,7 +102,9 @@ export function checkReferences(node: HclExpression, what: string, scope: NameSc
       for (const entry of node.entries) checkReferences(entry.value, what, scope, use);
       return;
     case 'conditional':
-      for (const part of [node.condition, node.then, node.otherwise]) checkReferences(part, what, scope, use);
+      checkReferences(node.condition, what, scope, use);
+      checkReferences(node.then, what, scope, use, salt);
+      checkReferences(node.otherwise, what, scope, use, salt);
       return;
     case 'binary':
       checkReferences(node.left, what, scope, use);
@@ -88,8 +113,19 @@ export function checkReferences(node: HclExpression, what: string, scope: NameSc
     case 'not':
       checkReferences(node.operand, what, scope, use);
       return;
-    case 'call':
-      fail(node, `Function calls are not supported (${node.name}).`);
+    case 'call': {
+      const derive = deriveNode(node);
+      if (!derive) fail(node, `Function calls are not supported (${node.name}).`);
+      if (!salt) fail(node, `${what} uses derive, which is valid only as a salt value.`);
+      salt(node);
+      if (derive.label) checkReferences(derive.label, what, scope, use);
+      return;
+    }
+  }
+  if (deriveNode(node)) {
+    if (!salt) fail(node, `${what} uses derive, which is valid only as a salt value.`);
+    salt(node);
+    return;
   }
   const [root, name, field] = node.parts;
   const text = node.parts.join('.');
@@ -113,15 +149,31 @@ export class Evaluator {
   declare scope: EvaluationScope;
   /** Variables that evaluated value fields reference. Only these become spec values. */
   declare referenced: Set<string>;
+  /** The top-level mixer that derive hashes, once the compiler has evaluated it. */
+  declare mixer: string | null;
 
   constructor(scope: EvaluationScope) {
     this.scope = scope;
     this.referenced = new Set();
+    this.mixer = null;
   }
 
-  /** A field such as salt, chain_id, or enabled: folds to JSON with no resource references. */
+  /** A field such as chain_id or enabled: folds to JSON with no resource references. */
   constant(node: HclExpression, what: string): JsonValue {
     return this.evaluate(node, what, 'constant');
+  }
+
+  /** The salt field: a constant, or derive / derive("label") where evaluation reaches one. */
+  salt(node: HclExpression, what: string): JsonValue | DerivedSalt {
+    if (node.kind === 'conditional') return this.salt(this.condition(node.condition, what) ? node.then : node.otherwise, what);
+    const derive = deriveNode(node);
+    if (!derive) return this.evaluate(node, what, 'constant');
+    const { mixer } = this;
+    if (mixer === null) fail(node, `${what} uses derive, so the spec needs a top-level mixer attribute.`);
+    if (!derive.label) return new DerivedSalt(deriveSalt(mixer), { mixer });
+    const label = this.constant(derive.label, `${what} derive label`);
+    if (typeof label !== 'string' || !MIXER.test(label)) fail(derive.label, `derive takes one label, ${MIXER_HINT}; found ${describeValue(label)}.`);
+    return new DerivedSalt(deriveSalt(mixer, label), { mixer, label });
   }
 
   /** A field such as args: var.<name> stays { ref: values.<name> } and addresses stay references. */

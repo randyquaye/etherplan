@@ -3,7 +3,7 @@ import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
 import type { Artifacts } from '../artifacts/types.ts';
-import type { DependencyEdge, Factory, OrderedCallNode, OrderedContractNode, OrderedExternalNode, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks } from '../spec/types.ts';
+import type { DependencyEdge, Factory, OrderedCallNode, OrderedContractNode, OrderedExternalNode, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks, SpecContract } from '../spec/types.ts';
 import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
 import type { PlannedTransaction, PreparedBinding, PreparedCall, PreparedCallCheck, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource, PreparedResources } from './types.ts';
 
@@ -16,6 +16,14 @@ function assert(condition: unknown, message: string): asserts condition {
 function create2Address(factory: Address, salt: Hex, initcode: Hex): Address {
   const digest = keccak256(concatHex(['0xff', factory, salt, keccak256(initcode)]));
   return `0x${digest.slice(-40)}`;
+}
+
+// Two derived salts collide only when both contracts derive the same salt and have identical initcode.
+function sameSaltHint(item: SpecContract, other: SpecContract | undefined): string {
+  const mine = item.saltDerivation;
+  const theirs = other?.saltDerivation;
+  if (!mine || !theirs || mine.mixer !== theirs.mixer || mine.label !== theirs.label) return '';
+  return ` Both derive their salt from mixer "${mine.mixer}"${mine.label === undefined ? '' : ` with label "${mine.label}"`} and have the same initcode; give one of them a label, such as salt = derive("second-instance").`;
 }
 
 function checks(value: SpecChecks | undefined, spec: ParsedSpec, addresses: ResolvedAddresses): PreparedCheck[] {
@@ -65,7 +73,8 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
     address = create2Address(deployment.factory.address, deployment.salt, initcode);
   }
   assert(typeof address === 'string' && isAddress(address), `contract:${item.id} has an invalid resolved address.`);
-  assert(!Object.values(addresses).some(existing => existing.toLowerCase() === address.toLowerCase()), `contract:${item.id} resolves to a duplicate contract address.`);
+  const duplicate = Object.entries(addresses).find(([, existing]) => existing.toLowerCase() === address.toLowerCase())?.[0];
+  assert(duplicate === undefined, `contract:${item.id} resolves to the same address as contract:${duplicate}.${sameSaltHint(item, spec.contracts.find(other => other.id === duplicate))}`);
   addresses[item.id] = address;
 
   const resource: PreparedContract = {
@@ -97,6 +106,7 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
     resource.initcode = deployment.initcode;
     resource.initcodeHash = keccak256(deployment.initcode);
     resource.salt = deployment.salt;
+    if (item.saltDerivation) resource.saltDerivation = { ...item.saltDerivation };
     resource.factory = { ...deployment.factory };
   }
   return resource;

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { isAddress } from 'viem';
 import { canonicalJson, hashJson } from '../identity.ts';
+import { assertDerivedSalt, assertSaltDerivation } from '../spec/salt.ts';
 import { validateCreationProof } from '../verification/creation-proof.ts';
 import type { PreparedResource } from '../planning/types.ts';
 import type { Address, ChainIdentity, Hash, JsonValue } from '../types.ts';
@@ -59,7 +60,7 @@ function validateRevision(id: string, revision: unknown, index: number): void {
 function validateResource(id: string, resource: unknown, chain: ChainIdentity): void {
   assert(RESOURCE_ID.test(id), `State resource ID ${id} is invalid.`);
   assert(isObject(resource), `State resource ${id} must be an object.`);
-  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'artifactRevisions', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance', 'creationProof']);
+  const allowed = new Set(['address', 'priorAddress', 'artifactHash', 'sourceHash', 'artifactRevisions', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'saltDerivation', 'codeHash', 'priorCodeHash', 'proofHash', 'priorProofHash', 'transactions', 'provenance', 'creationProof']);
   assert(Object.keys(resource).every(key => allowed.has(key)), `State resource ${id} has unknown fields.`);
   const { address } = resource;
   assert(typeof address === 'string' && isAddress(address), `State resource ${id} needs an address.`);
@@ -79,6 +80,10 @@ function validateResource(id: string, resource: unknown, chain: ChainIdentity): 
   if (resource.inputsHash !== undefined) assertHash(resource.inputsHash, `${id} inputsHash`);
   if (resource.priorInputsHash !== undefined) assertHash(resource.priorInputsHash, `${id} priorInputsHash`, true);
   if (resource.salt !== undefined) assertHash(resource.salt, `${id} salt`, true);
+  if (resource.saltDerivation !== undefined) {
+    assert(id.startsWith('contract:'), `${id} saltDerivation belongs only to a contract.`);
+    assertDerivedSalt(resource.salt, assertSaltDerivation(resource.saltDerivation, `${id} saltDerivation`), id);
+  }
   if (resource.codeHash !== undefined) assertHash(resource.codeHash, `${id} codeHash`, true);
   if (resource.priorCodeHash !== undefined) assertHash(resource.priorCodeHash, `${id} priorCodeHash`, true);
   if (resource.proofHash !== undefined) assertHash(resource.proofHash, `${id} proofHash`);
@@ -175,6 +180,12 @@ function sameDeployment(record: StateResource, { address, initcodeHash, inputsHa
     (record.initcodeHash ?? null) === (initcodeHash ?? null) && record.inputsHash === inputsHash;
 }
 
+// A derived salt records its derivation. An explicit salt has none, so a record never keeps a stale one.
+function setSaltDerivation(record: StateResource, resource: PreparedResource): void {
+  if (resource.kind === 'contract' && resource.saltDerivation) record.saltDerivation = { ...resource.saltDerivation };
+  else delete record.saltDerivation;
+}
+
 // The artifact evidence that a rebaseline supersedes. Deployment provenance stays on the record.
 function artifactRevision(record: ContractStateResource & { codeHash: Hash }): ArtifactRevision {
   const revision: ArtifactRevision = { artifactHash: record.artifactHash, proofHash: record.proofHash, codeHash: record.codeHash };
@@ -252,6 +263,7 @@ export function importResource({ resource, verification, state: stateInput, chai
     if (existing?.artifactRevisions && sameDeployment(existing, resource)) record.artifactRevisions = [...existing.artifactRevisions];
   }
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
+  setSaltDerivation(record, resource);
   const imported = {
     formatVersion: 1,
     chain: { ...state.chain },
@@ -348,6 +360,7 @@ export function recordResource({ resource, verification, state: stateInput, chai
   }
   const sourceHash = artifact?.buildIdentity?.sourceHash;
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
+  setSaltDerivation(record, resource);
   return validateState({
     formatVersion: 1,
     chain: { ...state.chain },

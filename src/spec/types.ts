@@ -39,6 +39,8 @@ export interface SpecContract {
   /** Exactly one of `address` (imported) or `salt` (CREATE2 deployment) is present. */
   address?: Address | Reference;
   salt?: Hash;
+  /** Present when `salt` was derived; `salt` must equal deriveSalt(mixer, label). */
+  saltDerivation?: SaltDerivation;
   /** Required when `salt` is set. */
   args?: SpecValue[];
   /** `file:Name` to address or reference. */
@@ -59,6 +61,12 @@ export interface SpecExternal {
   checks?: SpecChecks;
   /** parseSpec checks only that this is an array; validateResources applies assertAbi. */
   abi?: Abi;
+}
+
+/** How a CREATE2 salt was derived: keccak256 of the mixer, or of `<mixer>:<label>`. */
+export interface SaltDerivation {
+  mixer: string;
+  label?: string;
 }
 
 export interface SpecCallCheck {
