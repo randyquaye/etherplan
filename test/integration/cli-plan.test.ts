@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { keccak256, toHex } from 'viem';
@@ -37,8 +37,8 @@ after(async () => {
 test('plan is read-only, complete, and deterministic at one observation block', async () => {
   const blockBefore = await rpc('eth_blockNumber');
   const nonceBefore = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
-  const first = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json', ...planArgs);
-  const second = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json', ...planArgs);
+  const first = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
+  const second = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
   const blockAfter = await rpc('eth_blockNumber');
   const nonceAfter = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
 
@@ -51,7 +51,7 @@ test('plan is read-only, complete, and deterministic at one observation block', 
   assert.equal(nonceAfter, nonceBefore);
 
   const plan = JSON.parse(first.stdout);
-  assert.equal(plan.formatVersion, 1);
+  assert.equal(plan.formatVersion, 2);
   assert.equal(plan.chain.id, 31337);
   assert.match(plan.chain.genesisHash, /^0x[0-9a-f]{64}$/);
   assert.equal(typeof plan.observed.blockNumber, 'string');
@@ -69,7 +69,7 @@ test('plan is read-only, complete, and deterministic at one observation block', 
 });
 
 test('plan fails closed on the wrong chain', () => {
-  const result = runCli('plan', '--spec', 'test/fixtures/minimal-wrong-chain.json');
+  const result = runCli('plan', '--fixture', 'test/fixtures/minimal-wrong-chain.json');
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /chain 31337.*requires 1/i);
@@ -82,7 +82,7 @@ test('plan fails closed when the canonical CREATE2 proxy has wrong code', async 
   try {
     await rpc('anvil_setCode', [factory, '0x6000']);
     assert.equal(await rpc('eth_getCode', [factory, 'latest']), '0x6000');
-    const result = runCli('plan', '--spec', 'test/fixtures/minimal-create2.json');
+    const result = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json');
     assert.equal(result.status, 1);
     assert.match(result.stderr, /factory|CREATE2|proxy/i);
     assert.equal(result.stdout, '');
@@ -92,7 +92,7 @@ test('plan fails closed when the canonical CREATE2 proxy has wrong code', async 
 });
 
 test('plan reports an absent external and blocks its dependent contract', () => {
-  const result = runCli('plan', '--spec', 'test/fixtures/minimal-absent-external.json');
+  const result = runCli('plan', '--fixture', 'test/fixtures/minimal-absent-external.json');
   const report = `${result.stdout}\n${result.stderr}`;
 
   assert.equal(result.status, 1);

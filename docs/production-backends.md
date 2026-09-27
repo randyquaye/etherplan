@@ -62,9 +62,11 @@ The DynamoDB table has string partition key `PK` and string sort key `SK`. Enabl
 
 For an existing installation, stop all apply runners and reconcile every previously signed transaction to the chosen confirmation depth before upgrading all runners together. A custom remote `journalStore` must provide `signedForSigner(scope, address)` with consistent reads across all deployment scopes in its backend, and write each signed entry atomically with its journal append under the signer fence.
 
+Run `plan` and `apply` from the project directory containing `main.ethp` and any other root-level `.ethp` files:
+
 ```sh
-etherplan plan --spec spec.json --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
-etherplan apply --spec spec.json --plan plan.json --backend backend.json --signer-module signer.mjs
+etherplan plan --backend backend.json --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
+etherplan apply --plan plan.json --backend backend.json --signer-module signer.mjs
 etherplan status --plan plan.json --backend backend.json
 ```
 
@@ -91,8 +93,8 @@ export const signerProvider = await createKmsSignerProvider({
 Add an `owner` key and `owner: 'owner'` to `signerRoles` when owner actions need a separate signer. The role order must match the saved plan's deployer order. Full KMS key ARNs let the provider infer the region; for aliases or key IDs, use the AWS SDK's configured region or pass `region`. All keys in one provider must use the same region. The runner's AWS identity needs `kms:GetPublicKey` and `kms:Sign` on every signing key. No AWS credentials belong in the module or plan.
 
 ```sh
-etherplan plan --spec spec.json --signer-module signer.mjs --parallel --max-spend-wei 100000000000000000 --out plan.json
-etherplan apply --spec spec.json --plan plan.json --signer-module signer.mjs --parallel
+etherplan plan --signer-module signer.mjs --parallel --max-spend-wei 100000000000000000 --out plan.json
+etherplan apply --plan plan.json --signer-module signer.mjs --parallel
 ```
 
 Add `--backend backend.json` to both commands when shared AWS recovery is needed. The backend's `kmsKeyId` remains a **separate symmetric encryption key** for the journal and S3; an `ECC_SECG_P256K1` signing key cannot replace it. An in-process KMS module means the apply runner itself has `kms:Sign` permission. A separate signer service can instead hold that permission and independently validate the supplied lease fencing tokens before signing. Local recovery stores signed transaction bytes in a mode-`0600` journal; it never stores KMS private key material.

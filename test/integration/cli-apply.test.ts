@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { access, copyFile, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -113,7 +113,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
     'apply', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile,
   ], true);
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
-  assert.equal(rerun.stderr, '');
+  assert.match(rerun.stderr, /^Variables:\n/);
   const second = JSON.parse(rerun.stdout);
   assert.equal(second.transactionsSigned, 0);
   assert.equal(second.transactions.length, 0);

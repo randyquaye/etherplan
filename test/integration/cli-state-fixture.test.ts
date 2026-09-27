@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,7 +26,7 @@ let address;
 let creationHash;
 
 function runVerify(specFile) {
-  return spawnSync(process.execPath, ['dist/cli.js', 'verify', '--spec', specFile], {
+  return spawnSync(process.execPath, ['dist/cli.js', 'verify', '--fixture', specFile], {
     cwd: projectDirectory,
     encoding: 'utf8',
     env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
@@ -45,7 +45,7 @@ function runImport(specFile, stateFile, transactionHash) {
   return spawnSync(process.execPath, [
     'dist/cli.js',
     'import',
-    '--spec',
+    '--fixture',
     specFile,
     '--id',
     'contract:stateFixture',
@@ -216,9 +216,9 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
     return spec;
   };
   const specFile = await saveSpec('rebuilt.json', rebuiltSpec(beneficiary));
-  const importArguments = ['import', '--spec', specFile, '--id', 'contract:stateFixture', '--state', stateFile];
+  const importArguments = ['import', '--fixture', specFile, '--id', 'contract:stateFixture', '--state', stateFile];
 
-  const planned = runCli(['plan', '--spec', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
+  const planned = runCli(['plan', '--fixture', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
   assert.equal(planned.status, 1);
   const [blocked] = JSON.parse(planned.stdout).resources;
   assert.equal(blocked.action, 'conflict');
@@ -228,14 +228,14 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
   assert.equal(plain.status, 1);
   assert.match(plain.stderr, /different artifact identity\. Use import --rebaseline/);
   const wrongFile = await saveSpec('rebuilt-wrong.json', rebuiltSpec(wrongBeneficiary));
-  const wrong = runCli(['import', '--spec', wrongFile, '--id', 'contract:stateFixture', '--state', stateFile, '--rebaseline']);
+  const wrong = runCli(['import', '--fixture', wrongFile, '--id', 'contract:stateFixture', '--state', stateFile, '--rebaseline']);
   assert.equal(wrong.status, 1);
   assert.match(wrong.stderr, /conflict/);
   assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), before);
   const missing = runCli([...importArguments.slice(0, -1), path.join(directory, 'missing-state.json'), '--rebaseline']);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /no state record to rebaseline/);
-  const misused = runCli(['verify', '--spec', specFile, '--rebaseline']);
+  const misused = runCli(['verify', '--fixture', specFile, '--rebaseline']);
   assert.equal(misused.status, 2);
   assert.match(misused.stderr, /--rebaseline is not an option for verify/);
 
@@ -253,7 +253,7 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
     assert.deepEqual(record[key], prior[key], key);
   }
 
-  const replanned = runCli(['plan', '--spec', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
+  const replanned = runCli(['plan', '--fixture', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
   assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
   const [reused] = JSON.parse(replanned.stdout).resources;
   assert.equal(reused.action, 'reuse');

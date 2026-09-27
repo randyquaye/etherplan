@@ -34,7 +34,7 @@ function cli(directory: string, ...args: string[]) {
 test('output reads validated local state without an RPC and prints JSON for all or one address', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-output-'));
   try {
-    await writeFile(path.join(directory, 'spec.json'), '{}\n');
+    await writeFile(path.join(directory, 'main.ethp'), '');
     await mkdir(path.join(directory, '.etherplan/default'), { recursive: true });
     const stateFile = path.join(directory, '.etherplan/default/state.json');
     await writeFile(stateFile, JSON.stringify(state));
@@ -65,15 +65,13 @@ test('output reads validated local state without an RPC and prints JSON for all 
     assert.equal(workspace.status, 0, workspace.stderr);
     assert.deepEqual(JSON.parse(workspace.stdout).addresses, { 'contract:registry': token });
 
-    await writeFile(path.join(directory, 'main.ethp'), '');
     await writeFile(path.join(directory, 'main.ethpconfig'), 'defaults {\n  state = "deploy/state.json"\n}\n');
     await mkdir(path.join(directory, 'deploy/blue'), { recursive: true });
     await writeFile(path.join(directory, 'deploy/blue/state.json'), JSON.stringify(blue));
-    const configured = cli(directory, 'output', '--spec', 'main.ethp', '--workspace', 'blue');
+    const configured = cli(directory, 'output', '--workspace', 'blue');
     assert.equal(configured.status, 0, configured.stderr);
     assert.deepEqual(JSON.parse(configured.stdout).addresses, { 'contract:registry': token, 'external:token': token });
 
-    await rm(path.join(directory, 'spec.json'));
     const defaultEthp = cli(directory, 'output', '--workspace', 'blue');
     assert.equal(defaultEthp.status, 0, defaultEthp.stderr);
     assert.deepEqual(JSON.parse(defaultEthp.stdout).addresses, JSON.parse(configured.stdout).addresses);
@@ -93,14 +91,15 @@ test('output reports absent or invalid state and unknown addresses without print
   const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-output-failure-'));
   const stateFile = path.join(directory, 'state.json');
   try {
+    const noSpec = cli(directory, 'output');
+    assert.equal(noSpec.status, 1);
+    assert.match(noSpec.stderr, /main\.ethp/);
+
+    await writeFile(path.join(directory, 'main.ethp'), '');
     const missing = cli(directory, 'output', '--state', stateFile);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /No state found/);
     assert.equal(missing.stdout, '');
-
-    const noSpec = cli(directory, 'output');
-    assert.equal(noSpec.status, 1);
-    assert.match(noSpec.stderr, /spec\.json/);
 
     const backend = cli(directory, 'output', '--backend', 'backend.json');
     assert.equal(backend.status, 1);

@@ -202,7 +202,7 @@ function collectLocals(blocks: HclBlock[]): Map<string, HclAttribute> {
     for (const attribute of attributesOf(block.body, 'A locals block')) {
       assertNotSecret(attribute.name, attribute);
       const first = locals.get(attribute.name);
-      assert(!first, attribute, `local.${attribute.name} is already defined on line ${first?.at.line}.`);
+      assert(!first, attribute, `local.${attribute.name} is already defined at ${first?.at.file}:${first?.at.line}:${first?.at.column}.`);
       locals.set(attribute.name, attribute);
     }
   }
@@ -255,11 +255,11 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
     assert(type !== undefined && name !== undefined && RESOURCE_TYPES.includes(type as ResourceType), block, `Unknown resource type ${type}. Use ${RESOURCE_TYPES.join(', ')}.`);
     const resourceType = type as ResourceType;
     const first = blocks[resourceType].get(name);
-    assert(!first, block, `Duplicate resource "${type}" "${name}"; it is first declared on line ${first?.at.line}.`);
+    assert(!first, block, `Duplicate resource "${type}" "${name}"; it is first declared at ${first?.at.file}:${first?.at.line}:${first?.at.column}.`);
     blocks[resourceType].set(name, block);
   }
   const factories = document.blocks.filter(block => block.type === 'factory');
-  assert(factories.length <= 1, factories[1], `Duplicate factory block; the first is on line ${factories[0]?.at.line}.`);
+  assert(factories.length <= 1, factories[1], `Duplicate factory block; the first is at ${factories[0]?.at.file}:${factories[0]?.at.line}:${factories[0]?.at.column}.`);
   assert(!factories[0]?.labels.length, factories[0], 'A factory block has no labels.');
 
   // Check every reference, including those in disabled resources and branches that are not taken.

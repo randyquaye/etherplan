@@ -11,8 +11,10 @@ import { deploymentScope, openStoredJournal } from '../src/execution/backends.ts
 import { applyPlan } from '../src/execution/index.ts';
 import { broadcast } from '../src/execution/transactions.ts';
 import { createPlan } from '../src/planning/index.ts';
+import { loadSpec } from '../src/input/project.ts';
 import { TEST_KEYS, deployerA, fixtureMany, startAnvil } from './execution/chain.ts';
 import { memoryBackend } from './execution/memory-backend.ts';
+import { prepareJsonProject } from './project-cli.mjs';
 
 const sentinel = 'rpc-secret-sentinel-7349';
 
@@ -140,12 +142,16 @@ test('estimation errors with arbitrary response text stay out of journal, summar
     const cliSpec = structuredClone(input.spec);
     await writeFile(artifactFile, JSON.stringify(input.artifacts.get('holder00')));
     await writeFile(specFile, JSON.stringify(cliSpec));
-    const cliArtifacts = await loadArtifacts(cliSpec, specFile);
-    const cliPlan = await createPlan({ spec: cliSpec, artifacts: cliArtifacts, client: chain.client,
+    prepareJsonProject(specFile);
+    const mainFile = path.join(files.directory, 'main.ethp');
+    const compiledSpec = await loadSpec(mainFile);
+    const cliArtifacts = await loadArtifacts(compiledSpec, mainFile);
+    const cliPlan = await createPlan({ spec: compiledSpec, artifacts: cliArtifacts, client: chain.client,
       signers: { deployers: [deployerA.address], parallel: false }, maxSpendWei: '100000000000000000000' });
     const planFile = path.join(files.directory, 'plan.json');
     await writeFile(planFile, JSON.stringify(cliPlan));
     const oldArgv = process.argv;
+    const oldCwd = process.cwd();
     const oldUrl = process.env.ETH_RPC_URL;
     const oldKey = process.env.DEPLOYER_PRIVATE_KEYS;
     const oldLog = console.log;
@@ -154,7 +160,8 @@ test('estimation errors with arbitrary response text stay out of journal, summar
     const planProxy = await rejectingRpc(chain.url, 'eth_chainId');
     const broadcastProxy = await rejectingRpc(chain.url);
     try {
-      process.argv = ['node', 'etherplan', 'apply', '--spec', specFile, '--plan', planFile, '--state', path.join(files.directory, 'cli-state.json'), '--journal', path.join(files.directory, 'cli-journal.jsonl')];
+      process.chdir(files.directory);
+      process.argv = ['node', 'etherplan', 'apply', '--plan', planFile, '--state', path.join(files.directory, 'cli-state.json'), '--journal', path.join(files.directory, 'cli-journal.jsonl')];
       process.env.ETH_RPC_URL = proxy.url;
       process.env.DEPLOYER_PRIVATE_KEYS = TEST_KEYS[0];
       console.log = (...values) => { output.push(values.join(' ')); };
@@ -166,7 +173,7 @@ test('estimation errors with arbitrary response text stay out of journal, summar
 
       output.length = 0;
       const broadcastJournal = path.join(files.directory, 'cli-broadcast.jsonl');
-      process.argv = ['node', 'etherplan', 'apply', '--spec', specFile, '--plan', planFile, '--state', path.join(files.directory, 'cli-broadcast-state.json'), '--journal', broadcastJournal];
+      process.argv = ['node', 'etherplan', 'apply', '--plan', planFile, '--state', path.join(files.directory, 'cli-broadcast-state.json'), '--journal', broadcastJournal];
       process.env.ETH_RPC_URL = broadcastProxy.url;
       await main();
       assert.equal(process.exitCode, 1);
@@ -176,7 +183,7 @@ test('estimation errors with arbitrary response text stay out of journal, summar
       assert.equal(broadcastRecords.filter(record => record.phase === 'signed').length, 1);
 
       output.length = 0;
-      process.argv = ['node', 'etherplan', 'plan', '--spec', specFile, '--out', '-', '--deployers', deployerA.address, '--max-spend-wei', '100000000000000000000'];
+      process.argv = ['node', 'etherplan', 'plan', '--out', '-', '--deployers', deployerA.address, '--max-spend-wei', '100000000000000000000'];
       process.env.ETH_RPC_URL = planProxy.url;
       await main();
       assert.equal(process.exitCode, 1);
@@ -186,6 +193,7 @@ test('estimation errors with arbitrary response text stay out of journal, summar
       await planProxy.close();
       await broadcastProxy.close();
       process.argv = oldArgv;
+      process.chdir(oldCwd);
       if (oldUrl === undefined) delete process.env.ETH_RPC_URL; else process.env.ETH_RPC_URL = oldUrl;
       if (oldKey === undefined) delete process.env.DEPLOYER_PRIVATE_KEYS; else process.env.DEPLOYER_PRIVATE_KEYS = oldKey;
       console.log = oldLog;

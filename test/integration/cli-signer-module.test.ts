@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -35,11 +35,11 @@ test('CLI plans and applies parallel deployers through a signer module with loca
     });
   }
   try {
-    const planned = cli('plan', '--spec', spec, '--out', planFile, '--state', stateFile,
+    const planned = cli('plan', '--fixture', spec, '--out', planFile, '--state', stateFile,
       '--signer-module', moduleFile, '--parallel', '--max-spend-wei', '100000000000000000000');
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     assert.deepEqual(JSON.parse(planned.stdout).signers.deployers, addresses);
-    const applied = cli('apply', '--spec', spec, '--plan', planFile, '--state', stateFile,
+    const applied = cli('apply', '--fixture', spec, '--plan', planFile, '--state', stateFile,
       '--journal', journalFile, '--signer-module', moduleFile, '--parallel');
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(JSON.parse(applied.stdout).transactionsSigned, 3);
@@ -67,11 +67,11 @@ test('owner-role deployment with no calls works through a signer module in plan 
       env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl, TEST_DEPLOYER_KEYS: keys[0], TEST_OWNER_KEY: keys[1],
         DEPLOYER_PRIVATE_KEY: '', DEPLOYER_PRIVATE_KEYS: '', OWNER_PRIVATE_KEY: '' },
     });
-    const planned = cli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+    const planned = cli(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
       '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000']);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     assert.equal(JSON.parse(planned.stdout).signers.owner, addresses[1]);
-    const applied = cli(['apply', '--spec', specFile, '--state', stateFile,
+    const applied = cli(['apply', '--fixture', specFile, '--state', stateFile,
       '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000'], 'yes\n');
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[1], 'latest'])), 1n);

@@ -2,10 +2,10 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseSpec } from '../spec/index.ts';
 import { compileConfig, compileProject, configOptions } from './compile.ts';
-import { parseHcl } from './hcl.ts';
+import { fail, parseHcl } from './hcl.ts';
 import type { CompiledProject } from './compile.ts';
 import type { ParsedSpec } from '../spec/types.ts';
-import type { CommandOptions, CompiledSpec, ConfigOptions, LoadedConfig } from './types.ts';
+import type { CommandOptions, CompiledSpec, ConfigOptions, HclDocument, LoadedConfig } from './types.ts';
 import type { VariableFile, VariableValue } from './variables.ts';
 
 export const DEFAULT_WORKSPACE = 'default';
@@ -52,14 +52,13 @@ async function readOptional(file: string): Promise<string | null> {
   }
 }
 
-/** Returns the explicit spec path, or the only .ethp file or spec.json in the directory. */
-export async function findSpecFile(explicit: string | undefined, directory: string = process.cwd()): Promise<string> {
-  if (explicit) return path.resolve(explicit);
-  const entries = (await readdir(directory, { withFileTypes: true })).filter(entry => entry.isFile() || entry.isSymbolicLink());
-  const ethp = entries.filter(entry => isEthp(entry.name)).map(entry => entry.name).sort();
-  if (ethp.length > 1) throw new Error(`Found ${ethp.join(', ')}; pass --spec to choose one.`);
-  if (ethp.length === 1 && entries.some(entry => entry.name === 'spec.json')) throw new Error(`Found spec.json and ${ethp[0]}; pass --spec to choose one.`);
-  return path.resolve(directory, ethp[0] ?? 'spec.json');
+/** A project's required entry point is main.ethp in the working directory. */
+export async function findSpecFile(directory: string = process.cwd()): Promise<string> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  if (!entries.some(entry => entry.name === 'main.ethp' && (entry.isFile() || entry.isSymbolicLink()))) {
+    throw new Error(`No main.ethp in ${directory}. Run Etherplan from a directory containing main.ethp.`);
+  }
+  return path.resolve(directory, 'main.ethp');
 }
 
 /** Returns the selected workspace: the option, then ETHP_WORKSPACE, then default. */
@@ -71,20 +70,40 @@ export function selectWorkspace(option: string | undefined, env: Record<string, 
 }
 
 /**
- * Compiles an .ethp file into an unvalidated JSON spec. Var files apply in order: main.ethpvars beside
+ * Compiles every root-level .ethp file into one unvalidated JSON spec. Var files apply in order: main.ethpvars beside
  * main.ethp, then main.<workspace>.ethpvars, then each --var-file. The first two are optional.
  */
 export async function compileProjectFile(specFile: string, inputs: ProjectInputs = {}): Promise<CompiledProject> {
   const varsFile = sibling(specFile, '.ethpvars');
   const optional = [varsFile, sibling(specFile, `.${inputs.workspace ?? DEFAULT_WORKSPACE}.ethpvars`)];
-  const [source, ...texts] = await Promise.all([
-    readFile(specFile, 'utf8'),
-    ...optional.map(readOptional),
-    ...(inputs.varFiles ?? []).map(file => readFile(path.resolve(file), 'utf8')),
+  const directory = path.dirname(specFile);
+  const ethpFiles = path.basename(specFile) === 'main.ethp'
+    ? (await readdir(directory, { withFileTypes: true }))
+      .filter(entry => (entry.isFile() || entry.isSymbolicLink()) && isEthp(entry.name))
+      .map(entry => path.join(directory, entry.name)).sort()
+    : [specFile];
+  const [sources, texts] = await Promise.all([
+    Promise.all(ethpFiles.map(file => readFile(file, 'utf8'))),
+    Promise.all([
+      ...optional.map(readOptional),
+      ...(inputs.varFiles ?? []).map(file => readFile(path.resolve(file), 'utf8')),
+    ]),
   ]);
+  const documents = sources.map((source, index) => parseHcl(display(ethpFiles[index]!), source));
+  const main = documents.find(document => document.at.file === display(specFile));
+  if (!main) throw new Error(`No main.ethp in ${directory}.`);
+  const document: HclDocument = { kind: 'body', at: main.at, attributes: new Map(), blocks: [] };
+  for (const part of documents) {
+    for (const [name, attribute] of part.attributes) {
+      const first = document.attributes.get(name);
+      if (first) fail(attribute, `${name} is already set at ${first.at.file}:${first.at.line}:${first.at.column}.`);
+      document.attributes.set(name, attribute);
+    }
+    document.blocks.push(...part.blocks);
+  }
   const files: VariableFile[] = [...optional, ...(inputs.varFiles ?? []).map(file => path.resolve(file))]
     .flatMap((file, index) => texts[index] == null ? [] : [{ file: display(file), document: parseHcl(display(file), texts[index]) }]);
-  return compileProject(parseHcl(display(specFile), source!), { files, env: inputs.env ?? {}, vars: inputs.vars ?? [], varsFile: display(varsFile) });
+  return compileProject(document, { files, env: inputs.env ?? {}, vars: inputs.vars ?? [], varsFile: display(varsFile) });
 }
 
 /** Compiles an .ethp file and its variable inputs into an unvalidated JSON spec. */

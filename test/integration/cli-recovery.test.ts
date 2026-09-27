@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from '../project-cli.mjs';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
@@ -128,12 +128,12 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
     const journalFile = path.join(directory, 'journal.jsonl');
     let gate;
     try {
-      const planned = runSync(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+      const planned = runSync(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
         '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000'], anvil.rpcUrl);
       assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
       gate = await startRpcGate(anvil.rpcUrl, phase);
       const running = runAsync([
-        'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], gate.url);
       await waitForPhase(journalFile, running.child, phase);
       assert.equal(running.child.kill('SIGKILL'), true);
@@ -141,7 +141,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       gate.release();
 
       const resumed = runSync([
-        'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], anvil.rpcUrl, true);
       assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}\n${JSON.stringify(running.output())}`);
       const result = JSON.parse(resumed.stdout);
@@ -155,7 +155,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       assert.equal(new Set(journal.filter(record => record.phase === 'signed').map(record => record.transactionHash)).size, 2);
       assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
-      const verified = runSync(['verify', '--spec', specFile, '--state', stateFile], anvil.rpcUrl);
+      const verified = runSync(['verify', '--fixture', specFile, '--state', stateFile], anvil.rpcUrl);
       assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
     } finally {
       await gate?.close();

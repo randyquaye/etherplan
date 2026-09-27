@@ -242,7 +242,7 @@ test('variable blocks are checked for names, types, defaults, and use', () => {
     ['variable {}', /A variable block needs one label/],
     ['variable "Owner" {}', /Variable name Owner must match/],
     ['variable "mnemonic" {}', /mnemonic is a forbidden signer secret/],
-    ['variable "a" {\n  default = 1\n}\nvariable "a" {}', /main\.ethp:5:1: Duplicate variable "a"; it is first declared on line 2/],
+    ['variable "a" {\n  default = 1\n}\nvariable "a" {}', /main\.ethp:5:1: Duplicate variable "a"; it is first declared at main\.ethp:2:1/],
     ['variable "a" {\n  type = "string"\n}', /main\.ethp:3:10: type must be string, number, bool, address, bytes32, any, or list\(<type>\)\. Write it without quotes\./],
     ['variable "a" {\n  type = map(string)\n}', /main\.ethp:3:10: type must be string/],
     ['variable "a" {\n  type = list(string, number)\n}', /type must be string/],
@@ -407,7 +407,7 @@ resource "check" "aOwner" {
     ['secret_key = 1\n  owner = 1', /secret_key is a forbidden signer secret/],
   ];
   for (const [locals, expected] of cases) assert.throws(() => spec(source(locals)), expected, locals);
-  assert.throws(() => spec(`${source('owner = var.owner')}\nlocals {\n  owner = 2\n}`), /main\.ethp:18:3: local\.owner is already defined on line 7/);
+  assert.throws(() => spec(`${source('owner = var.owner')}\nlocals {\n  owner = 2\n}`), /main\.ethp:18:3: local\.owner is already defined at main\.ethp:7:1/);
   assert.throws(() => spec(`${source('owner = var.owner')}\nlocals "x" {}`), /A locals block has no labels/);
   assert.throws(() => spec(source('salt = contracts.a.address\n  owner = 1').replace('args     = [local.owner]', 'args = [local.owner]\n  salt = local.salt')),
     /main\.ethp:7:8: salt through local\.salt must be a constant, so it cannot reference contracts\.a\.address/);
