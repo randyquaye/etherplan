@@ -6,6 +6,7 @@ import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { labProject } from '../ethp-fixtures.ts';
 import { parseSpec } from '../../src/spec/index.ts';
+import { deriveSalt } from '../../src/spec/salt.ts';
 import { startAnvil, stopAnvil } from './anvil.ts';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
@@ -180,4 +181,27 @@ resource "contract" "doubler" {
   const other = succeeded(run(['plan', '--out', '-', ...write], false, { ETHP_VAR_salt: green }));
   assert.deepEqual(other.resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);
   assert.notEqual(other.specHash, JSON.parse(await readFile(planFile, 'utf8')).specHash);
+});
+
+test('salt = derive hashes the project mixer, and compile and plan pin the derivation beside the salt', async () => {
+  const main = await readFile(file('main.ethp'), 'utf8');
+  const derived = main.replace(/salt(\s+)= "0x[0-9a-fA-F]{64}"/g, 'salt$1= derive');
+  assert.notEqual(derived, main);
+  await writeFile(file('main.ethp'), `mixer = "etherplan/lab"\n\n${derived}`);
+  try {
+    const compiled = succeeded(runCli(['compile']));
+    assert.equal(compiled.contracts.length, 5);
+    for (const contract of compiled.contracts) {
+      assert.equal(contract.salt, deriveSalt('etherplan/lab'));
+      assert.deepEqual(contract.saltDerivation, { mixer: 'etherplan/lab' });
+    }
+    succeeded(runCli(['validate']));
+    const plan = succeeded(runCli(['plan', '--workspace', 'derive', '--out', '-', '--deployers', owner, '--owner', owner, '--max-spend-wei', maxSpend]));
+    const contracts = plan.resources.filter(resource => resource.kind === 'contract');
+    assert.deepEqual(contracts.map(resource => [resource.action, resource.salt, resource.saltDerivation]),
+      contracts.map(() => ['deploy', deriveSalt('etherplan/lab'), { mixer: 'etherplan/lab' }]));
+    assert.equal(new Set(contracts.map(resource => resource.address)).size, 5);
+  } finally {
+    await writeFile(file('main.ethp'), main);
+  }
 });

@@ -25,7 +25,7 @@ The package uses `viem` and the AWS SDK packages for its production backend. Run
 
 ## Describe desired state
 
-A specification has `schema: 1` or `schema: 2`, a numeric `chainId`, and at least one contract. It can also have `values`, `externals`, `calls`, and a CREATE2 `factory`. A contract points to a compiled JSON artifact and has either an existing address or a CREATE2 salt. A deployable contract has constructor `args`. A call declares its target, method, arguments, an allowed `before` getter value, and a desired getter value in `check`.
+A specification has `schema: 1` or `schema: 2`, a numeric `chainId`, and at least one contract. It can also have `values`, `externals`, `calls`, and a CREATE2 `factory`. A contract points to a compiled JSON artifact and has either an existing address or a CREATE2 salt. A derived salt also carries a `saltDerivation` with its `mixer` and optional `label`, and must equal keccak256 of the mixer, or of `<mixer>:<label>`. A deployable contract has constructor `args`. A call declares its target, method, arguments, an allowed `before` getter value, and a desired getter value in `check`.
 
 `schema: 2` separates references needed to resolve values from dependencies that require a verified on-chain resource before submission. A reference such as `{ "ref": "contracts.registry.address" }` resolves an address without waiting for the registry deployment receipt. Declare an execution barrier with `"after": ["contract:registry"]` on the dependent contract or call, or use `{ "ref": "contracts.registry.address", "requiresLive": true }`. Etherplan always makes a call depend on its target contract and makes writes that reference an external depend on verification of that external. It does not infer whether a constructor calls a referenced contract.
 
@@ -41,6 +41,7 @@ Write a Terraform-style project with `main.ethp` in its root directory. Every ot
 
 ```hcl
 chain_id = 31337
+mixer    = "myorg/myproject"
 
 variable "owner" {
   type = address
@@ -53,13 +54,13 @@ variable "previous_owner" {
 
 resource "contract" "registry" {
   artifact = "Registry.json"
-  salt     = "0x…"
+  salt     = derive
   args     = [var.owner]
 }
 
 resource "contract" "portal" {
   artifact = "Portal.json"
-  salt     = "0x…"
+  salt     = "0x…" # an explicit salt works beside derived ones
   args     = [contracts.registry.address, "86400"]
   after    = [contracts.registry]
 }
@@ -85,9 +86,11 @@ resource "check" "setOwnerResult" {
 
 Each variable is declared in a `variable` block, and `main.ethpvars` sets values with literal assignments, such as `owner = "0x…"`. In a field that can hold references, such as `args`, `address`, `libraries`, or a check's expected value, each `var.owner` compiles to `{ "ref": "values.owner" }`, and `contracts.registry.address` and `externals.name.address` compile to the same references as JSON. Fields that must be constant, such as `chain_id`, `salt`, `code_hash`, `signer_role`, an external's `address`, or the factory, take the variable's value instead, so `salt = var.salt` and `chain_id = var.chain_id` work. An undeclared, unset, or unused variable is an error, and the vars file cannot reference contracts. Because the variables are part of the compiled spec, changing them after `plan` makes a saved-plan apply stop with `stale-spec`.
 
-Etherplan reads a subset of HCL syntax. A file can contain attributes, blocks, comments, quoted strings, whole numbers, `true`, `false`, `null`, lists, objects, references, and the conditions described below. `target` and `after` take resources such as `contracts.registry`, `externals.token`, or `calls.setOwner`. Heredocs, string templates, arithmetic, function calls, `for` expressions, and index expressions are errors that name the file, line, and column. Write `var.owner`, not `"${var.owner}"`. A number is a whole number within JavaScript's safe range (±9007199254740991), with no decimal point or exponent; quote larger integers, such as wei amounts, as decimal strings: `"1000000000000000000"`.
+A top-level `mixer` attribute lets `salt = derive` replace a literal salt. The salt is keccak256 of the mixer, so every derived contract in the project shares one salt and gets its address from its initcode, and renaming a resource does not move it. Two contracts with identical initcode would share an address; `validate` and `plan` report the pair, and `salt = derive("second-instance")` hashes `<mixer>:<label>` for the second one. `derive` is valid only as a salt value, and `mixer` is a constant field, so `mixer = var.mixer` works. The compiled spec records the resulting `salt` beside a `saltDerivation` with the mixer and label, and the plan and state carry both. Rotating the mixer moves every derived contract, so `plan` reports each as a `conflict` with a `saltChange` reason, and a mixer edited after `plan` stops apply with `stale-spec`. A mixer or label is printable ASCII without spaces. Both are public, since the salt is in the factory transaction, and `cast keccak "<mixer>"` reproduces a derived salt.
 
-Resource types are `contract`, `external`, `call`, and `check`. Attributes are snake_case: `code_hash`, `creation_proof_mode`, `created_code`, `signer_role`, `sender_independent`, `owner_only`, and `transfers_ownership` in resources, and `chain_id`, `dependency_mode`, and `execution_assumptions` at the top level. Other names, such as `artifact`, `args`, `salt`, `method`, `libraries`, and `abi`, match the JSON fields. A top-level `factory` block with `address` and `code_hash` sets the CREATE2 factory. `args` are positional. A deployable contract or a call needs `args`, even `[]`. Block order has no effect: contracts and calls are sorted by ID, so the spec hash does not depend on the order of blocks in the file.
+Etherplan reads a subset of HCL syntax. A file can contain attributes, blocks, comments, quoted strings, whole numbers, `true`, `false`, `null`, lists, objects, references, and the conditions described below. `target` and `after` take resources such as `contracts.registry`, `externals.token`, or `calls.setOwner`. Heredocs, string templates, arithmetic, function calls other than `derive`, `for` expressions, and index expressions are errors that name the file, line, and column. Write `var.owner`, not `"${var.owner}"`. A number is a whole number within JavaScript's safe range (±9007199254740991), with no decimal point or exponent; quote larger integers, such as wei amounts, as decimal strings: `"1000000000000000000"`.
+
+Resource types are `contract`, `external`, `call`, and `check`. Attributes are snake_case: `code_hash`, `creation_proof_mode`, `created_code`, `signer_role`, `sender_independent`, `owner_only`, and `transfers_ownership` in resources, and `chain_id`, `dependency_mode`, `execution_assumptions`, and `mixer` at the top level. Other names, such as `artifact`, `args`, `salt`, `method`, `libraries`, and `abi`, match the JSON fields. A top-level `factory` block with `address` and `code_hash` sets the CREATE2 factory. `args` are positional. A deployable contract or a call needs `args`, even `[]`. Block order has no effect: contracts and calls are sorted by ID, so the spec hash does not depend on the order of blocks in the file.
 
 The compiled spec uses split dependencies. A reference such as `contracts.registry.address` resolves the predicted address but does not wait for the deployment; `after = [contracts.registry]` waits for the verified contract. Set `dependency_mode = "compatibility"` to make every reference an execution barrier. An entry in `execution_assumptions` names its consumer and reference directly: `{ consumer = contracts.portal, location = "args[0]", reference = contracts.registry.address, reason = "…" }`.
 
@@ -303,7 +306,7 @@ Top-level ABI entry order does not affect artifact identity. The normalized ABI 
 
 State separates a contract's deployment identity (address, initcode hash, and constructor inputs) from its artifact provenance (artifact and source hashes). A rebuild can change the artifact hash without changing the bytecode, for example when build metadata or settings change.
 
-For a CREATE2 contract, the plan reuses the existing deployment and reports `observation.stateComparison.artifactDrift` with the old and new artifact hashes. This requires that the address, initcode, inputs, and salt match state, that the live code hash equals the saved code hash, and that the new artifact verifies the live contract. Otherwise the contract is a `conflict`, and `artifactDrift.reasons` says why. A deployment change is not drift: when the address and the initcode or inputs both change, it is a replacement; when only one changes, it is a `conflict`. For example, a salt change with the same initcode and inputs is a `conflict`, even after a rebuild. To deploy the same contract at a new address on purpose, remove its state record first. The plan still pins the new artifact hash. Apply signs no transaction for the drift. Under its lock, apply rechecks the saved record and the live code hash, and stops with `stale-state` or `drift` if either changed. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to the record's `artifactRevisions`. Provenance, transactions, and prior-deployment fields are unchanged. A replacement starts a new revision list.
+For a CREATE2 contract, the plan reuses the existing deployment and reports `observation.stateComparison.artifactDrift` with the old and new artifact hashes. This requires that the address, initcode, inputs, and salt match state, that the live code hash equals the saved code hash, and that the new artifact verifies the live contract. Otherwise the contract is a `conflict`, and `artifactDrift.reasons` says why. A deployment change is not drift: when the address and the initcode or inputs both change, it is a replacement; when only one changes, it is a `conflict`. For example, a salt change with the same initcode and inputs is a `conflict`, even after a rebuild, and `observation.stateComparison.saltChange` explains it, such as a rotated mixer or a new `derive` label. To deploy the same contract at a new address on purpose, remove its state record first. The plan still pins the new artifact hash. Apply signs no transaction for the drift. Under its lock, apply rechecks the saved record and the live code hash, and stops with `stale-state` or `drift` if either changed. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to the record's `artifactRevisions`. Provenance, transactions, and prior-deployment fields are unchanged. A replacement starts a new revision list.
 
 An imported contract is not rebaselined automatically. After rebuilding its artifact, run `import --id contract:name --rebaseline`. The existing import record must have the same address, inputs, and code hash, and the new artifact must verify the live contract. The recorded creation transaction is reused as proof unless `--creation-tx` is given. The import provenance is kept and an artifact revision is appended. Without `--rebaseline`, import still rejects a changed artifact.
 

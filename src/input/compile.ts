@@ -3,17 +3,19 @@
 // engine never sees an expression. Each error names the file, line, and column of the attribute, block, or
 // value that caused it.
 import { fail } from './hcl.ts';
-import { Evaluator, KINDS, checkReferences, describeValue, literal } from './evaluate.ts';
+import { DerivedSalt, Evaluator, KINDS, checkReferences, describeValue, literal } from './evaluate.ts';
 import { assertNotSecret, declareVariables, resolveVariables } from './variables.ts';
+import { MIXER, MIXER_HINT } from '../spec/salt.ts';
 import type { JsonObject, JsonValue } from '../types.ts';
+import type { SaltDerivation } from '../spec/types.ts';
 import type { NameScope, Root, Target } from './evaluate.ts';
 import type { VariableInputs, VariableValue } from './variables.ts';
 import type { CommandOptions, CompiledConfig, CompiledSpec, ConfigOptionName, ConfigOptions, HclAttribute, HclBlock, HclBody, HclDocument, HclExpression, Located } from './types.ts';
 
 type ResourceType = 'contract' | 'external' | 'call' | 'check';
-type DecoderKind = 'constant' | 'value' | 'target' | 'after' | 'creationMode' | 'createdCode';
+type DecoderKind = 'constant' | 'salt' | 'value' | 'target' | 'after' | 'creationMode' | 'createdCode';
 type FieldMap = Record<string, readonly [string, DecoderKind]>;
-type Decoder = (node: HclExpression, name: string) => JsonValue;
+type Decoder = (node: HclExpression, name: string) => JsonValue | DerivedSalt;
 type DraftResource = Record<string, JsonValue | undefined> & {
   checks?: Record<string, JsonValue>;
   check?: JsonObject;
@@ -34,7 +36,7 @@ const CONTRACT_FIELDS: FieldMap = {
   source: ['source', 'constant'],
   name: ['name', 'constant'],
   address: ['address', 'value'],
-  salt: ['salt', 'constant'],
+  salt: ['salt', 'salt'],
   args: ['args', 'value'],
   libraries: ['libraries', 'value'],
   after: ['after', 'after'],
@@ -60,10 +62,10 @@ const CALL_FIELDS: FieldMap = {
 };
 const FACTORY_FIELDS: FieldMap = { address: ['address', 'constant'], code_hash: ['codeHash', 'constant'] };
 // JSON field order for readable compile output. Key order does not affect spec hashes.
-const CONTRACT_ORDER = ['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent'];
+const CONTRACT_ORDER = ['id', 'artifact', 'source', 'name', 'address', 'salt', 'saltDerivation', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent'];
 const EXTERNAL_ORDER = ['address', 'codeHash', 'abi', 'checks'];
 const CALL_ORDER = ['id', 'target', 'method', 'args', 'check', 'before', 'after', 'signerRole', 'ownerOnly', 'transfersOwnership'];
-const TOP_ATTRIBUTES = new Set(['chain_id', 'dependency_mode', 'execution_assumptions']);
+const TOP_ATTRIBUTES = new Set(['chain_id', 'dependency_mode', 'execution_assumptions', 'mixer']);
 const TOP_BLOCKS = new Set(['resource', 'factory', 'variable', 'locals']);
 const ASSUMPTION_FIELDS = ['consumer', 'location', 'reference', 'reason'];
 const CALL_CHECK_FIELDS = new Set(['getter', 'args', 'before', 'equals']);
@@ -106,11 +108,20 @@ function fieldAttributes(block: HclBlock, fields: FieldMap, resource: boolean): 
   });
 }
 
+function derivationJson({ mixer, label }: SaltDerivation): JsonObject {
+  return label === undefined ? { mixer } : { mixer, label };
+}
+
 function compileBlock(block: HclBlock, fields: FieldMap, decoders: Record<DecoderKind, Decoder>, resource = true): DraftResource {
   const item: DraftResource = {};
   for (const attribute of fieldAttributes(block, fields, resource)) {
     const [field, kind] = fields[attribute.name]!;
     const value = decoders[kind](attribute.value, attribute.name);
+    if (value instanceof DerivedSalt) {
+      item.salt = value.salt;
+      item.saltDerivation = derivationJson(value.derivation);
+      continue;
+    }
     // As in Terraform, null leaves the attribute unset, so a variable can supply it in some worlds only.
     if (value !== null) item[field] = value;
   }
@@ -274,13 +285,14 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
   const usedVariables = new Set<string>();
   const usedLocals = new Set<string>();
   const localEdges = new Map<string, Set<string>>();
-  const check = (node: HclExpression, what: string, local?: string) => checkReferences(node, what, scope, (root, name) => {
+  const derives: Located[] = [];
+  const check = (node: HclExpression, what: string, local?: string, salt?: (node: Located) => void) => checkReferences(node, what, scope, (root, name) => {
     if (root === 'var') usedVariables.add(name);
     else {
       usedLocals.add(name);
       if (local !== undefined) localEdges.set(local, (localEdges.get(local) ?? new Set()).add(name));
     }
-  });
+  }, salt);
   for (const attribute of document.attributes.values()) {
     const { value } = attribute;
     if (attribute.name === 'execution_assumptions' && value.kind === 'list') {
@@ -292,7 +304,10 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
   }
   for (const [name, attribute] of locals) check(attribute.value, `local.${name}`, name);
   for (const block of [...document.blocks.filter(item => item.type === 'resource'), ...factories]) {
-    for (const attribute of block.body.attributes.values()) check(attribute.value, attribute.name);
+    const contract = block.type === 'resource' && block.labels[0] === 'contract';
+    for (const attribute of block.body.attributes.values()) {
+      check(attribute.value, attribute.name, undefined, contract && attribute.name === 'salt' ? node => derives.push(node) : undefined);
+    }
   }
   assertAcyclic(locals, localEdges);
 
@@ -312,6 +327,15 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
 
   const chainId = evaluator.constant(chain.value, 'chain_id');
   assert(typeof chainId === 'number' && Number.isSafeInteger(chainId) && chainId > 0, chain.value, 'chain_id must be a positive integer.');
+  // The mixer is required exactly when a salt uses derive, even in a branch or resource that this world drops.
+  const mixerAttribute = document.attributes.get('mixer');
+  const mixer = mixerAttribute ? evaluator.constant(mixerAttribute.value, 'mixer') : null;
+  if (mixer !== null) {
+    assert(typeof mixer === 'string' && MIXER.test(mixer), mixerAttribute?.value, `mixer must be ${MIXER_HINT}; found ${describeValue(mixer)}.`);
+    evaluator.mixer = mixer;
+  }
+  assert(derives.length === 0 || mixer !== null, derives[0], 'salt uses derive, so the spec needs a top-level mixer attribute.');
+  assert(mixer === null || derives.length > 0, mixerAttribute, 'mixer is unused; no salt uses derive.');
   const fields = { contract: CONTRACT_FIELDS, external: EXTERNAL_FIELDS, call: CALL_FIELDS };
   for (const type of ['contract', 'external', 'call'] as const) {
     for (const [name, block] of blocks[type]) {
@@ -326,6 +350,7 @@ export function compileProject(document: HclDocument, inputs: VariableInputs = {
 
   const decoders: Record<DecoderKind, Decoder> = {
     constant: (node, name) => evaluator.constant(node, name),
+    salt: (node, name) => evaluator.salt(node, name),
     value: (node, name) => evaluator.value(node, name),
     creationMode: (node, name) => {
       const mode = evaluator.constant(node, name);

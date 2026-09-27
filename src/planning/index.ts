@@ -12,7 +12,7 @@ import type { Block } from 'viem';
 import type { ContractStateResource, StateFile } from '../state/types.ts';
 import type { Address, ChainIdentity, ContractId, DistributiveOmit, Hash, ResourceId } from '../types.ts';
 import type { BindingObservation, VerificationResult, VerifyOptions } from '../verification/types.ts';
-import type { ArtifactDrift, CreatePlanInput, DeployableContract, Plan, PlanAction, PlanObservation, PlannedResource, PreparedContract, PreparedResource, StateComparison } from './types.ts';
+import type { ArtifactDrift, CreatePlanInput, DeployableContract, Plan, PlanAction, PlanObservation, PlannedResource, PreparedContract, PreparedResource, SaltChange, StateComparison } from './types.ts';
 
 export { prepareResources, transactionFor } from './resources.ts';
 
@@ -45,7 +45,7 @@ function planResource(resource: PreparedResource, observation: PlanObservation, 
   };
   copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
-    copyDefined(result, resource, ['artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']);
+    copyDefined(result, resource, ['artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'saltDerivation', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']);
   } else if (resource.kind === 'external') {
     copyDefined(result, resource, ['expectedCodeHash', 'checks']);
     result.signerRole = null;
@@ -103,6 +103,29 @@ function artifactDrift(resource: PreparedContract, record: ContractStateResource
   };
 }
 
+function describeLabel(label: string | undefined): string {
+  return label === undefined ? 'no label' : `label "${label}"`;
+}
+
+// Explains a salt that differs from the record: a rotated mixer, a changed label, or a switch between derived and explicit.
+function saltChange(resource: PreparedContract, record: ContractStateResource): SaltChange | undefined {
+  const previousSalt = record.salt ?? null;
+  const salt = resource.salt ?? null;
+  if (lower(previousSalt) === lower(salt)) return undefined;
+  const previous = record.saltDerivation ?? null;
+  const current = resource.saltDerivation ?? null;
+  let reason: string;
+  if (salt === null) reason = 'The contract now adopts an address instead of deploying with the saved salt.';
+  else if (previousSalt === null) reason = 'The saved record has no salt; the contract was imported by address.';
+  else if (previous && current) {
+    reason = previous.mixer !== current.mixer ? `The mixer changed from "${previous.mixer}" to "${current.mixer}".`
+      : `The derive label changed from ${describeLabel(previous.label)} to ${describeLabel(current.label)}.`;
+  } else if (previous) reason = `The salt is now explicit; the saved salt was derived from mixer "${previous.mixer}".`;
+  else if (current) reason = `The salt is now derived from mixer "${current.mixer}"; the saved salt was explicit.`;
+  else reason = 'The saved salt differs from the spec salt.';
+  return { previousSalt, salt, previousDerivation: previous, derivation: current, reason };
+}
+
 // Deployment identity is the address, initcode, and constructor inputs; the artifact hash is provenance. Both address
 // and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only change is drift.
 function compareState(resource: PreparedResource, state: StateFile | null, verification: VerificationResult): StateComparison | null {
@@ -130,6 +153,8 @@ function compareState(resource: PreparedResource, state: StateFile | null, verif
     comparison.artifactDrift = artifactDrift(resource, record, verification);
     comparison.conflict = !comparison.artifactDrift.accepted;
   }
+  const change = saltChange(resource, record);
+  if (change) comparison.saltChange = change;
   return comparison;
 }
 

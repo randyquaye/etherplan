@@ -1,4 +1,5 @@
 import { isAddress } from 'viem';
+import { assertDerivedSalt, assertSaltDerivation } from './salt.ts';
 import type { ContractId, DistributiveOmit, Hash, JsonValue, ResourceId } from '../types.ts';
 import type { DependencyEdge, DependencyGraphs, DependencyMode, Factory, OrderedNode, ParsedSpec, ResolvedAddresses, SpecContract, SpecValue } from './types.ts';
 
@@ -214,7 +215,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
   const ids = new Set<string>();
   for (const item of spec.contracts) {
     assert(isObject(item), 'Every contract must be an object.');
-    assertKeys(item, new Set(['id', 'artifact', 'source', 'name', 'address', 'salt', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']), `Contract ${item.id ?? '<unknown>'}`);
+    assertKeys(item, new Set(['id', 'artifact', 'source', 'name', 'address', 'salt', 'saltDerivation', 'args', 'libraries', 'checks', 'after', 'codeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent']), `Contract ${item.id ?? '<unknown>'}`);
     assertId(item.id, 'Contract ID');
     const fullId = `contract:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
@@ -226,6 +227,10 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.address !== undefined) assertAddressOrReference(item.address, `${fullId} address`);
     if (item.salt !== undefined) assertHash(item.salt, `${fullId} salt`);
     if (item.salt !== undefined) assert(Array.isArray(item.args), `${fullId} needs args for deployment.`);
+    if (item.saltDerivation !== undefined) {
+      assert(item.salt !== undefined, `${fullId} saltDerivation requires a CREATE2 salt.`);
+      assertDerivedSalt(item.salt, assertSaltDerivation(item.saltDerivation, `${fullId} saltDerivation`), fullId);
+    }
     if (item.args !== undefined) assert(Array.isArray(item.args), `${fullId} args must be an array.`);
     if (item.libraries !== undefined) assert(isObject(item.libraries), `${fullId} libraries must be an object.`);
     if (item.checks !== undefined) assertChecks(item.checks, `${fullId} checks`);

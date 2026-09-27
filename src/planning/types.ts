@@ -2,7 +2,7 @@
 // planResource, decide, compareState, artifactDrift, and createPlan in index.ts.
 import type { Artifacts, NormalizedArtifact } from '../artifacts/types.ts';
 import type { ScheduleWave } from '../scheduling/types.ts';
-import type { DependencyEdge, DependencyGraphs, DependencyMode, ExecutionAssumption, Factory } from '../spec/types.ts';
+import type { DependencyEdge, DependencyGraphs, DependencyMode, ExecutionAssumption, Factory, SaltDerivation } from '../spec/types.ts';
 import type { StateFile } from '../state/types.ts';
 import type { Address, CallId, ChainIdentity, Client, ContractId, DecimalString, ExternalId, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
@@ -72,6 +72,8 @@ export interface PreparedContract extends PreparedBase {
   initcode?: Hex;
   initcodeHash?: Hash;
   salt?: Hash;
+  /** Present when the salt was derived from a mixer. */
+  saltDerivation?: SaltDerivation;
   factory?: Factory;
 }
 
@@ -131,6 +133,15 @@ export interface ArtifactDrift {
   reasons: string[];
 }
 
+/** Why a contract's salt differs from its state record. */
+export interface SaltChange {
+  previousSalt: Hash | null;
+  salt: Hash | null;
+  previousDerivation: SaltDerivation | null;
+  derivation: SaltDerivation | null;
+  reason: string;
+}
+
 /** How a contract compares with its state record. Address and deployment identity both changing is a replacement. */
 export interface StateComparison {
   previousAddress: Address;
@@ -146,6 +157,8 @@ export interface StateComparison {
   conflict: boolean;
   liveCodeMatchesState: boolean;
   artifactDrift?: ArtifactDrift;
+  /** Present when the salt differs from the record. */
+  saltChange?: SaltChange;
 }
 
 /** The verification result plus what the planner learned from state and dependencies. */
@@ -173,6 +186,7 @@ export interface PlannedContract extends PlannedBase {
   initcodeHash?: Hash;
   inputsHash: Hash;
   salt?: Hash;
+  saltDerivation?: SaltDerivation;
   factory?: Factory;
   checks: PreparedCheck[];
   libraries?: Record<string, Address>;
