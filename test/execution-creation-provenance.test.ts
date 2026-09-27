@@ -9,7 +9,9 @@ import { hashJson } from '../src/identity.ts';
 import { createPlan, prepareResources } from '../src/planning/index.ts';
 import { graph, parseSpec } from '../src/spec/index.ts';
 import { importResource, readState } from '../src/state/index.ts';
-import { verifyResource } from '../src/verification/index.ts';
+import { PROBE_ADDRESS, verifyResource } from '../src/verification/index.ts';
+import { readLocalJournal } from '../src/execution/journal.ts';
+import { memoryBackend } from './execution/memory-backend.ts';
 import { deployerA, deployerB, startAnvil } from './execution/chain.ts';
 
 const FACTORY = '0x4e59b44847b379578588920cA78FbF26c0B4956C';
@@ -49,8 +51,138 @@ async function setup() {
   const apply = (plan, extra = {}) => applyPlan({ plan, spec, artifacts, client: chain.client, signers: { deployer: [deployerA] },
     stateFile, journalFile, pollIntervalMs: 20, ...extra });
   const close = async () => { await chain.stop(); await rm(directory, { recursive: true, force: true }); };
-  return { chain, spec, artifacts, resource, input, stateFile, apply, attack, close };
+  return { chain, spec, artifacts, resource, input, stateFile, journalFile, apply, attack, close };
 }
+
+for (const [mode, pipeline, legacy] of [
+  ['local', false, false], ['production', false, false], ['production', true, false], ['production', false, true],
+] as const) {
+  test(`${mode}${pipeline ? ' pipeline' : ''} resumes a ${legacy ? 'terminal' : 'provider'} CREATE2 replay failure from the original receipt`, async () => {
+    const ws = await setup();
+    try {
+      const genesisHash = (await ws.chain.client.getBlock({ blockNumber: 0n })).hash;
+      const scope = { project: 'test', environment: 'dev', label: 'rpc-replay', chainId: 31337, genesisHash };
+      const backend = mode === 'production' ? memoryBackend(scope) : null;
+      const storage = backend ? { ...backend, scope, confirmations: 1 } : { stateFile: ws.stateFile, journalFile: ws.journalFile };
+      const plan = await createPlan({ ...ws.input, ...(pipeline ? { signers: null, pipeline: { deployers: [deployerA.address], parallel: false } } : {}) });
+      const replayError = Object.assign(new Error('https://rpc.example/v2/secret-key'), legacy ? {} : { name: 'InternalRpcError', code: -32603 });
+      const failingClient = Object.assign(Object.create(ws.chain.client), {
+        call: async request => {
+          if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2))) throw replayError;
+          return ws.chain.client.call(request);
+        },
+      });
+      const apply = client => applyPlan({ plan, spec: ws.spec, artifacts: ws.artifacts, client, signers: { deployer: [deployerA] },
+        ...storage, pipeline, pollIntervalMs: 20, verificationTimeoutMs: 0 });
+      await assert.rejects(apply(failingClient), error => error.code === 'postcondition' && error.retryable === !legacy && !error.message.includes('secret-key'));
+      const history = backend ? backend.records : await readLocalJournal(ws.journalFile);
+      const signed = history.filter(record => record.phase === 'signed');
+      const receipt = history.find(record => record.phase === 'receipt');
+      assert.equal(signed.length, 1);
+      assert.equal(receipt?.receipt.status, 'success');
+      assert.equal(history.at(-1)?.phase, 'failed');
+      assert.equal(await ws.chain.client.getTransactionCount({ address: deployerA.address }), 1);
+      if (mode === 'local' && !legacy) {
+        await assert.rejects(apply(failingClient), error => error.code === 'postcondition' && error.retryable);
+        assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+      }
+      const fresh = await createPlan({ ...ws.input, journalRecords: history, client: ws.chain.client });
+      assert.equal(fresh.resources[0].action, 'unverified');
+
+      const resumed = await apply(ws.chain.client);
+      assert.equal(resumed.status, 'applied');
+      assert.equal(resumed.transactionsSigned, 0);
+      const after = backend ? backend.records : await readLocalJournal(ws.journalFile);
+      assert.equal(after.filter(record => record.phase === 'signed').length, 1);
+      assert.equal(after.at(-1)?.phase, 'verified');
+      const state = backend ? (await backend.stateStore.read(scope))?.value : await readState(ws.stateFile);
+      assert.equal(state.resources['contract:owned'].creationProof.transactionHash, signed[0].transactionHash.toLowerCase());
+    } finally { await ws.close(); }
+  });
+}
+
+test('a transient receipt-block RPC error is retried and the deployment completes in one apply', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    let failures = 0;
+    const flakyClient = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2)) && failures < 2) {
+        failures++;
+        throw Object.assign(new Error('temporary provider fault'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    const result = await ws.apply(plan, { client: flakyClient, verificationTimeoutMs: 5_000 });
+    assert.equal(result.status, 'applied');
+    assert.equal(failures, 2);
+    const history = await readLocalJournal(ws.journalFile);
+    assert.equal(history.filter(record => record.phase === 'signed').length, 1);
+    assert.equal(history.filter(record => record.phase === 'failed').length, 0);
+    assert.equal((await readState(ws.stateFile)).resources['contract:owned'].creationProof.kind, 'create2');
+  } finally { await ws.close(); }
+});
+
+test('an independent verification RPC completes a deployment when the primary rejects creation replay', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    let replayFailures = 0;
+    let codeFailures = 0;
+    const incompatible = Object.assign(Object.create(ws.chain.client), { getCode: async request => {
+      if (request.address.toLowerCase() === ws.resource.address.toLowerCase() && request.blockNumber !== undefined && replayFailures > 0) {
+        codeFailures++;
+        throw Object.assign(new Error('temporary code read failure'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return ws.chain.client.getCode(request);
+    }, call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.data?.toLowerCase().includes(SALT.slice(2))) {
+        replayFailures++;
+        throw Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    const result = await ws.apply(plan, { client: incompatible, verificationClient: ws.chain.client, verificationTimeoutMs: 1_000 });
+    assert.equal(result.status, 'applied');
+    assert.ok(replayFailures >= 1);
+    assert.ok(codeFailures >= 1); // Final desired-state revalidation also uses the backup.
+    const history = await readLocalJournal(ws.journalFile);
+    assert.equal(history.filter(record => record.phase === 'signed').length, 1);
+    assert.equal(history.filter(record => record.phase === 'failed').length, 0);
+    assert.equal((await readState(ws.stateFile)).resources['contract:owned'].creationProof.kind, 'create2');
+  } finally { await ws.close(); }
+});
+
+test('a verification RPC on another chain is rejected before signing', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    const otherChain = Object.assign(Object.create(ws.chain.client), { getChainId: async () => 1 });
+    await assert.rejects(ws.apply(plan, { verificationClient: otherChain }), error => error.code === 'wrong-chain');
+    assert.equal(await ws.chain.client.getTransactionCount({ address: deployerA.address }), 0);
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 0);
+  } finally { await ws.close(); }
+});
+
+test('an incompatible production RPC stops before a signature', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    const scope = { project: 'test', environment: 'dev', label: 'override-preflight', chainId: 31337,
+      genesisHash: (await ws.chain.client.getBlock({ blockNumber: 0n })).hash };
+    const backend = memoryBackend(scope);
+    const incompatible = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.stateOverride?.some(override => override.nonce === 0)) {
+        throw Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    await assert.rejects(applyPlan({ plan, spec: ws.spec, artifacts: ws.artifacts, client: incompatible, signers: { deployer: [deployerA] },
+      ...backend, scope, confirmations: 1, pollIntervalMs: 20 }), error => error.code === 'rpc-capability' && error.retryable);
+    assert.equal(backend.records.filter(record => record.phase === 'signed').length, 0);
+    assert.equal(await ws.chain.client.getTransactionCount({ address: deployerA.address }), 0);
+  } finally { await ws.close(); }
+});
 
 test('a fresh CREATE2 plan rejects a matching runtime deployed by another origin', async () => {
   const ws = await setup();

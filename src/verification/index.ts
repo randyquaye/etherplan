@@ -1,6 +1,6 @@
 import { concatHex, encodeAbiParameters, encodeDeployData, keccak256 } from 'viem';
 import { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, immutableEntries, linkBytecode, linkedLibraries } from './bytecode.ts';
-import { simulateCreate2 } from './simulate.ts';
+import { replayProviderFailure, simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
 import { DEFAULT_FACTORY } from '../spec/index.ts';
@@ -401,6 +401,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     transaction = await client.getTransaction({ hash: transactionHash });
     receipt = await client.getTransactionReceipt({ hash: transactionHash });
   } catch (error) {
+    if (replayProviderFailure(error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation transaction is not available: ${safeError(error)}`);
     return result;
   }
@@ -434,6 +435,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     chain = { id: await client.getChainId(), genesisHash: (await client.getBlock({ blockNumber: 0n })).hash };
     block = await client.getBlock({ blockNumber: receipt.blockNumber });
   } catch (error) {
+    if (replayProviderFailure(error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -456,6 +458,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
   let live;
   try { live = options.liveCode ?? await client.getCode({ address: resource.address, ...at(blockOf(options.blockNumber)) }); }
   catch (error) {
+    if (replayProviderFailure(error)) result.replayFailure = 'provider';
     result.reasons.push(`Current runtime is not available: ${safeError(error)}`);
     return result;
   }
@@ -529,6 +532,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
       currentFactory = await client.getCode({ address: factory.address, ...at(blockOf(options.blockNumber)) });
       if (!saved || pinned) receiptFactory = await client.getCode({ address: factory.address, blockNumber: receipt.blockNumber });
     } catch (error) {
+      if (replayProviderFailure(error)) result.replayFailure = 'provider';
       result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
       return result;
     }
@@ -558,6 +562,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
   let receiptCode;
   try { receiptCode = await client.getCode({ address: resource.address, blockNumber: receipt.blockNumber }); }
   catch (error) {
+    if (replayProviderFailure(error)) result.replayFailure = 'provider';
     result.reasons.push(`Runtime at the creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -654,7 +659,12 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     const runtime = await simulateCreate2(client, { factory: resource.factory!.address, salt: resource.salt!, initcode, address: resource.address, blockNumber: receipt.blockNumber, account: transaction.from });
     result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
-    result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)} See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
+    if (replayProviderFailure(error)) {
+      result.replayFailure = 'provider';
+      result.reasons.push('Creation simulation at the receipt block could not be completed by the RPC provider. Retry this saved plan with a compatible RPC endpoint.');
+    } else {
+      result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)} See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
+    }
     return result;
   }
   if (result.exactRuntime) {

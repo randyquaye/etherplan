@@ -3,10 +3,12 @@ import { canonicalJson, hashJson } from '../identity.ts';
 import { encodeMethod } from '../validation/index.ts';
 import { ApplyError } from './errors.ts';
 import { DEFAULT_FACTORY, dependencyGraphs, dependencyMode, dependencyWarnings, usesDependencyPlan } from '../spec/index.ts';
+import { checkCreate2ReplayOverrides } from '../verification/simulate.ts';
 import { executionWaves } from '../scheduling/index.ts';
+import { pause } from './shared.ts';
 import type { DeployableContract, Plan, PlannedContract, PlannedResource, PlannedTransaction, PreparedCall, PreparedContract, PreparedResource } from '../planning/types.ts';
 import type { Factory } from '../spec/types.ts';
-import type { Address, Client, ContractId, Hash, Hex, JsonSafe, ResourceId } from '../types.ts';
+import type { Address, ChainIdentity, Client, ContractId, Hash, Hex, JsonSafe, ResourceId } from '../types.ts';
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
 const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
@@ -86,6 +88,58 @@ export async function checkFactory(client: Client, factory: Factory): Promise<vo
   const codeHash = code && code !== '0x' ? keccak256(code) : null;
   if (codeHash?.toLowerCase() !== factory.codeHash.toLowerCase()) {
     throw new ApplyError('factory', `CREATE2 factory ${factory.address} code is absent or differs.`, { evidence: { expected: factory.codeHash, actual: codeHash } });
+  }
+}
+
+/** An independent verification provider must agree with the plan's chain and receipt block. */
+export async function checkVerificationChain(client: Client, chain: ChainIdentity, receipt?: { blockNumber: bigint; blockHash: Hash }): Promise<void> {
+  const id = await client.getChainId();
+  const genesis = await client.getBlock({ blockNumber: 0n });
+  if (id !== chain.id || genesis.hash?.toLowerCase() !== chain.genesisHash.toLowerCase()) {
+    throw new ApplyError('wrong-chain', 'Verification RPC belongs to a different chain.');
+  }
+  if (receipt) {
+    const block = await client.getBlock({ blockNumber: receipt.blockNumber });
+    if (block.hash?.toLowerCase() !== receipt.blockHash.toLowerCase()) {
+      throw new ApplyError('reorg', 'Verification RPC has a different receipt block.', { retryable: true });
+    }
+  }
+}
+
+/** Reject an incompatible replay endpoint before any deployment in this batch is signed. */
+export async function checkReplayCapabilities(client: Client, actions: readonly PreparedAction[], verificationClient: Client | null = null, chain?: ChainIdentity): Promise<void> {
+  const checked = new Set<string>();
+  if (verificationClient && actions.some(item => item.planned.action === 'deploy')) {
+    if (!chain) throw new ApplyError('config', 'Verification RPC needs the plan chain identity.');
+    try { await checkVerificationChain(verificationClient, chain); }
+    catch (error) {
+      if (error instanceof ApplyError) throw error;
+      throw new ApplyError('rpc-capability', 'Verification RPC chain identity could not be checked before signing.', { retryable: true });
+    }
+  }
+  for (const item of actions) {
+    if (item.planned.action !== 'deploy' || item.resource.kind !== 'contract' || !item.resource.factory ||
+      item.resource.creationProofMode === 'pinned-runtime') continue;
+    const factory = item.resource.factory.address;
+    if (checked.has(factory.toLowerCase())) continue;
+    checked.add(factory.toLowerCase());
+    async function capable(candidate: Client): Promise<boolean> {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try { await checkCreate2ReplayOverrides(candidate, factory); return true; }
+        catch { if (attempt < 2) await pause(250 * 2 ** attempt); }
+      }
+      return false;
+    }
+    if (verificationClient) {
+      if (!await capable(verificationClient)) {
+        throw new ApplyError('rpc-capability', 'Verification RPC cannot perform the historical overrides required for CREATE2 verification.',
+          { actionId: item.planned.id, retryable: true });
+      }
+    }
+    if (!await capable(client) && !verificationClient) {
+      throw new ApplyError('rpc-capability', 'RPC cannot perform the historical overrides required for CREATE2 verification. Use a compatible endpoint before signing.',
+        { actionId: item.planned.id, retryable: true });
+    }
   }
 }
 

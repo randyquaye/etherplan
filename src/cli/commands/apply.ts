@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../execution/index.ts';
 import { createPlan } from '../../planning/index.ts';
 import { readState, validateState } from '../../state/index.ts';
@@ -20,6 +21,12 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     maxFeePerGas: options['replace-max-fee-per-gas'], maxPriorityFeePerGas: options['replace-priority-fee-per-gas'],
     maxCostWei: options['replace-max-cost-wei'],
   } as ReplacementFees : undefined;
+  const verificationTimeoutMs = options['verification-timeout-ms'] === undefined ? undefined : Number(options['verification-timeout-ms']);
+  const verificationRpcUrl = process.env.ETH_VERIFICATION_RPC_URL;
+  const verificationOptions = {
+    ...(verificationTimeoutMs === undefined ? {} : { verificationTimeoutMs }),
+    ...(verificationRpcUrl ? { verificationClient: createPublicClient({ transport: http(verificationRpcUrl) }) } : {}),
+  };
   if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
   if (options.backend && !options['signer-module']) throw new Error('AWS apply needs --signer-module file.mjs.');
   if (options.plan && options['max-spend-wei']) throw new Error('A saved plan already pins maxSpendWei; omit --max-spend-wei.');
@@ -55,10 +62,10 @@ export async function apply(context: ChainCommandContext): Promise<void> {
   if (options.backend) {
     const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
     if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
-    print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...signerSource, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
+    print(await applyPlan({ plan, spec, artifacts, client, ...backend, ...signerSource, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions }));
     return;
   }
   const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
-  print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees }));
+  print(await applyPlan({ plan, spec, artifacts, client, ...signerSource, stateFile, journalFile, parallel: options.parallel ?? false, pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions }));
   return;
 }

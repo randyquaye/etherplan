@@ -7,6 +7,7 @@ import { transactionFor } from './shared.ts';
 import { decide, checkExecutionDependencies, finish } from './outcome.ts';
 import { append, fail } from './report.ts';
 import { assertPinnedAbsent, pinnedIntentFields } from '../verification/pinned-runtime.ts';
+import { checkReplayCapabilities } from './preflight.ts';
 import { assertSignerHistory, recordReceipt, send, signWithLease } from './settlement.ts';
 import type { Hash } from '../types.ts';
 import type { ScheduleEntry } from '../scheduling/types.ts';
@@ -48,6 +49,7 @@ export interface SerialSigningInput {
 }
 
 export async function signBatch(ctx: ApplyContext, { wave, work }: SerialSigningInput): Promise<SignedBatchJob[]> {
+  await checkReplayCapabilities(ctx.client, work.map(job => job.item), ctx.verificationClient, ctx.plan.chain);
   await checkExecutionDependencies(ctx, work);
   await assertSignerHistory(ctx, work.map(job => job.signer.address));
   // Read every signer's nonce and reject pending transactions before recording any intent.

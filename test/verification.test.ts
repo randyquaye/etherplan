@@ -7,6 +7,7 @@ import { concatHex, encodeDeployData, keccak256, pad } from 'viem';
 import { normalizeArtifact } from '../src/artifacts.ts';
 import { canonicalJson, hashJson } from '../src/identity.ts';
 import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../src/verification/limitations.ts';
+import { replayProviderFailure } from '../src/verification/simulate.ts';
 import {
   PROBE_ADDRESS,
   abiArguments,
@@ -34,6 +35,14 @@ const SALT = `0x${'11'.repeat(32)}`;
 const DOUBLER = `${fixture.sourceName}:Doubler`;
 const GENESIS_HASH = `0x${'aa'.repeat(32)}`;
 const RECEIPT_HASH = `0x${'bb'.repeat(32)}`;
+
+test('receipt replay distinguishes provider errors from EVM reverts', () => {
+  const internal = Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+  const call = Object.assign(new Error('call failed'), { name: 'CallExecutionError', cause: internal });
+  assert.equal(replayProviderFailure(call), true);
+  const reverted = Object.assign(new Error('execution reverted'), { name: 'ExecutionRevertedError', code: 3, cause: internal });
+  assert.equal(replayProviderFailure(Object.assign(new Error('call failed'), { name: 'CallExecutionError', cause: reverted })), false);
+});
 
 function word(value) {
   return (typeof value === 'bigint' ? value.toString(16) : value.slice(2)).toLowerCase().padStart(64, '0');
