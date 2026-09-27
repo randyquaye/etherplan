@@ -7,6 +7,7 @@ import { createAwsBackend } from '../execution/aws.ts';
 import { deploymentScope, readStoredJournal } from '../execution/backends.ts';
 import { readLocalJournal } from '../execution/journal.ts';
 import { safeExternalError } from '../execution/rpc-error.ts';
+import { DEFAULT_WORKSPACE } from '../input/project.ts';
 import type { AwsBackend, DeploymentScope, SignerProvider, SignerRoles, Signers } from '../execution/types.ts';
 import type { Address, ChainIdentity, Client, Hex } from '../types.ts';
 import type { CliOptions } from './options.ts';
@@ -26,8 +27,14 @@ export function publicClient(): Client {
   return createPublicClient({ transport: http(process.env.ETH_RPC_URL) });
 }
 
-export function stateFileFor(specFile: string, options: CliOptions): string {
-  return path.resolve(options.state ?? path.join(path.dirname(specFile), '.etherplan/state.json'));
+/** The explicit or configured state file, or .etherplan/<workspace>/state.json beside the spec. */
+export function stateFileFor(specFile: string, options: CliOptions, workspace = DEFAULT_WORKSPACE): string {
+  return path.resolve(options.state ?? path.join(path.dirname(specFile), '.etherplan', workspace, 'state.json'));
+}
+
+/** Moves a configured file into a workspace directory beside it, so workspaces sharing one config keep separate files. */
+export function inWorkspace(file: string, workspace: string): string {
+  return path.join(path.dirname(file), workspace, path.basename(file));
 }
 
 export async function planningJournal(stateFile: string, options: CliOptions, backend?: Backend): Promise<RecoveryRecord[]> {

@@ -6,21 +6,24 @@ export type CliOptions = {
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
   'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean;
+  var?: string[]; 'var-file'?: string[]; workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
   return value !== undefined && Object.hasOwn(COMMANDS, value);
 }
+// Options that choose the spec's variable values and state. Every command that reads a spec takes them.
+const INPUTS = ['var', 'var-file', 'workspace'];
 export const COMMANDS = {
-  validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec'] },
-  compile: { description: 'Print the canonical JSON spec for a .json or .ethp spec.', options: ['spec'] },
-  graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec'] },
-  impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value'] },
-  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei'] },
-  verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend'] },
-  schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline'] },
-  import: { description: 'Record a verified existing contract in local state.', options: ['spec', 'state', 'id', 'creation-tx', 'rebaseline'] },
-  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['spec', 'out'] },
+  validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec', ...INPUTS] },
+  compile: { description: 'Print the canonical JSON spec for a .json or .ethp spec.', options: ['spec', ...INPUTS] },
+  graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec', ...INPUTS] },
+  impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value', ...INPUTS] },
+  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', ...INPUTS] },
+  verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend', ...INPUTS] },
+  schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
+  import: { description: 'Record a verified existing contract in local state.', options: ['spec', 'state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
+  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['spec', 'out', ...INPUTS] },
   status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
 };
 const OPTION_HELP = {
@@ -28,7 +31,7 @@ const OPTION_HELP = {
   value: 'Value name for impact',
   out: 'Output path',
   plan: 'Saved plan file',
-  state: 'State file (default: .etherplan/state.json beside the spec)',
+  state: 'State file (default: .etherplan/<workspace>/state.json beside the spec)',
   journal: 'Journal file (default: <state-file>.journal.jsonl)',
   backend: 'Production backend config file',
   'signer-module': 'Signer module for plan or apply',
@@ -43,8 +46,12 @@ const OPTION_HELP = {
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
+  var: 'Set a declared variable, name=value; repeatable, and the last one wins',
+  'var-file': 'Read variable values from an .ethpvars file; repeatable, later files win',
+  workspace: 'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
-const VALUE_OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei']);
+const VALUE_OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'workspace']);
+const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline']);
 export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([, details]) => details.options.includes('spec')).map(([name, details]) => [name, details.options]));
 
@@ -73,6 +80,12 @@ export function parseOptions(args: string[]): CliOptions {
     const flag = args[index];
     if (!flag?.startsWith('--')) throw new UsageError(`Invalid option ${flag}.`);
     const name = flag.slice(2);
+    if (REPEATABLE_OPTIONS.has(name)) {
+      const value = args[++index];
+      if (!value || value.startsWith('--')) throw new UsageError(`Option ${flag} needs a value.`);
+      ((options as Record<string, string[]>)[name] ??= []).push(value);
+      continue;
+    }
     if (Object.hasOwn(options, name)) throw new UsageError(`Duplicate option ${flag}.`);
     if (BOOLEAN_OPTIONS.has(name)) {
       (options as Record<string, string | boolean>)[name] = true;
@@ -92,6 +105,9 @@ export function validateOptions(command: CommandName, options: CliOptions): void
     if (!allowed.has(name)) throw new UsageError(`--${name} is not an option for ${command}.`);
   }
   if (command === 'impact' && !options.value) throw new UsageError('impact needs --value <name>.');
+  for (const assignment of options.var ?? []) {
+    if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment)) throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);
+  }
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
   }

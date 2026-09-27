@@ -49,7 +49,39 @@ export interface HclObject extends Located {
   entries: HclObjectEntry[];
 }
 
-export type HclExpression = HclLiteral | HclReference | HclList | HclObject;
+export type BinaryOperator = '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||';
+
+/** `condition ? then : otherwise`. */
+export interface HclConditional extends Located {
+  kind: 'conditional';
+  condition: HclExpression;
+  then: HclExpression;
+  otherwise: HclExpression;
+}
+
+/** A comparison or logical operator. `at` is where the left operand starts; `operatorAt` is the operator. */
+export interface HclBinary extends Located {
+  kind: 'binary';
+  operator: BinaryOperator;
+  operatorAt: SourcePosition;
+  left: HclExpression;
+  right: HclExpression;
+}
+
+/** Logical negation, `!value`. */
+export interface HclNot extends Located {
+  kind: 'not';
+  operand: HclExpression;
+}
+
+/** `name(args)`. Only variable type expressions such as list(string) accept these. */
+export interface HclCall extends Located {
+  kind: 'call';
+  name: string;
+  args: HclExpression[];
+}
+
+export type HclExpression = HclLiteral | HclReference | HclList | HclObject | HclConditional | HclBinary | HclNot | HclCall;
 
 export interface HclAttribute extends Located {
   kind: 'attribute';

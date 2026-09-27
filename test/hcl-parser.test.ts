@@ -108,19 +108,27 @@ test('unsupported expressions and malformed input fail at their line and column'
     ['a = "x-${var.owner}"', '1:8: String templates are not supported'],
     ['a = "%{ if true }x%{ endif }"', '1:6: Template directives are not supported'],
     ['a = <<EOF\nx\nEOF', '1:5: Heredoc strings are not supported'],
-    ['a = 1 + 2', '1:7: Arithmetic and operators are not supported'],
-    ['a = 1 - 2', '1:7: Arithmetic and operators are not supported'],
-    ['a = -var.x', '1:5: Arithmetic and operators are not supported'],
-    ['a = !true', '1:5: Arithmetic and operators are not supported'],
-    ['a = [\n  1\n  + 2\n]', '3:3: Arithmetic and operators are not supported'],
-    ['a = true ? 1 : 2', '1:10: Conditional expressions are not supported'],
-    ['a = max(1, 2)', '1:5: Function calls are not supported (max)'],
+    ['a = 1 + 2', '1:7: Arithmetic is not supported.'],
+    ['a = 1 - 2', '1:7: Arithmetic is not supported.'],
+    ['a = -var.x', '1:5: Arithmetic is not supported.'],
+    ['a = [\n  1\n  + 2\n]', '3:3: Arithmetic is not supported.'],
+    ['a = (var.x * 2)', '1:12: Arithmetic is not supported.'],
+    ['a = var.x ? 1 + 1 : 2', '1:15: Arithmetic is not supported.'],
+    ['a = var.x ?\n 1 : 2', '1:12: Expected a value, found a new line.'],
+    ['a = var.x\n ? 1 : 2', '2:2: Expected an attribute or block, found "?".'],
+    ['a = true ? 1\n : 2', '1:13: Expected : and a false result in the conditional, found a new line.'],
+    ['a = var.x ? 1', '1:14: Expected : and a false result in the conditional, found the end of the file.'],
+    ['a = var.x &&\n var.y', '1:13: Expected a value, found a new line.'],
+    ['a = { k = var.x\n ? 1 : 2 }', '2:2: Expected an object key, found "?".'],
+    ['a = (1', '1:7: Expected ) after the expression, found the end of the file.'],
+    ['a = == 1', '1:5: Expected a value, found "==".'],
+    ['a = max(1 2)', '1:11: Expected a comma or ) in the arguments of max, found "2".'],
+    ['a = max(var.list...)', '1:17: The ... operator is not supported.'],
     ['a = [for x in var.list : x]', '1:6: For expressions are not supported'],
     ['a = { for k, v in var.map : k => v }', '1:7: For expressions are not supported'],
     ['a = var.list[0]', '1:13: Index and splat expressions are not supported'],
     ['a = var.list.0', '1:14: Index and splat expressions are not supported'],
     ['a = var.list[*].id', '1:13: Index and splat expressions are not supported'],
-    ['a = (var.x)', '1:5: Parenthesized expressions are not supported'],
     ['a = { (var.k) = 1 }', '1:7: Computed object keys are not supported'],
     ['a = { var.k = 1 }', '1:7: Object keys must be names or quoted strings'],
     ['a = 9007199254740993', '1:5: Number 9007199254740993 is outside JavaScript\'s safe integer range. Quote it as a decimal string: "9007199254740993".'],
@@ -162,6 +170,53 @@ test('unsupported expressions and malformed input fail at their line and column'
 
 test('input the HCL reference parser rejects is also rejected', async () => {
   for (const text of ['a = [1 2]', 'a = {', 'a =', '"a" = 1', 'a = 1, b = 2', 'block { x = 1\n y = 2 }', 'block {} a = 1', 'a = "open', 'a = "\\q"', 'a b', 'a = 1\na = 2']) {
+    assert.throws(() => parseHcl('bad.ethp', text), undefined, text);
+    await assert.rejects(referenceParse('bad.ethp', text), undefined, text);
+  }
+});
+
+// A compact form of an expression tree: operators as prefix lists, references as dotted text.
+function tree(node) {
+  switch (node.kind) {
+    case 'literal': return node.value;
+    case 'reference': return node.parts.join('.');
+    case 'list': return node.items.map(tree);
+    case 'object': return Object.fromEntries(node.entries.map(entry => [entry.key, tree(entry.value)]));
+    case 'conditional': return ['?', tree(node.condition), tree(node.then), tree(node.otherwise)];
+    case 'binary': return [node.operator, tree(node.left), tree(node.right)];
+    case 'not': return ['!', tree(node.operand)];
+    case 'call': return [`${node.name}()`, ...node.args.map(tree)];
+  }
+}
+
+const EXPRESSIONS = [
+  ['var.a == "x" && var.b != 2 || !var.c', ['||', ['&&', ['==', 'var.a', 'x'], ['!=', 'var.b', 2]], ['!', 'var.c']]],
+  ['var.a < 1 == true', ['==', ['<', 'var.a', 1], true]],
+  ['1 == 1 == 1', ['==', ['==', 1, 1], 1]],
+  ['a || b && c', ['||', 'a', ['&&', 'b', 'c']]],
+  ['(a || b) && c', ['&&', ['||', 'a', 'b'], 'c']],
+  ['a > 1 && b <= -2', ['&&', ['>', 'a', 1], ['<=', 'b', -2]]],
+  ['!!a', ['!', ['!', 'a']]],
+  ['1 ? 2 : 3 ? 4 : 5', ['?', 1, 2, ['?', 3, 4, 5]]],
+  ['a ? b ? c : d : e', ['?', 'a', ['?', 'b', 'c', 'd'], 'e']],
+  ['a || b ? [1] : { k = 2 }', ['?', ['||', 'a', 'b'], [1], { k: 2 }]],
+  ['(a\n  ? 1\n  : 2\n)', ['?', 'a', 1, 2]],
+  ['[a\n  ? 1\n  : 2]', [['?', 'a', 1, 2]]],
+  ['{ k = (a\n  == 1) }', { k: ['==', 'a', 1] }],
+  ['list(list(string))', ['list()', ['list()', 'string']]],
+  ['f(\n  1,\n  [2],\n)', ['f()', 1, [2]]],
+  ['f()', ['f()']],
+];
+
+test('operators follow HCL precedence and the HCL reference parser accepts the same expressions', async () => {
+  for (const [text, expected] of EXPRESSIONS) {
+    const source = `a = ${text}\n`;
+    assert.deepEqual(tree(parseHcl('expr.ethp', source).attributes.get('a').value), expected, text);
+    await assert.doesNotReject(referenceParse('expr.ethp', source), text);
+  }
+  const node = parseHcl('expr.ethp', 'a = x == 1 ? y : z').attributes.get('a').value;
+  assert.deepEqual([node.at, node.condition.operatorAt], [{ file: 'expr.ethp', line: 1, column: 5 }, { file: 'expr.ethp', line: 1, column: 7 }]);
+  for (const text of ['a = var.x ?\n 1 : 2', 'a = var.x\n ? 1 : 2', 'a = true ? 1\n : 2', 'a = var.x &&\n var.y', 'a = { k = var.x\n ? 1 : 2 }', 'a = x ? 1', 'a = (1']) {
     assert.throws(() => parseHcl('bad.ethp', text), undefined, text);
     await assert.rejects(referenceParse('bad.ethp', text), undefined, text);
   }

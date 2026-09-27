@@ -23,8 +23,9 @@ const COMMANDS = {
   verify: ['spec', 'state', 'backend'],
 };
 
-function compile(source, vars = null) {
-  return compileSpec(parseHcl('test.ethp', source), vars === null ? null : parseHcl('test.ethpvars', vars), 'test.ethpvars');
+function compile(source, vars = null, inputs = {}) {
+  const files = vars === null ? [] : [{ file: 'test.ethpvars', document: parseHcl('test.ethpvars', vars) }];
+  return compileSpec(parseHcl('test.ethp', source), { varsFile: 'test.ethpvars', files, ...inputs });
 }
 
 function config(source) {
@@ -53,7 +54,10 @@ resource "check" "configured" {
   equals = true
   ${check}
 }
-${extra}`;
+${extra}
+variable "owner" {
+  type = address
+}`;
 }
 
 test('the lab .ethp fixture lowers to its schema 2 JSON fixture regardless of block order', async () => {
@@ -137,6 +141,11 @@ resource "check" "setupDone" {
   getter = "ready"
   before = false
   equals = true
+}
+variable "owner" {}
+variable "previous_owner" {}
+variable "registry" {
+  type = address
 }`, `owner = "${OWNER}"
 previous_owner = "${OTHER}"
 registry = "${OTHER}"`);
@@ -189,7 +198,7 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
   const cases = [
     ['HCL syntax', `chain_id = 1\nchain_id = 2`, '', /test\.ethp:2:1: chain_id is already set on line 1\.$/],
     ['missing chain_id', 'resource "contract" "a" {}', '', /needs chain_id/],
-    ['chain_id variable', base().replace('chain_id = 1', 'chain_id = var.owner'), owner, /chain_id must be a literal/],
+    ['chain_id variable', base().replace('chain_id = 1', 'chain_id = var.owner'), owner, /test\.ethp:1:12: chain_id must be a positive integer/],
     ['unknown top-level', base({ extra: 'values = {}' }), owner, /test\.ethp:21:1: Unknown top-level attribute values\.$/],
     ['camelCase top-level', base().replace('chain_id', 'chainId'), owner, /Use chain_id/],
     ['duplicate resource', base({ extra: 'resource "contract" "registry" {}' }), owner, /Duplicate resource "contract" "registry"/],
@@ -203,9 +212,9 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
     ['deep variable', base().replace('[var.owner]', '[var.owner.address]'), owner, /unsupported reference var\.owner\.address/],
     ['call reference value', base().replace('[var.owner]', '[calls.configure]'), owner, /unsupported reference calls\.configure/],
     ['unknown contract', base().replace('[var.owner]', '[contracts.missing.address]'), owner, /test\.ethp:5:15: args references unknown contracts\.missing/],
-    ['arithmetic', base().replace('[var.owner]', '[1 + 2]'), '', /test\.ethp:5:17: Arithmetic and operators are not supported\.$/],
-    ['function', base().replace('[var.owner]', '[max(1, 2)]'), '', /test\.ethp:5:15: Function calls are not supported \(max\)/],
-    ['conditional', base().replace('[var.owner]', '[true ? 1 : 2]'), '', /test\.ethp:5:20: Conditional expressions are not supported/],
+    ['arithmetic', base().replace('[var.owner]', '[1 + 2]'), '', /test\.ethp:5:17: Arithmetic is not supported\.$/],
+    ['function', base().replace('[var.owner]', '[max(1, 2), var.owner]'), owner, /test\.ethp:5:15: Function calls are not supported \(max\)/],
+    ['string condition', base().replace('[var.owner]', '[var.owner ? 1 : 2]'), owner, /test\.ethp:5:15: The condition in args must be true or false; found string "0xf39F/],
     ['for expression', base().replace('[var.owner]', '[for x in [1] : x]'), '', /test\.ethp:5:15: For expressions are not supported/],
     ['template', base().replace('[var.owner]', '["id-${var.owner}"]'), owner, /test\.ethp:5:19: String templates are not supported/],
     ['index', base().replace('[var.owner]', '[var.owner[0]]'), owner, /test\.ethp:5:24: Index and splat expressions are not supported/],
@@ -213,13 +222,13 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
     ['exponent number', base().replace('[var.owner]', '[1e18]'), '', /Number 1e18 must be a whole number without a decimal point or exponent/],
     ['fraction', base().replace('[var.owner]', '[1.5]'), '', /Number 1\.5 must be a whole number/],
     ['computed key', base({ contract: 'libraries = { (var.owner) = var.owner }' }), owner, /test\.ethp:6:17: Computed object keys are not supported/],
-    ['literal field', base().replace(`salt     = "${SALT}"`, 'salt = var.owner'), owner, /salt must be a literal; it cannot reference var\.owner/],
-    ['missing variable', base(), '', /uses missing variable owner\. Add it to test\.ethpvars/],
-    ['unused variable', base(), `${owner}\nextra = 1`, /test\.ethpvars:2:1: Unused variables: extra\./],
+    ['constant field', base().replace(`salt     = "${SALT}"`, 'salt = contracts.registry.address'), owner, /test\.ethp:4:10: salt must be a constant, so it cannot reference contracts\.registry\.address/],
+    ['missing variable', base(), '', /test\.ethp:22:1: Variable owner has no value\. Set it in test\.ethpvars/],
+    ['undeclared variable', base(), `${owner}\nextra = 1`, /test\.ethpvars:2:1: extra is not declared\./],
     ['variable reference', base(), 'owner = contracts.registry.address', /test\.ethpvars:1:9: Variable owner must be a literal; it cannot reference contracts\.registry\.address/],
-    ['variable chain_id', base(), `${owner}\nchain_id = 1`, /test\.ethpvars:2:1: chain_id belongs in the \.ethp file/],
+    ['undeclared chain_id variable', base(), `${owner}\nchain_id = 1`, /test\.ethpvars:2:1: chain_id is not declared\./],
     ['variable secret', base(), `${owner}\nprivate_key = "0x01"`, /test\.ethpvars:2:1: private_key is a forbidden signer secret/],
-    ['variable name', base(), `${owner}\nOwner = "x"`, /Variable name Owner must match/],
+    ['variable name', base(), `${owner}\nOwner = "x"`, /Owner is not declared/],
     ['after attribute', base({ call: 'after = [contracts.registry.address]' }), owner, /test\.ethp:12:12: after must be contracts\.<name> or externals\.<name> or calls\.<name>/],
     ['after unknown', base({ call: 'after = [calls.missing]' }), owner, /after references unknown calls\.missing/],
     ['call target external', base({ extra: `resource "external" "e" {\n address = "${OTHER}"\n}` }).replace('target = contracts.registry', 'target = externals.e'), owner, /test\.ethp:9:12: target must be contracts\.<name>\./],
@@ -228,7 +237,7 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
     ['call check fields', base().replace('before = false', ''), owner, /targets a call and needs getter, before, and equals/],
     ['call check getter map', base({ check: 'owner = var.owner' }), owner, /targets a call and has unknown attribute owner/],
     ['contract check before', base({ extra: 'resource "check" "c" {\n target = contracts.registry\n owner = var.owner\n before = 1\n}' }), owner, /targets contract:registry; before is only for a check that targets a call/],
-    ['contract check args', base({ extra: 'resource "check" "c" {\n target = contracts.registry\n getter = "owner"\n args = []\n equals = 1\n}' }), owner, /uses getter, so it can set only target, getter, and equals/],
+    ['contract check args', base({ extra: 'resource "check" "c" {\n target = contracts.registry\n getter = "owner"\n args = []\n equals = 1\n}' }), owner, /uses getter, so it can set only target, getter, equals, and enabled/],
     ['empty contract check', base({ extra: 'resource "check" "c" {\n target = contracts.registry\n}' }), owner, /"c" needs at least one getter/],
     ['duplicate getter', base({ extra: 'resource "check" "a" {\n target = contracts.registry\n owner = var.owner\n}\nresource "check" "b" {\n target = contracts.registry\n getter = "owner"\n equals = var.owner\n}' }), owner, /contract:registry getter owner is checked by both a and b/],
     ['check without target', base({ extra: 'resource "check" "c" {\n owner = 1\n}' }), owner, /resource "check" "c" needs target/],

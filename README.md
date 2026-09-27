@@ -42,6 +42,15 @@ Etherplan also reads a Terraform-style `.ethp` file. It compiles `main.ethp`, an
 ```hcl
 chain_id = 31337
 
+variable "owner" {
+  type = address
+}
+
+variable "previous_owner" {
+  type    = address
+  default = "0x0000000000000000000000000000000000000000"
+}
+
 resource "contract" "registry" {
   artifact = "Registry.json"
   salt     = "0x…"
@@ -74,9 +83,9 @@ resource "check" "setOwnerResult" {
 }
 ```
 
-`main.ethpvars` holds literal assignments, such as `owner = "0x…"`. Each `var.owner` compiles to `{ "ref": "values.owner" }`, and `contracts.registry.address` and `externals.name.address` compile to the same references as JSON. A missing or unused variable is an error. The vars file cannot reference contracts or set `chain_id`, which must be a literal in the `.ethp` file. Because the variables are part of the compiled spec, editing them after `plan` makes a saved-plan apply stop with `stale-spec`.
+Each variable is declared in a `variable` block, and `main.ethpvars` sets values with literal assignments, such as `owner = "0x…"`. In a field that can hold references, such as `args`, `address`, `libraries`, or a check's expected value, each `var.owner` compiles to `{ "ref": "values.owner" }`, and `contracts.registry.address` and `externals.name.address` compile to the same references as JSON. Fields that must be constant, such as `chain_id`, `salt`, `code_hash`, `signer_role`, an external's `address`, or the factory, take the variable's value instead, so `salt = var.salt` and `chain_id = var.chain_id` work. An undeclared, unset, or unused variable is an error, and the vars file cannot reference contracts. Because the variables are part of the compiled spec, changing them after `plan` makes a saved-plan apply stop with `stale-spec`.
 
-Etherplan reads a subset of HCL syntax and does not evaluate HCL expressions. A file can contain attributes, blocks, comments, quoted strings, whole numbers, `true`, `false`, `null`, lists, objects, and references. `target` and `after` take resources such as `contracts.registry`, `externals.token`, or `calls.setOwner`. Heredocs, string templates, arithmetic, functions, conditionals, `for` expressions, and index expressions are errors that name the file, line, and column. Write `var.owner`, not `"${var.owner}"`. A number is a whole number within JavaScript's safe range (±9007199254740991), with no decimal point or exponent; quote larger integers, such as wei amounts, as decimal strings: `"1000000000000000000"`.
+Etherplan reads a subset of HCL syntax. A file can contain attributes, blocks, comments, quoted strings, whole numbers, `true`, `false`, `null`, lists, objects, references, and the conditions described below. `target` and `after` take resources such as `contracts.registry`, `externals.token`, or `calls.setOwner`. Heredocs, string templates, arithmetic, function calls, `for` expressions, and index expressions are errors that name the file, line, and column. Write `var.owner`, not `"${var.owner}"`. A number is a whole number within JavaScript's safe range (±9007199254740991), with no decimal point or exponent; quote larger integers, such as wei amounts, as decimal strings: `"1000000000000000000"`.
 
 Resource types are `contract`, `external`, `call`, and `check`. Attributes are snake_case: `code_hash`, `signer_role`, `sender_independent`, `owner_only`, and `transfers_ownership` in resources, and `chain_id`, `dependency_mode`, and `execution_assumptions` at the top level. Other names, such as `artifact`, `args`, `salt`, `method`, `libraries`, and `abi`, match the JSON fields. A top-level `factory` block with `address` and `code_hash` sets the CREATE2 factory. `args` are positional. A deployable contract or a call needs `args`, even `[]`. Block order has no effect: contracts and calls are sorted by ID, so the spec hash does not depend on the order of blocks in the file.
 
@@ -86,13 +95,98 @@ A check block is not a resource. A block that targets a contract or external lis
 
 Run `etherplan compile --spec main.ethp` to print the canonical JSON spec that the other commands use. `spec.json` remains supported.
 
+### One spec for several chains
+
+Variables, conditions, and `enabled` let one `.ethp` file describe several deployments, such as a local chain with a mock token and a mainnet deployment that uses an existing token. Etherplan evaluates all of them when it compiles the file, so the JSON spec, its hash, the plan, and apply see only the result. Run `etherplan compile` with the same inputs to see it.
+
+```hcl
+variable "chain_id" {
+  type    = number
+  default = 31337
+}
+
+variable "owner" {
+  type        = address
+  description = "Owner of the vault"
+}
+
+variable "token" {
+  type    = address
+  default = null
+}
+
+variable "salt" {
+  type    = bytes32
+  default = "0x…"
+}
+
+locals {
+  use_mock = var.token == null
+}
+
+chain_id = var.chain_id
+
+resource "contract" "mockToken" {
+  enabled  = local.use_mock
+  artifact = "MockToken.json"
+  salt     = var.salt
+  args     = []
+}
+
+resource "external" "token" {
+  enabled = !local.use_mock
+  address = var.token
+}
+
+resource "contract" "vault" {
+  artifact = "Vault.json"
+  salt     = var.salt
+  args     = [local.use_mock ? contracts.mockToken.address : externals.token.address, var.owner]
+  after    = local.use_mock ? [contracts.mockToken] : [externals.token]
+}
+```
+
+A `variable` block declares a variable with an optional `type`, `default`, and `description`. Types are `string`, `number` (a safe whole number), `bool`, `address`, `bytes32`, `list(<type>)`, and `any`, the default. Every value is checked against its type, and `null` is valid for any type, so a variable with `default = null` is optional. A variable with no default must get a value. Every variable the spec uses, and every name set in a vars file or with `--var`, must be declared.
+
+A declared variable takes the last value from this list:
+
+1. its `default`
+2. the `ETHP_VAR_<name>` environment variable, such as `ETHP_VAR_owner`
+3. `main.ethpvars`
+4. `main.<workspace>.ethpvars`, for a workspace other than `default`
+5. each `--var-file path.ethpvars`, in order
+6. each `--var name=value`, in order
+
+The environment and `--var` give strings. A `string` or `any` variable takes the string as written, a `number` or `bool` parses it, and a `list` parses it as an HCL list, such as `--var 'admins=["0x…","0x…"]'`. Only the input that wins is parsed, so a stale `ETHP_VAR_` value that a vars file or flag overrides does no harm. `ETHP_VAR_` names for undeclared variables are ignored. Commands print each variable's value and source on stderr.
+
+A condition uses `condition ? a : b`, `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, and parentheses, with HCL's precedence. A condition must be `true` or `false`; strings and numbers are not truthy. `==` needs both sides to have the same type unless one is `null`, and compares hex strings such as addresses without regard to case. `<`, `<=`, `>`, and `>=` compare numbers. `&&` and `||` skip their right side once the left side decides, so `var.limit != null && var.limit > 0` is safe. Conditions can use only literals, variables, and locals; they cannot use a contract address, which is not known until planning. Only the chosen branch is evaluated, but every branch must name declared variables and resources. A conditional expression spans lines only inside parentheses or brackets.
+
+A `locals` block names expressions, such as `use_mock` above, for use as `local.<name>`. A local is evaluated where it is used, so a local can hold a condition, a value, a contract address, or a resource for `after`. A local cannot refer to itself, and an unused local is an error.
+
+`enabled = <condition>` on a resource block leaves that resource out of the compiled spec. Any reference that evaluation reaches, in `args`, `address`, `libraries`, `after`, `target`, a check value, or an execution assumption's `reference`, must not name a disabled resource; put it behind the same condition. A check block is dropped with its target, and an execution assumption is dropped with its consumer. A check block can also set its own `enabled`; to check a getter named `enabled`, write `getter = "enabled"`. Disabling a resource stops Etherplan from managing it; it does not remove the contract from the chain, and planning ignores its state record.
+
+As in Terraform, an attribute that evaluates to `null` is left unset. One contract can adopt an existing deployment where one is given and deploy otherwise: `address = var.existing` with `salt = var.existing == null ? var.salt : null`.
+
+The compiled spec keeps as `values` only the non-null variables that a reference field still uses. A variable used only in a condition, `enabled`, or a constant field is folded into the spec, so changing it changes the spec hash only when it changes the result. `impact --value` covers only the variables kept as values.
+
+### Workspaces
+
+Local state is tied to one chain, so each deployment of a shared spec needs its own state. `--workspace <name>`, or `ETHP_WORKSPACE`, selects a workspace; without either, the workspace is `default`. A workspace reads `main.<name>.ethpvars` after `main.ethpvars` and keeps its state, journal, and recovery plans under `.etherplan/<name>/` beside the spec. A `state` or `journal` path from `main.ethpconfig` gets a `<name>/` directory beside the configured file. An explicit `--state` or `--journal` flag is used as given. With `--backend`, the backend config's scope separates state; the workspace still selects the vars overlay.
+
+```sh
+etherplan plan --workspace sepolia --deployers 0x… --max-spend-wei 100000000000000000 --out sepolia-plan.json
+etherplan apply --workspace sepolia --plan sepolia-plan.json
+```
+
+Pass the same workspace and variable inputs to `apply --plan` that you gave `plan`; a different compiled spec stops apply with `stale-spec`.
+
 ### Config defaults
 
 `main.ethpconfig`, beside `main.ethp`, sets defaults for command-line options:
 
 ```hcl
 defaults {
-  state   = ".etherplan/state.json"
+  state   = "deploy/state.json"
   backend = "backend.json"
 }
 
@@ -149,7 +243,7 @@ etherplan verify --spec path/to/spec.json
 
 Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. `plan --signer-module` obtains the addresses from the same module, so they need not be entered separately. Pipeline applies still require an explicit saved pipeline plan.
 
-Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/` beside the spec; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
+Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/<workspace>/` beside the spec, which is `.etherplan/default/` without `--workspace`; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 
 If a later action fails after a contract was deployed, correct the spec and create a new plan using the same state and journal. Planning reads verified creation evidence from the journal, rechecks it against the chain and current contract inputs, and can reuse that deployment without sending it again. Apply checks the journal proof again under its writer lock before accepting the saved plan. Pass `--journal path/to/journal.jsonl` to `plan` when apply used a custom journal path. The production backend uses its shared journal for this recovery. A missing or mismatched creation proof leaves the resource unverified.
 

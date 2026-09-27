@@ -14,7 +14,7 @@ const maxSpend = '100000000000000000000';
 let anvil;
 let directory;
 
-function runCli(arguments_, signed = false) {
+function runCli(arguments_, signed = false, extraEnv = {}) {
   return spawnSync(process.execPath, [path.join(projectDirectory, 'dist/cli.js'), ...arguments_], {
     cwd: projectDirectory,
     encoding: 'utf8',
@@ -22,6 +22,7 @@ function runCli(arguments_, signed = false) {
       ...process.env,
       ETH_RPC_URL: anvil.rpcUrl,
       ...(signed ? { DEPLOYER_PRIVATE_KEYS: ownerKey, OWNER_PRIVATE_KEY: ownerKey } : {}),
+      ...extraEnv,
     },
   });
 }
@@ -101,10 +102,50 @@ command "plan" {
   assert.equal(applied.status, 'applied');
   assert.equal(applied.transactionsSigned, 6);
   assert.equal(BigInt(await nonce()) - BigInt(nonceBefore), 6n);
-  const state = JSON.parse(await readFile(file('deploy/state.json'), 'utf8'));
+  const state = JSON.parse(await readFile(file('deploy/default/state.json'), 'utf8'));
   assert.ok(state.resources['call:bind']);
 
   const verified = succeeded(runCli(['verify', '--spec', file('lab.ethp')]));
   assert.equal(verified.status, 'verified');
   assert.deepEqual(verified.resources.find(resource => resource.id === 'call:bind').action, 'reuse');
+});
+
+test('a workspace reads its own vars overlay and state, and a --var change after planning stops apply at stale-spec', async () => {
+  const blue = `0x${'b1'.repeat(32)}`;
+  const green = `0x${'9e'.repeat(32)}`;
+  await writeFile(file('world.ethp'), `variable "salt" {
+  type = bytes32
+}
+
+chain_id = 31337
+
+resource "contract" "doubler" {
+  artifact = "Doubler.json"
+  salt     = var.salt
+  args     = []
+}
+`);
+  await writeFile(file('world.blue.ethpvars'), `salt = "${blue}"\n`);
+  const planFile = file('blue-plan.json');
+  const write = ['--deployers', owner, '--max-spend-wei', maxSpend];
+  const planned = runCli(['plan', '--spec', file('world.ethp'), '--workspace', 'blue', '--out', planFile, ...write]);
+  assert.deepEqual(succeeded(planned).resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);
+  assert.match(planned.stderr, /Using workspace blue\./);
+  assert.match(planned.stderr, new RegExp(`Variables:\n  salt = "${blue}" from .*world\\.blue\\.ethpvars\n`));
+
+  const nonceBefore = await nonce();
+  const drifted = runCli(['apply', '--spec', file('world.ethp'), '--workspace', 'blue', '--plan', planFile, '--var', `salt=${green}`], true);
+  assert.equal(drifted.status, 1, drifted.stdout);
+  assert.match(drifted.stderr, /stale-spec: The spec changed after the plan was created/);
+  assert.equal(await nonce(), nonceBefore);
+
+  assert.equal(succeeded(runCli(['apply', '--spec', file('world.ethp'), '--workspace', 'blue', '--plan', planFile], true)).status, 'applied');
+  assert.ok(JSON.parse(await readFile(file('.etherplan/blue/state.json'), 'utf8')).resources['contract:doubler']);
+  await assert.rejects(readFile(file('.etherplan/default/state.json')), { code: 'ENOENT' });
+  assert.equal(succeeded(runCli(['verify', '--spec', file('world.ethp')], false, { ETHP_WORKSPACE: 'blue' })).status, 'verified');
+
+  // The default workspace takes its salt from the environment, so it is a separate, undeployed contract.
+  const other = succeeded(runCli(['plan', '--spec', file('world.ethp'), '--out', '-', ...write], false, { ETHP_VAR_salt: green }));
+  assert.deepEqual(other.resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);
+  assert.notEqual(other.specHash, JSON.parse(await readFile(planFile, 'utf8')).specHash);
 });

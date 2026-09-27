@@ -1,9 +1,10 @@
 // Parses the subset of HCL native syntax that Etherplan reads: attributes, blocks, comments, quoted
-// strings, whole numbers, booleans, null, lists, objects, and references such as var.owner. A file it
-// accepts means the same thing to HCL. It rejects templates, heredocs, operators, function calls, and
-// other expressions instead of evaluating them. Every node records its file, line, and column.
+// strings, whole numbers, booleans, null, lists, objects, references such as var.owner, conditionals,
+// comparison and logical operators, parentheses, and function-call syntax. A file it accepts means the same
+// thing to HCL. It rejects templates, heredocs, arithmetic, for expressions, and index expressions. It only
+// builds the tree; compile.ts evaluates it. Every node records its file, line, and column.
 
-import type { HclAttribute, HclBlock, HclBody, HclDocument, HclExpression, HclList, HclObject, HclObjectEntry, HclToken, Located, Punctuation, SourcePosition, TokenType } from './types.ts';
+import type { BinaryOperator, HclAttribute, HclBlock, HclBody, HclCall, HclDocument, HclExpression, HclList, HclObject, HclObjectEntry, HclToken, Located, Punctuation, SourcePosition, TokenType } from './types.ts';
 
 const NUMBER = /[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/y;
 const IDENTIFIER = /[\p{ID_Start}_][\p{ID_Continue}-]*/uy;
@@ -12,6 +13,8 @@ const IDENTIFIER_PART = /^[\p{ID_Continue}]/u;
 const OPERATORS = ['==', '!=', '<=', '>=', '&&', '||', '=>', '...', '+', '*', '/', '%', '<', '>', '!', '?'];
 const PUNCTUATION: ReadonlySet<string> = new Set<Punctuation>(['=', ':', ',', '.', '{', '}', '[', ']', '(', ')', '-']);
 const ESCAPES = new Map([['n', '\n'], ['r', '\r'], ['t', '\t'], ['"', '"'], ['\\', '\\']]);
+// HCL binary operator precedence, loosest first. Arithmetic is rejected.
+const PRECEDENCE: ReadonlyMap<string, number> = new Map([['||', 1], ['&&', 2], ['==', 3], ['!=', 3], ['<', 4], ['<=', 4], ['>', 4], ['>=', 4]]);
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 
 function isPunctuation(char: string): char is Punctuation {
@@ -136,11 +139,14 @@ function describe(token: HclToken): string {
   return `"${token.value}"`;
 }
 
+function isOperator(token: HclToken, value: string): boolean {
+  return token.type === 'operator' && token.value === value;
+}
+
 function rejectOperator(token: HclToken): void {
-  if (token.type !== 'operator' && token.type !== '-') return;
-  fail(token, token.value === '?' ? 'Conditional expressions are not supported.'
-    : token.value === '...' || token.value === '=>' ? 'For expressions are not supported.'
-      : 'Arithmetic and operators are not supported.');
+  if (token.type === '-' || (token.type === 'operator' && ['+', '*', '/', '%'].includes(token.value))) fail(token, 'Arithmetic is not supported.');
+  if (isOperator(token, '=>')) fail(token, 'For expressions are not supported.');
+  if (isOperator(token, '...')) fail(token, 'The ... operator is not supported.');
 }
 
 function integer(token: HclToken, sign: 1n | -1n): number {
@@ -236,31 +242,112 @@ class Parser {
     return { kind: 'block', type: type.value, labels, body, at: type.at };
   }
 
-  expression(): HclExpression {
-    const token = this.next();
-    let node: HclExpression;
-    if (token.type === 'string') node = { kind: 'literal', value: token.value, at: token.at };
-    else if (token.type === 'number') node = { kind: 'literal', value: integer(token, 1n), at: token.at };
-    else if (token.type === '-') {
-      const number = this.next();
-      if (number.type !== 'number') fail(token, 'Arithmetic and operators are not supported.');
-      node = { kind: 'literal', value: integer(number, -1n), at: token.at };
-    } else if (token.type === '[') node = this.list(token);
-    else if (token.type === '{') node = this.object(token);
-    else if (token.type === 'ident') node = this.reference(token);
-    else if (token.type === '(') fail(token, 'Parenthesized expressions are not supported.');
-    else {
-      rejectOperator(token);
-      fail(token, `Expected a value, found ${describe(token)}.`);
-    }
-    rejectOperator(this.peek());
+  /**
+   * The next token. As in HCL, `multiline` looks past new lines, which are insignificant inside parentheses,
+   * brackets, and call arguments; elsewhere a new line ends the expression.
+   */
+  lookahead(multiline: boolean): { token: HclToken; offset: number } {
+    let offset = 0;
+    if (multiline) while (this.peek(offset).type === 'newline') offset++;
+    return { token: this.peek(offset), offset };
+  }
+
+  /** Consumes the token `lookahead` returned, and the new lines before it. */
+  take(offset: number): HclToken {
+    this.index += offset;
+    return this.next();
+  }
+
+  expression(multiline = false): HclExpression {
+    const node = this.conditional(multiline);
+    rejectOperator(this.lookahead(multiline).token);
     return node;
+  }
+
+  conditional(multiline: boolean): HclExpression {
+    const condition = this.binary(multiline, 1);
+    const question = this.lookahead(multiline);
+    if (!isOperator(question.token, '?')) return condition;
+    this.take(question.offset);
+    const then = this.conditional(multiline);
+    const colon = this.lookahead(multiline);
+    if (colon.token.type !== ':') {
+      rejectOperator(colon.token);
+      fail(colon.token, `Expected : and a false result in the conditional, found ${describe(colon.token)}.`);
+    }
+    this.take(colon.offset);
+    return { kind: 'conditional', condition, then, otherwise: this.conditional(multiline), at: condition.at };
+  }
+
+  // Precedence climbing: operands bind to operators of `minimum` precedence or tighter, left to right.
+  binary(multiline: boolean, minimum: number): HclExpression {
+    let left = this.unary(multiline);
+    for (;;) {
+      const { token, offset } = this.lookahead(multiline);
+      const precedence = token.type === 'operator' ? PRECEDENCE.get(token.value) : undefined;
+      if (precedence === undefined || precedence < minimum) return left;
+      this.take(offset);
+      const right = this.binary(multiline, precedence + 1);
+      left = { kind: 'binary', operator: token.value as BinaryOperator, operatorAt: token.at, left, right, at: left.at };
+    }
+  }
+
+  unary(multiline: boolean): HclExpression {
+    if (multiline) this.skipNewlines();
+    const token = this.peek();
+    if (!isOperator(token, '!')) return this.term();
+    this.next();
+    return { kind: 'not', operand: this.unary(multiline), at: token.at };
+  }
+
+  term(): HclExpression {
+    const token = this.next();
+    if (token.type === 'string') return { kind: 'literal', value: token.value, at: token.at };
+    if (token.type === 'number') return { kind: 'literal', value: integer(token, 1n), at: token.at };
+    if (token.type === '-') {
+      const number = this.next();
+      if (number.type !== 'number') fail(token, 'Arithmetic is not supported.');
+      return { kind: 'literal', value: integer(number, -1n), at: token.at };
+    }
+    if (token.type === '[') return this.list(token);
+    if (token.type === '{') return this.object(token);
+    if (token.type === 'ident') return this.reference(token);
+    if (token.type === '(') {
+      this.skipNewlines();
+      const inner = this.expression(true);
+      this.skipNewlines();
+      const close = this.next();
+      if (close.type !== ')') fail(close, `Expected ) after the expression, found ${describe(close)}.`);
+      return inner;
+    }
+    rejectOperator(token);
+    fail(token, `Expected a value, found ${describe(token)}.`);
+  }
+
+  call(name: HclToken): HclCall {
+    this.next();
+    const args: HclExpression[] = [];
+    this.skipNewlines();
+    while (this.peek().type !== ')') {
+      args.push(this.expression(true));
+      this.skipNewlines();
+      const separator = this.peek();
+      if (separator.type === ',') {
+        this.next();
+        this.skipNewlines();
+      } else if (separator.type !== ')') {
+        rejectOperator(separator);
+        fail(separator, `Expected a comma or ) in the arguments of ${name.value}, found ${describe(separator)}.`);
+      }
+    }
+    this.next();
+    return { kind: 'call', name: name.value, args, at: name.at };
   }
 
   reference(first: HclToken): HclExpression {
     if (first.value === 'true' || first.value === 'false') return { kind: 'literal', value: first.value === 'true', at: first.at };
     if (first.value === 'null') return { kind: 'literal', value: null, at: first.at };
-    if (this.peek().type === '(') fail(first, `Function calls are not supported (${first.value}).`);
+    if (this.peek().type === '(') return this.call(first);
     const parts = [first.value];
     while (this.peek().type === '.') {
       this.next();
@@ -282,7 +369,7 @@ class Parser {
     this.skipNewlines();
     this.rejectFor();
     while (this.peek().type !== ']') {
-      items.push(this.expression());
+      items.push(this.expression(true));
       this.skipNewlines();
       const separator = this.peek();
       if (separator.type === ',') {
@@ -332,8 +419,19 @@ class Parser {
 
 /**
  * Parses HCL text into a body: `attributes` maps each name to { name, value, at }, and `blocks` lists
- * { type, labels, body, at } in source order. Values are literal, list, object, or reference nodes.
+ * { type, labels, body, at } in source order. Values are expression trees; see HclExpression.
  */
 export function parseHcl(file: string, text: string): HclDocument {
   return new Parser(file, tokenize(file, text)).body('eof');
+}
+
+/** Parses one expression, such as a --var value for a list variable. */
+export function parseHclExpression(file: string, text: string): HclExpression {
+  const parser = new Parser(file, tokenize(file, text));
+  parser.skipNewlines();
+  const node = parser.expression(true);
+  parser.skipNewlines();
+  const end = parser.peek();
+  if (end.type !== 'eof') fail(end, `Expected the end of the value, found ${describe(end)}.`);
+  return node;
 }
