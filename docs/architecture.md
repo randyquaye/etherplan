@@ -6,7 +6,7 @@ Etherplan turns a desired EVM deployment into a saved plan, checks that plan aga
 
 | Area | Main modules | Responsibility |
 | --- | --- | --- |
-| Input | `input/hcl.ts`, `input/compile.ts`, `input/project.ts` | Parse `.ethp`, compile it to a JSON spec, load project configuration and spec files. |
+| Input | `input/hcl.ts`, `input/variables.ts`, `input/evaluate.ts`, `input/compile.ts`, `input/project.ts` | Parse `.ethp`, resolve typed variables from files, the environment, and flags, fold conditions, locals, and `enabled` at compile time, compile the result to a JSON spec, and load project configuration, workspace overlays, and spec files. |
 | Spec and artifacts | `spec/index.ts`, `artifacts.ts`, `artifacts/normalize.ts` | Validate desired resources and dependency references; load and normalize compiler artifacts. |
 | Planning | `planning/resources.ts`, `planning/index.ts`, `validation/index.ts` | Resolve resource inputs, validate artifacts, read one chain block and existing state, verify live resources, decide actions, and hash the canonical plan. |
 | Verification | `verification/index.ts`, `bytecode.ts`, `creation-proof.ts`, `simulate.ts` | Compare runtime code, getters, call bindings, and deployment evidence with the plan. A reason makes a result `conflict`; otherwise missing proof makes it `unverified`; only complete evidence is `verified`. |

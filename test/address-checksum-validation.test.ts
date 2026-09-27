@@ -45,9 +45,9 @@ test('a reused values reference cannot self-verify a mistyped constructor addres
   const source = await readFile(path.join(directory, 'lab.ethp'), 'utf8');
   const vars = (await readFile(path.join(directory, 'lab.ethpvars'), 'utf8'))
     .replace('0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266', typo);
-  const compiled = compileSpec(parseHcl('lab.ethp', source), parseHcl('lab.ethpvars', vars));
-  const hclArtifacts = await loadArtifacts(compiled, path.join(directory, 'lab.ethp'));
-  assert.throws(() => prepareResources(compiled, null, hclArtifacts), /contract:alpha constructor.*argument owner_.*valid address/);
+  // The .ethp spec declares owner as an address, so the typo fails at compile time, before artifacts load.
+  assert.throws(() => compileSpec(parseHcl('lab.ethp', source), { files: [{ file: 'lab.ethpvars', document: parseHcl('lab.ethpvars', vars) }] }),
+    /lab\.ethpvars:3:19: Variable owner must be an address; found string "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92267"/);
 });
 
 test('nested arrays, tuples, getter arguments and expected values retain their location', () => {

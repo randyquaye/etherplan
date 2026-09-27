@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { isRpcError, safeRpcMessage } from '../execution/rpc-error.ts';
 import { ApplyError } from '../execution/errors.ts';
 import { loadArtifacts } from '../artifacts.ts';
-import { findSpecFile, loadConfig, loadSpec, withConfig } from '../input/project.ts';
+import { DEFAULT_WORKSPACE, findSpecFile, loadConfig, loadProject, selectWorkspace, withConfig } from '../input/project.ts';
+import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
 import { apply } from './commands/apply.ts';
@@ -15,10 +16,15 @@ import { schedule } from './commands/schedule.ts';
 import { status } from './commands/status.ts';
 import { validate } from './commands/validate.ts';
 import { verify } from './commands/verify.ts';
-import { publicClient, stateFileFor } from './environment.ts';
+import { inWorkspace, publicClient, stateFileFor } from './environment.ts';
 import { COMMANDS, SPEC_COMMANDS, isCommand, parseOptions, usage, UsageError, validateCombination, validateOptions } from './options.ts';
 import type { CliOptions, CommandName } from './options.ts';
 import { print } from './shared.ts';
+
+function variableReport(variables: VariableValue[]): string {
+  const width = Math.max(...variables.map(variable => variable.name.length));
+  return `Variables:\n${variables.map(variable => `  ${variable.name.padEnd(width)} = ${JSON.stringify(variable.value)} from ${variable.source}\n`).join('')}`;
+}
 
 async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
@@ -29,7 +35,15 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (merged.configured.length && config) process.stderr.write(`Using ${merged.configured.map(name => `--${name}`).join(', ')} from ${config.file}.\n`);
   options = merged.options as CliOptions;
   validateCombination(command, options);
-  const spec = await loadSpec(specFile);
+  const workspace = selectWorkspace(options.workspace);
+  // Configured paths are shared by every workspace, so each workspace gets its own directory beside them.
+  for (const name of ['state', 'journal'] as const) {
+    const configured = options[name];
+    if (merged.configured.includes(name) && configured && configured !== '-') options[name] = inWorkspace(configured, workspace);
+  }
+  if (workspace !== DEFAULT_WORKSPACE) process.stderr.write(`Using workspace ${workspace}.\n`);
+  const { spec, variables } = await loadProject(specFile, { workspace, varFiles: options['var-file'] ?? [], vars: options.var ?? [], env: process.env });
+  if (variables.length) process.stderr.write(variableReport(variables));
   const ordered = graph(spec);
   const context = { options, specFile, spec, ordered };
   if (command === 'compile') return compile(context);
@@ -40,7 +54,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (command === 'validate') return validate(withArtifacts);
   if (command === 'adapters') return adapters(withArtifacts);
   const client = publicClient();
-  const stateFile = stateFileFor(specFile, options);
+  const stateFile = stateFileFor(specFile, options, workspace);
   const withChain = { ...withArtifacts, client, stateFile };
   if (command === 'import') return importCommand(withChain);
   if (command === 'apply') return apply(withChain);
