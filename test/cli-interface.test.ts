@@ -32,18 +32,25 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('import', '--help').stdout, /--rebaseline/);
   assert.match(cli('apply', '--help').stdout, /--signer-module/);
   assert.match(cli('status', '--help').stdout, /--backend/);
+  assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
+  assert.match(cli('plan', '--help').stdout, /main\.ethp/);
 });
 
 test('invalid and unrelated options fail before a spec or RPC is opened', () => {
   for (const args of [
     [], ['missing'], ['graph', '--value', 'owner'], ['compile', '--out', 'spec.json'], ['impact'],
-    ['plan', '--parallel'], ['plan', '--pipeline'], ['apply', '--pipeline', '--parallel'],
     ['import'], ['import', '--id', 'external:registry'],
-    ['validate', '--spec'], ['validate', '--spec', 'a', '--spec', 'b'],
+    ['validate', '--spec'], ['validate', '--spec', 'a'],
   ]) {
     const result = cli(...args);
     assert.equal(result.status, 2, `${args.join(' ')}: ${result.stderr}`);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /Usage: etherplan/);
   }
+});
+
+test('spec commands require main.ethp in the current directory', () => {
+  const result = cli('compile');
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /No main\.ethp/);
 });

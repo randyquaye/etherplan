@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -37,17 +37,17 @@ async function runScenario(parallel) {
   const stateFile = path.join(directory, 'state.json');
   const journalFile = path.join(directory, 'journal.jsonl');
   try {
-    const planned = runCli(['plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+    const planned = runCli(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
       '--deployers', [primary, secondary].join(','), '--max-spend-wei', '100000000000000000000', ...(parallel ? ['--parallel'] : [])], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     const scheduled = runCli([
-      'schedule', '--spec', specFile, '--plan', planFile, '--deployers', parallel ? [primary, secondary].join(',') : primary,
+      'schedule', '--fixture', specFile, '--plan', planFile, '--deployers', parallel ? [primary, secondary].join(',') : primary,
       ...(parallel ? ['--parallel'] : []),
     ], anvil.rpcUrl);
     assert.equal(scheduled.status, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
     const started = performance.now();
     const applied = runCli([
-      'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+      'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ...(parallel ? ['--parallel'] : []),
     ], anvil.rpcUrl, true);
     const elapsedMs = performance.now() - started;

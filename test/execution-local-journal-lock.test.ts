@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './project-cli.mjs';
 import { copyFile, link, mkdtemp, readFile, symlink, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -159,10 +159,10 @@ test('CLI defaults derive separate journals from two state filenames in one dire
     spec.contracts[0].salt = `0x${String(index + 1).repeat(64)}`;
     await writeFile(specFile, JSON.stringify(spec));
     const env = { ...process.env, ETH_RPC_URL: chain.url, DEPLOYER_PRIVATE_KEYS: TEST_KEYS[0] };
-    const plan = spawnSync(process.execPath, ['dist/cli.js', 'plan', '--spec', specFile, '--out', planFile, '--state', stateFile,
+    const plan = spawnSync(process.execPath, ['dist/cli.js', 'plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
       '--deployers', accounts[0].address, '--max-spend-wei', '100000000000000000000'], { cwd: projectDirectory, encoding: 'utf8', env });
     assert.equal(plan.status, 0, `${plan.stdout}\n${plan.stderr}`);
-    const applied = spawnSync(process.execPath, ['dist/cli.js', 'apply', '--spec', specFile, '--plan', planFile, '--state', stateFile],
+    const applied = spawnSync(process.execPath, ['dist/cli.js', 'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile],
       { cwd: projectDirectory, encoding: 'utf8', env });
     assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
     const journalFile = defaultJournalFile(stateFile);

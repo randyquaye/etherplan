@@ -1,5 +1,4 @@
-import { access, readFile } from 'node:fs/promises';
-import path from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { isRpcError, safeRpcMessage } from '../execution/rpc-error.ts';
 import { ApplyError } from '../execution/errors.ts';
 import { loadArtifacts } from '../artifacts.ts';
@@ -31,11 +30,7 @@ function variableReport(variables: VariableValue[]): string {
 async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import') throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
-  if (command === 'output' && !options.spec && (options.state || options.backend)) {
-    const workspace = selectWorkspace(options.workspace);
-    return output(options, path.resolve(options.state ?? path.join('.etherplan', workspace, 'state.json')));
-  }
-  const specFile = await findSpecFile(options.spec);
+  const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
   if (merged.configured.length && config) process.stderr.write(`Using ${merged.configured.map(name => `--${name}`).join(', ')} from ${config.file}.\n`);
@@ -49,7 +44,6 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   }
   if (workspace !== DEFAULT_WORKSPACE) process.stderr.write(`Using workspace ${workspace}.\n`);
   if (command === 'output') {
-    await access(specFile);
     return output(options, stateFileFor(specFile, options, workspace));
   }
   const { spec, variables } = await loadProject(specFile, { workspace, varFiles: options['var-file'] ?? [], vars: options.var ?? [], env: process.env });

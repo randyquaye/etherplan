@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,7 +7,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { privateKeyToAccount } from 'viem/accounts';
 import { hashJson } from '../../src/identity.ts';
-import { parseSpec } from '../../src/spec/index.ts';
+import { loadSpec } from '../../src/input/project.ts';
 import { startAnvil, stopAnvil } from './anvil.ts';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
@@ -41,35 +41,35 @@ async function save(ws) {
 test('validate works offline and distinguishes graph structure from artifact validation', async () => {
   const ws = await workspace();
   try {
-    const valid = cli(['validate', '--spec', ws.specFile]);
+    const valid = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(valid.status, 0, valid.stderr);
-    assert.deepEqual(JSON.parse(valid.stdout), { status: 'valid', resources: ['contract:stateFixture', 'call:bind'] });
+    assert.deepEqual(JSON.parse(valid.stdout), { status: 'valid', resources: ['contract:stateFixture', 'call:bind'], warnings: [] });
 
     ws.spec.contracts[0].artifact = 'missing.json';
     await save(ws);
-    assert.equal(cli(['graph', '--spec', ws.specFile]).status, 0);
-    const missing = cli(['validate', '--spec', ws.specFile]);
+    assert.equal(cli(['graph', '--fixture', ws.specFile]).status, 0);
+    const missing = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(missing.status, 1);
     assert.match(missing.stderr, /contract:stateFixture artifact .*missing\.json/);
 
     await writeFile(path.join(ws.directory, 'broken.json'), '{oops');
     ws.spec.contracts[0].artifact = 'broken.json';
     await save(ws);
-    const malformed = cli(['validate', '--spec', ws.specFile]);
+    const malformed = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(malformed.status, 1);
     assert.match(malformed.stderr, /contract:stateFixture artifact .*broken\.json/);
 
     ws.spec.contracts[0].artifact = artifactFile;
     ws.spec.contracts[0].source = 'Other.sol';
     await save(ws);
-    const wrongSource = cli(['validate', '--spec', ws.specFile]);
+    const wrongSource = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(wrongSource.status, 1);
     assert.match(wrongSource.stderr, /contract:stateFixture artifact .*Declared source Other\.sol differs/);
 
     ws.spec.contracts[0].source = 'test/fixtures/StateFixture.sol';
     ws.spec.contracts[0].name = 'Other';
     await save(ws);
-    const wrongName = cli(['validate', '--spec', ws.specFile]);
+    const wrongName = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(wrongName.status, 1);
     assert.match(wrongName.stderr, /contract:stateFixture artifact .*expects Other.*holds StateFixture/);
 
@@ -80,13 +80,13 @@ test('validate works offline and distinguishes graph structure from artifact val
     ws.spec.contracts[0].artifact = 'unidentified.json';
     ws.spec.contracts[0].name = 'StateFixture';
     await save(ws);
-    const unidentified = cli(['validate', '--spec', ws.specFile]);
+    const unidentified = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(unidentified.status, 1);
     assert.match(unidentified.stderr, /contract:stateFixture artifact .*Declared name StateFixture cannot be checked/);
 
     delete ws.spec.contracts[0].name;
     await save(ws);
-    const sourceUnknown = cli(['validate', '--spec', ws.specFile]);
+    const sourceUnknown = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(sourceUnknown.status, 1);
     assert.match(sourceUnknown.stderr, /contract:stateFixture artifact .*Declared source test\/fixtures\/StateFixture\.sol cannot be checked/);
 
@@ -95,7 +95,7 @@ test('validate works offline and distinguishes graph structure from artifact val
     await writeFile(path.join(ws.directory, 'inconsistent.json'), JSON.stringify(inconsistent));
     ws.spec.contracts[0].artifact = 'inconsistent.json';
     await save(ws);
-    const conflict = cli(['validate', '--spec', ws.specFile]);
+    const conflict = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(conflict.status, 1);
     assert.match(conflict.stderr, /contract:stateFixture artifact .*conflicting contract name declarations/);
 
@@ -104,7 +104,7 @@ test('validate works offline and distinguishes graph structure from artifact val
     await writeFile(path.join(ws.directory, 'wrong-abi.json'), JSON.stringify(wrongAbi));
     ws.spec.contracts[0].artifact = 'wrong-abi.json';
     await save(ws);
-    const abiConflict = cli(['validate', '--spec', ws.specFile]);
+    const abiConflict = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(abiConflict.status, 1);
     assert.match(abiConflict.stderr, /contract:stateFixture artifact .*wrong-abi\.json.*ABI differs from its compiler metadata/);
 
@@ -113,7 +113,7 @@ test('validate works offline and distinguishes graph structure from artifact val
     await writeFile(path.join(ws.directory, 'invalid-abi.json'), JSON.stringify(invalidAbi));
     ws.spec.contracts[0].artifact = 'invalid-abi.json';
     await save(ws);
-    const badAbi = cli(['validate', '--spec', ws.specFile]);
+    const badAbi = cli(['validate', '--fixture', ws.specFile]);
     assert.equal(badAbi.status, 1);
     assert.match(badAbi.stderr, /contract:stateFixture artifact .*invalid-abi\.json.*ABI item 0 has an invalid kind/);
   } finally {
@@ -125,7 +125,7 @@ test('fresh CREATE2 getter error blocks plan and apply before signing or broadca
   const anvil = await startAnvil();
   const ws = await workspace();
   try {
-    const good = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const good = cli(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(good.status, 0, good.stderr);
     const plan = JSON.parse(good.stdout);
     assert.equal(plan.resources[0].action, 'deploy');
@@ -133,17 +133,17 @@ test('fresh CREATE2 getter error blocks plan and apply before signing or broadca
     ws.spec.contracts[0].checks.BENEFICIARY_TYPO = ws.spec.contracts[0].checks.BENEFICIARY;
     delete ws.spec.contracts[0].checks.BENEFICIARY;
     await save(ws);
-    const invalid = cli(['plan', '--spec', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const invalid = cli(['plan', '--fixture', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /BENEFICIARY_TYPO.*no ABI function/);
     assert.equal(invalid.stdout, '');
 
     // Model a saved plan from an older planner, with internally consistent hashes.
-    plan.specHash = hashJson(parseSpec(ws.spec));
+    plan.specHash = hashJson(await loadSpec(path.join(ws.directory, 'main.ethp')));
     const { planHash, ...fields } = plan;
     plan.planHash = hashJson(fields);
     await writeFile(ws.planFile, JSON.stringify(plan));
-    const rejected = cli(['apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile], anvil.rpcUrl, true);
+    const rejected = cli(['apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile], anvil.rpcUrl, true);
     assert.equal(rejected.status, 1);
     assert.match(rejected.stderr, /BENEFICIARY_TYPO.*no ABI function/);
     assert.equal(await anvil.rpc('eth_getTransactionCount', [signer, 'latest']), '0x0');
@@ -159,18 +159,18 @@ test('an already satisfied call still rejects a misspelled write method', async 
   const anvil = await startAnvil();
   const ws = await workspace();
   try {
-    const planned = cli(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const planned = cli(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, planned.stderr);
-    const applied = cli(['apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile], anvil.rpcUrl, true);
+    const applied = cli(['apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile], anvil.rpcUrl, true);
     assert.equal(applied.status, 0, applied.stderr);
-    const satisfied = cli(['plan', '--spec', ws.specFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const satisfied = cli(['plan', '--fixture', ws.specFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(satisfied.status, 0, satisfied.stderr);
     assert.equal(JSON.parse(satisfied.stdout).resources.at(-1).action, 'reuse');
 
     const nonce = await anvil.rpc('eth_getTransactionCount', [signer, 'latest']);
     ws.spec.calls[0].method = 'setBnding';
     await save(ws);
-    const invalid = cli(['plan', '--spec', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const invalid = cli(['plan', '--fixture', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /call:bind method setBnding.*no ABI function/);
     assert.equal(await anvil.rpc('eth_getTransactionCount', [signer, 'latest']), nonce);

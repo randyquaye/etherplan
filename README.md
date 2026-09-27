@@ -1,6 +1,6 @@
 # Etherplan
 
-Etherplan is a command-line tool for desired EVM contract state. It reads a JSON or HCL specification and compiled Solidity artifacts, compares them with a chain, writes a reviewable plan, applies that saved plan, and verifies the result. The chain is the source of observed truth. A local state file records identity and provenance.
+Etherplan is a command-line tool for desired EVM contract state. It reads `.ethp` project files and compiled Solidity artifacts, compares them with a chain, writes a reviewable plan, applies that saved plan, and verifies the result. The chain is the source of observed truth. A local state file records identity and provenance.
 
 Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify existing contracts and explicit externals, link libraries, and run declared post-deployment calls. It does not destroy contracts, mutate immutables in place, infer an upgrade policy, or deploy L2 contracts.
 
@@ -37,7 +37,7 @@ See [the neutral state fixture](https://github.com/randyquaye/etherplan/blob/mai
 
 ## Write the spec in HCL
 
-Etherplan also reads a Terraform-style `.ethp` file. It compiles `main.ethp`, and `main.ethpvars` from the same directory, into a `schema: 2` JSON spec, then validates, plans, hashes, and applies that spec exactly as it would the JSON. [The lab fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.ethp) and [its JSON form](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.json) show a full example.
+Write a Terraform-style project with `main.ethp` in its root directory. Every other `.ethp` file directly in that directory joins the same project; files in subdirectories do not. Etherplan combines all declarations before resolving variables and references, so resources, variables, and locals can refer across files. It then compiles the project and optional `main.ethpvars` into a `schema: 2` JSON spec for validation, planning, hashing, and applying. Duplicate top-level attributes and resource declarations are errors. [The lab fixture](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.ethp) and [its JSON form](https://github.com/randyquaye/etherplan/blob/main/test/fixtures/ethp/lab.json) show a full example.
 
 ```hcl
 chain_id = 31337
@@ -93,7 +93,7 @@ The compiled spec uses split dependencies. A reference such as `contracts.regist
 
 A check block is not a resource. A block that targets a contract or external lists getters and their expected values, and folds into that resource's `checks`. Several blocks can target one resource, but each getter can appear only once. For a getter named `target`, `getter`, `args`, `before`, `equals`, or `after`, write `getter = "target"` and `equals = …` instead. Each call needs exactly one check block that targets it, with `getter`, optional getter `args`, `before`, and `equals`; these become the call's `check` and `before`.
 
-Run `etherplan compile --spec main.ethp` to print the canonical JSON spec that the other commands use. `spec.json` remains supported.
+Run `etherplan compile` from the project root to print the canonical JSON spec that the other commands use. Every project command requires `main.ethp` in the current directory. There is no `--spec` option.
 
 ### One spec for several chains
 
@@ -199,26 +199,26 @@ command "plan" {
 
 Config can set `state`, `journal`, `backend`, `out`, `deployers`, `owner`, `parallel`, and `pipeline`, and a command block can set only the options that command accepts. `out` goes in a command block, because it names a plan file for `plan` and a directory for `adapters`. A flag on the command line overrides the command block, which overrides `defaults`. An explicit `--signer-module` replaces configured deployers and owner. Paths in config are relative to the config file; paths given as flags stay relative to the working directory. A flag cannot turn off a boolean that config sets; set `parallel = false` in that command's block instead. Commands print the options they took from config on stderr.
 
-Config never sets `--plan`, `--max-spend-wei`, `--signer-module`, `--id`, `--creation-tx`, or `--rebaseline`, so `apply` without `--plan` still creates a fresh plan and asks for approval. Keep signer keys in the environment. Config options are not part of the spec hash; settings that a saved plan pins, such as signers and `parallel`, must still match it. JSON specs do not read a config file.
+Config never sets `--plan`, `--max-spend-wei`, `--signer-module`, `--id`, `--creation-tx`, or `--rebaseline`, so `apply` without `--plan` still creates a fresh plan and asks for approval. Keep signer keys in the environment. Config options are not part of the spec hash; settings that a saved plan pins, such as signers and `parallel`, must still match it.
 
 ## Validate, plan, apply, and verify
 
 Run offline validation in CI without an RPC URL or signer keys:
 
 ```sh
-etherplan graph --spec path/to/spec.json
-etherplan impact --spec path/to/spec.json --value owner
-etherplan validate --spec path/to/spec.json
+etherplan graph
+etherplan impact --value owner
+etherplan validate
 ```
 
-When the working directory contains `spec.json` or one `.ethp` file, you can omit `--spec` for any command. For example, run `etherplan validate` from that directory. Etherplan stops if the directory has both, or more than one `.ethp` file. An explicit `--spec` path takes precedence.
+Run these commands from the project root containing `main.ethp`. Etherplan loads every root-level `.ethp` file together, in filename order, regardless of how many there are.
 
 `validate` checks the complete spec, dependency graph, artifacts, declared source and contract names, ABI getters and expected values, constructor arguments, linked libraries, and every call method and argument. Declared `source` and `name` must exactly match identities present in the artifact; missing identities are errors. An external with checks must provide an ABI. Validation checks all declarations even when the desired chain state might already be satisfied.
 
 Set `ETH_RPC_URL` to the target RPC endpoint for a live plan. Plan reads the chain and writes no transactions:
 
 ```sh
-etherplan plan --spec path/to/spec.json --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
+etherplan plan --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
 ```
 
 `plan` saves `plan.json` in the working directory by default and also prints it as JSON. Use `--out path/to/plan.json` to choose a file, or `--out -` to print without saving.
@@ -236,20 +236,20 @@ Review the plan before apply. Each resource has an action: `reuse`, `deploy`, `c
 For apply, set `DEPLOYER_PRIVATE_KEYS` to one key or a comma-separated list of keys in the process environment. Set `OWNER_PRIVATE_KEY` if the plan has owner calls. A single key can also be supplied as `DEPLOYER_PRIVATE_KEY`. To use an external or KMS signer, pass `--signer-module` to both `plan` and `apply`; it works with local files and with the AWS backend. The built-in [KMS signer provider](docs/production-backends.md#kms-transaction-signers) supports multiple deployer and owner roles without placing their private keys in the runner.
 
 ```sh
-etherplan apply --spec path/to/spec.json --max-spend-wei 100000000000000000
-etherplan apply --spec path/to/spec.json --plan plan.json
-etherplan verify --spec path/to/spec.json
+etherplan apply --max-spend-wei 100000000000000000
+etherplan apply --plan plan.json
+etherplan verify
 ```
 
 After apply or import records state, `output` prints saved contract and external addresses as JSON without an RPC connection:
 
 ```sh
-etherplan output --spec path/to/spec.json
+etherplan output
 etherplan output --id contract:registry
 etherplan output --workspace sepolia
 ```
 
-Without `--spec`, Etherplan looks in the current directory for `spec.json` or one `.ethp` file. The selected workspace determines the default state path. The JSON includes `chain` and an `addresses` map keyed by resource ID; `--id` filters it to one resource. Use `etherplan output --id contract:registry | jq -r '.addresses["contract:registry"]'` to extract the address in a shell script. `--state path/to/state.json` reads that file directly without a spec. `--backend backend.json` reads production state and requires `ETH_RPC_URL`. These are recorded addresses; run `verify` to check current on-chain state. Call records are omitted because they repeat the target contract address.
+`output` also requires `main.ethp` in the current directory. The selected workspace determines the default state path. The JSON includes `chain` and an `addresses` map keyed by resource ID; `--id` filters it to one resource. Use `etherplan output --id contract:registry | jq -r '.addresses["contract:registry"]'` to extract the address in a shell script. `--state path/to/state.json` reads that file directly. `--backend backend.json` reads production state and requires `ETH_RPC_URL`. These are recorded addresses; run `verify` to check current on-chain state. Call records are omitted because they repeat the target contract address.
 
 Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. `plan --signer-module` obtains the addresses from the same module, so they need not be entered separately. Pipeline applies still require an explicit saved pipeline plan.
 
@@ -263,7 +263,7 @@ Automated CREATE2 apply requires the bundled factory bytecode (at its default ad
 
 A saved plan pins the state it observed. Apply rejects it with `stale-state` if another plan or import changed that state; create a new plan from the current state to proceed. An interrupted apply can resume its own saved plan.
 
-If a signed transaction remains unmined because its fee cap is too low, rerun the saved plan with `--replace-max-fee-per-gas`, `--replace-priority-fee-per-gas`, and `--replace-max-cost-wei` (all in wei). The two fee caps must each rise by at least 10%; the cost ceiling is the maximum gas cost plus value allowed for each replacement. For example: `etherplan apply --spec spec.json --plan plan.json --replace-max-fee-per-gas 20000000000 --replace-priority-fee-per-gas 4000000000 --replace-max-cost-wei 2000000000000000`. Apply checks the old transaction's receipt and nonce before signing at the same nonce, saves the replacement link before broadcast, and accepts a receipt from either signed variant. Rerunning with the same fees resends the saved replacement. Review the fee caps and ceiling against the plan's gas and payload before applying.
+If a signed transaction remains unmined because its fee cap is too low, rerun the saved plan with `--replace-max-fee-per-gas`, `--replace-priority-fee-per-gas`, and `--replace-max-cost-wei` (all in wei). The two fee caps must each rise by at least 10%; the cost ceiling is the maximum gas cost plus value allowed for each replacement. For example: `etherplan apply --plan plan.json --replace-max-fee-per-gas 20000000000 --replace-priority-fee-per-gas 4000000000 --replace-max-cost-wei 2000000000000000`. Apply checks the old transaction's receipt and nonce before signing at the same nonce, saves the replacement link before broadcast, and accepts a receipt from either signed variant. Rerunning with the same fees resends the saved replacement. Review the fee caps and ceiling against the plan's gas and payload before applying.
 
 For shared recovery across runners, use the [production backend guide](docs/production-backends.md). It covers the AWS reference backend, encrypted journal records, fenced signer locks, external signers, structured events, and the read-only `status` command.
 
@@ -274,9 +274,9 @@ Schedule and apply both use the primary deployer serially by default. Add `--par
 Create a pipeline plan with the signer address, then apply that saved plan with `--pipeline`:
 
 ```sh
-etherplan plan --spec path/to/spec.json --pipeline --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
-etherplan schedule --spec path/to/spec.json --plan plan.json --pipeline
-etherplan apply --spec path/to/spec.json --plan plan.json --pipeline
+etherplan plan --pipeline --deployers 0xYourDeployer --max-spend-wei 100000000000000000 --out plan.json
+etherplan schedule --plan plan.json --pipeline
+etherplan apply --plan plan.json --pipeline
 ```
 
 Set `DEPLOYER_PRIVATE_KEY` or `DEPLOYER_PRIVATE_KEYS` for apply as usual. Add `--owner 0xYourOwner` at plan time if the plan contains owner calls; the apply signer must match it. A pipeline plan pins signer assignments, dependency waves, and each action's nonce offset in plan order. Absolute nonces are read under the writer lock at apply time. Each ready wave is a receipt barrier: Etherplan reserves consecutive nonces per signer, checks the whole signer group's maximum cost, syncs all signed transactions to the journal, then broadcasts in nonce order and waits for receipts concurrently. For a `schema: 2` spec, the waves follow the execution graph, so contracts that only store a predicted address share a wave. Apply rechecks completed execution dependencies on chain before it reserves nonces for a wave, and before it signs or resends an unmined transaction on resume. The final report includes `timings.submitMs`, `timings.receiptMs`, and `timings.verificationMs`.
@@ -295,7 +295,7 @@ For a constructor that creates implementation contracts, opt into `creation_proo
 
 A stateful CREATE2 constructor without that opt-in can deploy successfully but fail receipt-block creation replay. Etherplan then stops without recording verified state. The [recovery guide](docs/stateful-constructor-limitation.md) explains how to review and explicitly import a previously stopped local deployment. Pinned-runtime mode cannot retroactively prove a transaction whose signed plan lacked those commitments. Tracked in [issue #28](https://github.com/randyquaye/etherplan/issues/28).
 
-Use `import --spec path/to/spec.json --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
+Use `import --id contract:name` to adopt a verified existing contract into local state. For a direct CREATE deployment with a private immutable, pass `--creation-tx 0x…` when the creation transaction is needed as proof. Import sends no transaction.
 
 ## Rebuilt artifacts
 
@@ -305,8 +305,8 @@ State separates a contract's deployment identity (address, initcode hash, and co
 
 For a CREATE2 contract, the plan reuses the existing deployment and reports `observation.stateComparison.artifactDrift` with the old and new artifact hashes. This requires that the address, initcode, inputs, and salt match state, that the live code hash equals the saved code hash, and that the new artifact verifies the live contract. Otherwise the contract is a `conflict`, and `artifactDrift.reasons` says why. A deployment change is not drift: when the address and the initcode or inputs both change, it is a replacement; when only one changes, it is a `conflict`. For example, a salt change with the same initcode and inputs is a `conflict`, even after a rebuild. To deploy the same contract at a new address on purpose, remove its state record first. The plan still pins the new artifact hash. Apply signs no transaction for the drift. Under its lock, apply rechecks the saved record and the live code hash, and stops with `stale-state` or `drift` if either changed. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to the record's `artifactRevisions`. Provenance, transactions, and prior-deployment fields are unchanged. A replacement starts a new revision list.
 
-An imported contract is not rebaselined automatically. After rebuilding its artifact, run `import --spec path/to/spec.json --id contract:name --rebaseline`. The existing import record must have the same address, inputs, and code hash, and the new artifact must verify the live contract. The recorded creation transaction is reused as proof unless `--creation-tx` is given. The import provenance is kept and an artifact revision is appended. Without `--rebaseline`, import still rejects a changed artifact.
+An imported contract is not rebaselined automatically. After rebuilding its artifact, run `import --id contract:name --rebaseline`. The existing import record must have the same address, inputs, and code hash, and the new artifact must verify the live contract. The recorded creation transaction is reused as proof unless `--creation-tx` is given. The import provenance is kept and an artifact revision is appended. Without `--rebaseline`, import still rejects a changed artifact.
 
 An artifact revision records provenance only. It does not show that mutable storage matches the constructor inputs; declare getter checks for values that must hold.
 
-`adapters --spec path/to/spec.json --out generated` optionally writes TypeScript wrappers. Planning and deployment do not need generated wrappers.
+`adapters --out generated` optionally writes TypeScript wrappers. Planning and deployment do not need generated wrappers.

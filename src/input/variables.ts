@@ -119,7 +119,7 @@ export function declareVariables(blocks: HclBlock[]): Map<string, VariableDeclar
     assertNotSecret(name, block);
     if (!ID.test(name)) fail(block, `Variable name ${name} must match ${ID}.`);
     const first = declarations.get(name);
-    if (first) fail(block, `Duplicate variable "${name}"; it is first declared on line ${first.block.at.line}.`);
+    if (first) fail(block, `Duplicate variable "${name}"; it is first declared at ${first.block.at.file}:${first.block.at.line}:${first.block.at.column}.`);
     const [nested] = block.body.blocks;
     if (nested) fail(nested, `variable "${name}" cannot contain a ${nested.type} block.`);
     for (const attribute of block.body.attributes.values()) {

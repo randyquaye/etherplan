@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from '../project-cli.mjs';
 import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -100,13 +100,13 @@ test('apply rejects a spec changed after planning before any signature', async (
   const anvil = await startAnvil();
   const ws = await workspace('etherplan-cli-stale-');
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const planned = runSync(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     ws.spec.values.beneficiary = '0x0000000000000000000000000000000000000002';
     await writeFile(ws.specFile, `${JSON.stringify(ws.spec, null, 2)}\n`);
 
     const applied = runSync([
-      'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], anvil.rpcUrl, true);
     assert.equal(applied.status, 1);
     assert.match(applied.stderr, /stale-spec/i);
@@ -122,12 +122,12 @@ test('an insufficient deployer balance stops before signing and resumes after fu
   const anvil = await startAnvil();
   const ws = await workspace('etherplan-cli-funding-');
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const planned = runSync(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     await anvil.rpc('anvil_setBalance', [deployer.address, '0x3e8']);
 
     const stopped = runSync([
-      'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], anvil.rpcUrl, true);
     assert.equal(stopped.status, 1);
     assert.match(stopped.stderr, /insufficient-funds/i);
@@ -135,7 +135,7 @@ test('an insufficient deployer balance stops before signing and resumes after fu
 
     await anvil.rpc('anvil_setBalance', [deployer.address, '0x3635c9adc5dea00000']);
     const resumed = runSync([
-      'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], anvil.rpcUrl, true);
     assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}`);
     assert.equal(await anvil.rpc('eth_getTransactionCount', [deployer.address, 'latest']), '0x1');
@@ -153,9 +153,9 @@ test('CLI replans from a verified deployment in the journal after a later call f
     const desired = ws.spec.calls[0].check.equals;
     ws.spec.calls[0].check.equals = { ref: 'values.beneficiary' };
     await writeFile(ws.specFile, JSON.stringify(ws.spec));
-    const first = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const first = runSync(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(first.status, 0, `${first.stderr}\n${first.stdout}`);
-    const failed = runSync(['apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile,
+    const failed = runSync(['apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile,
       '--journal', ws.journalFile], anvil.rpcUrl, true);
     assert.equal(failed.status, 1);
     assert.match(failed.stderr, /postcondition/);
@@ -164,14 +164,14 @@ test('CLI replans from a verified deployment in the journal after a later call f
 
     ws.spec.calls[0].check.equals = desired;
     await writeFile(ws.specFile, JSON.stringify(ws.spec));
-    const corrected = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile,
+    const corrected = runSync(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile,
       '--journal', ws.journalFile, ...planArgs], anvil.rpcUrl);
     assert.equal(corrected.status, 0, `${corrected.stderr}\n${corrected.stdout}`);
     const plan = JSON.parse(corrected.stdout);
     const contract = plan.resources.find(resource => resource.id === 'contract:stateFixture');
     assert.equal(contract.action, 'reuse');
     assert.ok(contract.observation.creationProof);
-    const resumed = runSync(['apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile,
+    const resumed = runSync(['apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile,
       '--journal', ws.journalFile], anvil.rpcUrl, true);
     assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}`);
     assert.equal(JSON.parse(resumed.stdout).transactionsSigned, 0);
@@ -188,11 +188,11 @@ test('a consumed signed nonce keeps the first signature live on later runs', asy
   const ws = await workspace('etherplan-cli-nonce-');
   let gate;
   try {
-    const planned = runSync(['plan', '--spec', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
+    const planned = runSync(['plan', '--fixture', ws.specFile, '--out', ws.planFile, '--state', ws.stateFile, ...planArgs], anvil.rpcUrl);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     gate = await signedGate(anvil.rpcUrl);
     const child = spawn(process.execPath, [
-      'dist/cli.js', 'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'dist/cli.js', 'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], {
       cwd: projectDirectory,
       env: { ...process.env, ETH_RPC_URL: gate.url, DEPLOYER_PRIVATE_KEYS: deployerKey, OWNER_PRIVATE_KEY: ownerKey },
@@ -210,14 +210,14 @@ test('a consumed signed nonce keeps the first signature live on later runs', asy
     assert.equal((await publicClient.waitForTransactionReceipt({ hash: outsideHash })).status, 'success');
 
     const stopped = runSync([
-      'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], anvil.rpcUrl, true);
     assert.equal(stopped.status, 1);
     assert.match(stopped.stderr, /nonce-race/i);
     assert.ok((await records(ws.journalFile)).some(record => record.phase === 'failed' && record.code === 'nonce-race'));
 
     const resumed = runSync([
-      'apply', '--spec', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
+      'apply', '--fixture', ws.specFile, '--plan', ws.planFile, '--state', ws.stateFile, '--journal', ws.journalFile,
     ], anvil.rpcUrl, true);
     assert.equal(resumed.status, 1);
     assert.match(resumed.stderr, /nonce-race/i);

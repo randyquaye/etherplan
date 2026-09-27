@@ -12,6 +12,7 @@ import { createSignerServiceProvider } from '../src/execution/signer-service.ts'
 import { createPlan } from '../src/planning/index.ts';
 import { deployerA, fixtureMany, startAnvil } from './execution/chain.ts';
 import { memoryBackend } from './execution/memory-backend.ts';
+import { prepareJsonProject } from './project-cli.mjs';
 
 const urlSecret = 'SENTINEL_SIGNER_URL_SECRET';
 const responseSecret = 'SENTINEL_SIGNER_RESPONSE_SECRET';
@@ -19,6 +20,7 @@ const responseSecret = 'SENTINEL_SIGNER_RESPONSE_SECRET';
 test('signer service rejects credential URLs without echoing them to the CLI', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-signer-url-'));
   const oldArgv = process.argv;
+  const oldCwd = process.cwd();
   const oldRpcUrl = process.env.ETH_RPC_URL;
   const oldError = console.error;
   const output: string[] = [];
@@ -28,7 +30,9 @@ test('signer service rejects credential URLs without echoing them to the CLI', a
     const signerModule = path.join(directory, 'signer.mjs');
     const source = pathToFileURL(path.resolve('src/execution/signer-service.ts')).href;
     await writeFile(signerModule, `import { createSignerServiceProvider } from ${JSON.stringify(source)};\nexport default createSignerServiceProvider({ url: ${JSON.stringify(`https://user:${urlSecret}@example.invalid/`)} });\n`);
-    process.argv = ['node', 'etherplan', 'plan', '--spec', path.resolve('test/fixtures/minimal-create2.json'),
+    const specFile = path.resolve('test/fixtures/minimal-create2.json');
+    process.chdir(prepareJsonProject(specFile));
+    process.argv = ['node', 'etherplan', 'plan',
       '--signer-module', signerModule, '--state', path.join(directory, 'state.json'), '--max-spend-wei', '1000000', '--out', '-'];
     process.env.ETH_RPC_URL = 'http://127.0.0.1:1';
     console.error = (...values) => { output.push(values.join(' ')); };
@@ -47,6 +51,7 @@ test('signer service rejects credential URLs without echoing them to the CLI', a
     assert.ok(!JSON.stringify(output).includes(urlSecret));
   } finally {
     process.argv = oldArgv;
+    process.chdir(oldCwd);
     if (oldRpcUrl === undefined) delete process.env.ETH_RPC_URL;
     else process.env.ETH_RPC_URL = oldRpcUrl;
     console.error = oldError;

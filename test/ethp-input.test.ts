@@ -309,26 +309,44 @@ test('config rejects options that must stay explicit, options a command lacks, a
   for (const [source, expected] of cases) assert.throws(() => config(source), expected, source);
 });
 
-test('spec discovery picks the only .ethp file or spec.json and rejects ambiguity', async () => {
+test('a project requires main.ethp and bundles all root-level .ethp files', async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-discovery-'));
   try {
-    assert.equal(await findSpecFile(undefined, directory), path.join(directory, 'spec.json'));
+    await assert.rejects(findSpecFile(directory), /No main\.ethp/);
     await writeFile(path.join(directory, 'main.ethpvars'), '');
     await writeFile(path.join(directory, 'main.ethpconfig'), '');
     await writeFile(path.join(directory, 'spec.json'), '{}');
-    assert.equal(await findSpecFile(undefined, directory), path.join(directory, 'spec.json'));
-    await writeFile(path.join(directory, 'main.ethp'), '');
-    await assert.rejects(findSpecFile(undefined, directory), /Found spec\.json and main\.ethp; pass --spec to choose one/);
-    await rm(path.join(directory, 'spec.json'));
-    assert.equal(await findSpecFile(undefined, directory), path.join(directory, 'main.ethp'));
-    await writeFile(path.join(directory, 'other.ethp'), '');
-    await assert.rejects(findSpecFile(undefined, directory), /Found main\.ethp, other\.ethp; pass --spec to choose one/);
-    assert.equal(await findSpecFile('other.ethp', directory), path.resolve('other.ethp'));
+    await assert.rejects(findSpecFile(directory), /No main\.ethp/);
+    await writeFile(path.join(directory, 'main.ethp'), 'chain_id = 31337\n');
+    assert.equal(await findSpecFile(directory), path.join(directory, 'main.ethp'));
+    await writeFile(path.join(directory, 'other.ethp'), 'resource "external" "registry" {\n address = "0x0000000000000000000000000000000000000001"\n}\n');
+    assert.equal(await findSpecFile(directory), path.join(directory, 'main.ethp'));
+    assert.deepEqual((await compileSpecFile(path.join(directory, 'main.ethp'))).externals, {
+      registry: { address: '0x0000000000000000000000000000000000000001' },
+    });
 
     await writeFile(path.join(directory, 'main.ethpconfig'), 'defaults {\n  state = "deploy/state.json"\n}\n');
     assert.equal((await loadConfig(path.join(directory, 'main.ethp'), COMMANDS)).defaults.state, path.join(directory, 'deploy/state.json'));
-    assert.equal(await loadConfig(path.join(directory, 'other.ethp'), COMMANDS), null);
-    assert.equal(await loadConfig(path.join(directory, 'main.json'), COMMANDS), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('split files share variables, locals, and resource references; duplicates name both files', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-split-'));
+  const main = path.join(directory, 'main.ethp');
+  const other = path.join(directory, 'resources.ethp');
+  try {
+    await writeFile(main, 'chain_id = 31337\nresource "contract" "alpha" {\n artifact = "Alpha.json"\n salt = "0x1111111111111111111111111111111111111111111111111111111111111111"\n args = [externals.registry.address, var.owner, local.role]\n}\n');
+    await writeFile(path.join(directory, 'main.ethpvars'), 'owner = "0x0000000000000000000000000000000000000002"\n');
+    await writeFile(other, 'variable "owner" {\n type = address\n}\nlocals {\n role = "deployer"\n}\nresource "external" "registry" {\n address = "0x0000000000000000000000000000000000000001"\n}\n');
+    const compiled = await compileSpecFile(main);
+    assert.deepEqual(compiled.contracts[0]?.args, [{ ref: 'externals.registry.address' }, { ref: 'values.owner' }, 'deployer']);
+    await writeFile(other, 'chain_id = 1\n');
+    await assert.rejects(compileSpecFile(main), /resources\.ethp:1:1: chain_id is already set at .*main\.ethp:1:1/);
+    await rm(path.join(directory, 'main.ethpvars'));
+    await writeFile(other, 'resource "contract" "alpha" {\n args = []\n}\n');
+    await assert.rejects(compileSpecFile(main), /resources\.ethp:1:1: Duplicate resource "contract" "alpha"; it is first declared at .*main\.ethp:2:1/);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

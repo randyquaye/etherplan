@@ -2,7 +2,7 @@ import type { Address, Hash } from '../types.ts';
 
 export type CommandName = keyof typeof COMMANDS;
 export type CliOptions = {
-  spec?: string; value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
+  value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
   'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean;
@@ -14,25 +14,24 @@ export function isCommand(value: string | undefined): value is CommandName {
 // Options that choose the spec's variable values and state. Every command that reads a spec takes them.
 const INPUTS = ['var', 'var-file', 'workspace'];
 export const COMMANDS = {
-  validate: { description: 'Check the spec and artifacts without an RPC connection.', options: ['spec', ...INPUTS] },
-  compile: { description: 'Print the canonical JSON spec for a .json or .ethp spec.', options: ['spec', ...INPUTS] },
-  graph: { description: 'Show resource dependencies without loading artifacts.', options: ['spec', ...INPUTS] },
-  impact: { description: 'Show resources affected by a named value.', options: ['spec', 'value', ...INPUTS] },
-  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['spec', 'out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', ...INPUTS] },
-  verify: { description: 'Verify desired state against the chain.', options: ['spec', 'state', 'backend', ...INPUTS] },
-  schedule: { description: 'Preview signer assignments and execution waves.', options: ['spec', 'plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
-  import: { description: 'Record a verified existing contract in local state.', options: ['spec', 'state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
-  output: { description: 'Print recorded contract and external addresses as JSON.', options: ['spec', 'state', 'backend', 'id', 'workspace'] },
-  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['spec', 'out', ...INPUTS] },
+  validate: { description: 'Check the project and artifacts without an RPC connection.', options: [...INPUTS] },
+  compile: { description: 'Print the project\'s canonical JSON spec.', options: [...INPUTS] },
+  graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
+  impact: { description: 'Show resources affected by a named value.', options: ['value', ...INPUTS] },
+  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', ...INPUTS] },
+  verify: { description: 'Verify desired state against the chain.', options: ['state', 'backend', ...INPUTS] },
+  schedule: { description: 'Preview signer assignments and execution waves.', options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
+  import: { description: 'Record a verified existing contract in local state.', options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
+  output: { description: 'Print recorded contract and external addresses as JSON.', options: ['state', 'backend', 'id', 'workspace'] },
+  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['out', ...INPUTS] },
   status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
 };
 const OPTION_HELP = {
-  spec: 'Specification file, .json or .ethp (default: the only .ethp file or spec.json here)',
   value: 'Value name for impact',
   out: 'Output path',
   plan: 'Saved plan file',
-  state: 'State file (default: .etherplan/<workspace>/state.json beside the spec)',
+  state: 'State file (default: .etherplan/<workspace>/state.json in the project directory)',
   journal: 'Journal file (default: <state-file>.journal.jsonl)',
   backend: 'Production backend config file',
   'signer-module': 'Signer module for plan or apply',
@@ -51,16 +50,16 @@ const OPTION_HELP = {
   'var-file': 'Read variable values from an .ethpvars file; repeatable, later files win',
   workspace: 'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
-const VALUE_OPTIONS = new Set(['spec', 'value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'workspace']);
+const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'workspace']);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'rebaseline']);
-export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([, details]) => details.options.includes('spec')).map(([name, details]) => [name, details.options]));
+export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
 
 export class UsageError extends Error {}
 
 export function usage(command?: CommandName): string {
   if (!command) {
-    return `Usage: etherplan <command> [options]\n\nCommands:\n${Object.entries(COMMANDS).map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`).join('\n')}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
+    return `Usage: etherplan <command> [options]\n\nRun project commands from a directory containing main.ethp.\n\nCommands:\n${Object.entries(COMMANDS).map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`).join('\n')}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
   }
   const details = COMMANDS[command];
   const describe = (name: keyof typeof OPTION_HELP) => name === 'out' && command === 'plan' ? 'Local plan file (default: ./plan.json; - skips the local file)'
@@ -72,7 +71,8 @@ export function usage(command?: CommandName): string {
     ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
   const signers = command === 'apply'
     ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
-  return `Usage: etherplan ${command} [options]\n\n${details.description}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
+  const project = command === 'status' ? '' : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
+  return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 
 export function parseOptions(args: string[]): CliOptions {

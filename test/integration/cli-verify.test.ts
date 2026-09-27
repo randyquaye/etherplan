@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../project-cli.mjs';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startAnvil, stopAnvil } from './anvil.ts';
@@ -13,7 +13,7 @@ function runVerify() {
   return spawnSync(process.execPath, [
     'dist/cli.js',
     'verify',
-    '--spec',
+    '--fixture',
     'test/fixtures/minimal-create2.json',
   ], {
     cwd: projectDirectory,

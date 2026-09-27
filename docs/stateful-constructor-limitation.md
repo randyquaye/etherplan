@@ -42,10 +42,10 @@ This proves the declared runtime bytes and getter addresses against hashes commi
 
 ## Adopt a reviewed deployment in local state
 
-After the review, a local-state operator can explicitly adopt the contract. Use the same spec and state file as the failed apply, with the reviewed `code_hash` and getter checks needed to verify the runtime:
+After the review, a local-state operator can explicitly adopt the contract. Run from the same project directory containing `main.ethp`, using the same state file as the failed apply, with the reviewed `code_hash` and getter checks needed to verify the runtime:
 
 ```sh
-etherplan import --spec path/to/spec.ethp --id contract:accountFactory --state path/to/state.json
+etherplan import --id contract:accountFactory --state path/to/state.json
 ```
 
 Set `ETH_RPC_URL` to the intended chain before running the command. Omit `--creation-tx`: that option requires the creation replay that failed. `import` sends no transaction and succeeds only if Etherplan can verify the live code and declared checks. It records **import provenance**, not a verified creation-transaction proof. Keep the transaction and your review evidence separately. Then create a fresh plan with the same state and journal and confirm that the imported resource is `reuse` before applying any remaining actions.
