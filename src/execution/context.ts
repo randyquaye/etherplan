@@ -1,10 +1,11 @@
-import { isAddress } from 'viem';
+import { isUserAddress } from '../address.ts';
 import { validateState } from '../state/index.ts';
 import { loadDependencies } from './dependencies.ts';
-import { acquireLock } from './lock.ts';
+import { acquireLocalApplyLocks } from './lock.ts';
 import { acquireLeases, deploymentScope, openStoredJournal } from './backends.ts';
 import { openJournal } from './journal.ts';
 import { ApplyError } from './errors.ts';
+import { safeExternalError } from './rpc-error.ts';
 import { roleOf } from './shared.ts';
 import type { Plan } from '../planning/types.ts';
 import type { Artifacts } from '../artifacts/types.ts';
@@ -39,7 +40,6 @@ export interface ApplyContext {
   timings: ApplyTimings;
   state: StateWriteResult;
   prepared: Map<ResourceId, PreparedAction>;
-  preflightComplete: boolean;
   stateSnapshot: StateFile | null;
   schedule: Schedule | null;
 }
@@ -50,7 +50,7 @@ function lanesFrom(signers: Signers | undefined, parallel: boolean): SignerLanes
   if (!signers || !Array.isArray(signers.deployer) || signers.deployer.length === 0) throw new ApplyError('signer', 'Apply needs signers.deployer with at least one account.');
   const accounts = [...signers.deployer, ...(signers.owner ? [signers.owner] : [])];
   for (const account of accounts) {
-    if (!isAddress(account?.address ?? '', { strict: false }) || typeof account.signTransaction !== 'function') throw new ApplyError('signer', 'Every signer needs an address and signTransaction(request).');
+    if (!isUserAddress(account?.address ?? '') || typeof account.signTransaction !== 'function') throw new ApplyError('signer', 'Every signer needs an address with a valid mixed-case checksum and signTransaction(request).');
   }
   const deployers = signers.deployer.map(account => account.address.toLowerCase());
   if (new Set(deployers).size !== deployers.length) throw new ApplyError('signer', 'Deployer accounts must be distinct.');
@@ -62,10 +62,15 @@ async function signersFromProvider(provider: SignerProvider, roles: SignerRoles 
   if (typeof provider?.address !== 'function' || typeof provider?.signTransaction !== 'function') throw new ApplyError('signer', 'Signer provider needs address(role) and signTransaction(role, request).');
   const deployerRoles = roles?.deployer ?? ['deployer'];
   if (!Array.isArray(deployerRoles) || deployerRoles.length === 0 || deployerRoles.some(role => typeof role !== 'string')) throw new ApplyError('signer', 'signerRoles.deployer must be a nonempty role list.');
-  const account = async (role: string): Promise<SignerAccount> => ({ address: await provider.address(role), async signTransaction(request) {
-    await control.assertHeld?.();
-    return provider.signTransaction(role, request, { scope: control.scope, fence: control.fence });
-  } });
+  const account = async (role: string): Promise<SignerAccount> => {
+    let address: Address;
+    try { address = await provider.address(role); }
+    catch (error) { throw new ApplyError('signer', safeExternalError(error)); }
+    return { address, async signTransaction(request) {
+      await control.assertHeld?.();
+      return provider.signTransaction(role, request, { scope: control.scope, fence: control.fence });
+    } };
+  };
   const deployer = await Promise.all(deployerRoles.map(account));
   const needsOwner = plan?.resources?.some(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
   return { deployer, ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}) };
@@ -99,12 +104,14 @@ export async function openApplyContext({ plan, spec, artifacts, client, signers,
   const deps = loadDependencies(config.dependencies);
   const lockStarted = Date.now();
   const emitLeaseEvent = (event: ReportEvent) => typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit(event);
+  const localLocks = backend ? null : await acquireLocalApplyLocks(stateFile!, journalFile!, typeof plan.planHash === 'string' ? plan.planHash : null,
+    plan.chain, [...lanes.byAddress.keys()] as Address[]);
   const lock = backend
     ? await acquireLeases({ lockProvider: backend.lockProvider, scope: backend.scope, addresses: [...lanes.byAddress.keys()] as Address[], planHash: plan.planHash, principal, ttlMs,
       onRenew: event => emitLeaseEvent({ type: 'lock-renewal', at: new Date().toISOString(), planHash: plan.planHash, chain: plan.chain, scope: backend.scope, principal: event.holder.principal }),
-      onRenewFailure: event => emitLeaseEvent({ type: 'lock-renewal-failure', at: new Date().toISOString(), planHash: plan.planHash, chain: plan.chain, scope: backend.scope, principal: event.holder.principal, reason: event.error.message }),
+      onRenewFailure: event => emitLeaseEvent({ type: 'lock-renewal-failure', at: new Date().toISOString(), planHash: plan.planHash, chain: plan.chain, scope: backend.scope, principal: event.holder.principal, reason: safeExternalError(event.error) }),
     })
-    : await acquireLock(`${stateFile!}.lock`, { planHash: typeof plan.planHash === 'string' ? plan.planHash : null });
+    : localLocks!.lock;
   const fence = 'fence' in lock ? lock.fence : null;
   signerControl.fence = fence;
   signerControl.assertHeld = () => lock.assertHeld();
@@ -114,7 +121,7 @@ export async function openApplyContext({ plan, spec, artifacts, client, signers,
     finally { await lock.release(); }
   };
   try {
-    journal = backend ? await openStoredJournal({ journalStore: backend.journalStore, journalCipher: backend.journalCipher, scope: backend.scope, fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile!);
+    journal = backend ? await openStoredJournal({ journalStore: backend.journalStore, journalCipher: backend.journalCipher, scope: backend.scope, fence, assertHeld: () => lock.assertHeld() }) : await openJournal(journalFile!, { writerLock: localLocks!.journalLock });
     const readState: ApplyContext['readState'] = backend
       ? async () => { const found = await backend.stateStore.read(backend.scope); return { version: found?.version ?? null, value: found ? validateState(found.value) : null }; }
       : async () => ({ version: null, value: await deps.readState(stateFile!) });
@@ -124,7 +131,7 @@ export async function openApplyContext({ plan, spec, artifacts, client, signers,
     const ctx: ApplyContext = { plan, spec, artifacts, client, lanes, deps, journal, journalStore: backend?.journalStore, lock, config, scope, remote,
       principal: 'principal' in lock.holder ? lock.holder.principal : principal, readState, writeState, stateFile: stateFile ?? null, parallel, pipeline,
       sent: [], rebroadcasts: [], outcomes: new Map<ResourceId, ResourceOutcome>(), timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 },
-      state: { file: stateFile ?? null, written: false }, prepared: new Map<ResourceId, PreparedAction>(), preflightComplete: false, stateSnapshot: null, schedule: null };
+      state: { file: stateFile ?? null, written: false }, prepared: new Map<ResourceId, PreparedAction>(), stateSnapshot: null, schedule: null };
     return {
       ctx,
       lockStarted,

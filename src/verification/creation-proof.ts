@@ -22,7 +22,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export function validateCreationProof(proof: unknown, label = 'Creation proof'): CreationProof {
   assert(isRecord(proof), `${label} must be an object.`);
   const create2 = proof.kind === 'create2';
-  const keys = ['chain', 'transactionHash', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : [])];
+  const keys = ['chain', 'transactionHash', 'creator', 'blockNumber', 'blockHash', 'address', 'kind', 'initcodeHash', 'codeHash', ...(create2 ? ['factory', 'salt'] : [])];
   assert((proof.kind === 'create' || create2) && Object.keys(proof).length === keys.length && keys.every(key => Object.hasOwn(proof, key)), `${label} has invalid fields.`);
   const chain = proof.chain;
   assert(isRecord(chain) && Object.keys(chain).length === 2 &&
@@ -30,6 +30,7 @@ export function validateCreationProof(proof: unknown, label = 'Creation proof'):
   for (const key of ['transactionHash', 'blockHash', 'initcodeHash', 'codeHash']) assert(isHash(proof[key]), `${label} has invalid ${key}.`);
   assert(typeof proof.blockNumber === 'string' && BLOCK.test(proof.blockNumber), `${label} has invalid blockNumber.`);
   assert(typeof proof.address === 'string' && isAddress(proof.address), `${label} has invalid address.`);
+  assert(typeof proof.creator === 'string' && isAddress(proof.creator), `${label} has invalid creator.`);
   if (create2) {
     const factory = proof.factory;
     assert(isRecord(factory) && Object.keys(factory).length === 2 &&

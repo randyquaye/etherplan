@@ -1,13 +1,17 @@
 import { keccak256 } from 'viem';
-import { intentForSigned, latestRecord, liveTransactions, signedVariants } from './journal.ts';
+import { intentForSigned, latestRecord, liveTransactions, readLocalJournal, signedVariants } from './journal.ts';
 import { broadcast, feesFor, findKnownReceipt, findReceipt, nonceConsumed, receiptJson, signEnvelope, validateSignedTransaction, waitForReceipt, maximumCost } from './transactions.ts';
 import { ApplyError } from './errors.ts';
+import { safeExternalError } from './rpc-error.ts';
+import { deploymentScope, scopeKey, validateJournal } from './backends.ts';
+import { localSignerJournals } from './local-signer.ts';
+import { canonicalLocalFile } from './lock.ts';
 import { transactionFor } from './shared.ts';
-import { commitments, signedSpend } from './funding.ts';
-import { checkExecutionDependencies, finish, markVerified, precondition, stableReceipt } from './outcome.ts';
+import { budgetFor, commitments, spendWithVariant } from './funding.ts';
+import { checkExecutionDependencies, finish, stableReceipt } from './outcome.ts';
 import { append, fail, report } from './report.ts';
 import type { Address, Hash, ResourceId } from '../types.ts';
-import type { ApplyContext, IntentRecord, JournalRecord, PreparedAction, Receipt, SignedBytes, SignedRecord, SignerAccount, TransactionEnvelope } from './types.ts';
+import type { ApplyContext, IntentRecord, JournalRecord, PreparedAction, Receipt, SignedBytes, SignedFields, SignedIndexEntry, SignedRecord, SignerAccount, StoredJournalRecord, TransactionEnvelope } from './types.ts';
 
 export async function recordReceipt(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord, receipt: Receipt): Promise<void> {
   const latest = latestRecord(ctx.journal.forAction(ctx.plan.planHash, item.planned.id));
@@ -16,15 +20,118 @@ export async function recordReceipt(ctx: ApplyContext, item: PreparedAction, sig
   await append(ctx, item.planned.id, { phase: 'receipt', signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash, receipt: json });
 }
 
-export async function assertSignerHistory(ctx: ApplyContext, addresses: Address[]): Promise<void> {
-  if (!ctx.remote || !ctx.journalStore || !ctx.scope) return;
-  for (const address of new Set(addresses.map(value => value.toLowerCase()))) {
-    for await (const signed of ctx.journalStore.signedForSigner(ctx.scope, address)) {
-      if (signed.label === ctx.scope.label && signed.planHash === ctx.plan.planHash) continue;
-      const receipt = await findReceipt(ctx.client, signed.transactionHash);
-      if (!receipt) throw new ApplyError('foreign-outstanding', `Label ${signed.label} has unresolved transaction ${signed.transactionHash} for signer ${address}. Resume that label first.`, { actionId: signed.actionId, retryable: true });
-      await stableReceipt(ctx, signed.transactionHash, receipt, signed.actionId);
+// A partially signed pipeline wave may sign its remaining reserved nonces only
+// after resumePipelineWave has validated the whole reservation. Every other
+// signature, including one from this plan, needs a canonical receipt first.
+export async function assertSignerHistory(ctx: ApplyContext, addresses: Address[], activeSignatures: ReadonlySet<string> = new Set()): Promise<void> {
+  const { journalStore, scope } = ctx;
+  if (!ctx.remote) {
+    if (!ctx.journal.file) throw new ApplyError('config', 'Local signer history needs a journal file.');
+    const current = await canonicalLocalFile(ctx.journal.file);
+    for (const address of new Set(addresses.map(value => value.toLowerCase() as Address))) {
+      const files = new Set([...(await localSignerJournals(ctx.plan.chain, address)), current]);
+      for (const file of files) {
+        await assertLocalJournalSettled(ctx, file, address, file === current ? ctx.journal.records : null,
+          file === current ? activeSignatures : new Set());
+      }
     }
+    return;
+  }
+  if (!journalStore || !scope) return;
+  const scopeRecords = new Map<string, StoredJournalRecord[]>();
+  const priorJournal = async (entry: SignedIndexEntry): Promise<StoredJournalRecord[]> => {
+    const priorScope = deploymentScope({ project: entry.project, environment: entry.environment, label: entry.label }, { id: scope.chainId, genesisHash: scope.genesisHash });
+    const key = scopeKey(priorScope);
+    const cached = scopeRecords.get(key);
+    if (cached) return cached;
+    const records: StoredJournalRecord[] = [];
+    for await (const record of journalStore.read(priorScope)) records.push(record);
+    validateJournal(records, priorScope);
+    if (journalStore.head) {
+      const head = await journalStore.head(priorScope);
+      if ((head?.sequence ?? 0) !== records.length || (head?.recordHash ?? null) !== (records.at(-1)?.recordHash ?? null)) throw new ApplyError('journal', `Signer source journal ${key} differs from its head.`);
+    }
+    scopeRecords.set(key, records);
+    return records;
+  };
+  for (const address of new Set(addresses.map(value => value.toLowerCase()))) {
+    const groups = new Map<string, SignedIndexEntry[]>();
+    for await (const signed of journalStore.signedForSigner(scope, address)) {
+      if (typeof signed.project !== 'string' || typeof signed.environment !== 'string' || typeof signed.label !== 'string' ||
+        typeof signed.actionId !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(signed.planHash ?? '') ||
+        signed.signer?.toLowerCase() !== address || !/^0x[0-9a-fA-F]{64}$/.test(signed.transactionHash ?? '') ||
+        !/^[0-9]+$/.test(signed.nonce ?? '')) throw new ApplyError('journal', 'Signer index entry has invalid source or transaction identity.', { actionId: signed.actionId });
+      // The signer index has one row per signature. Every variant of one action
+      // at a nonce represents the same possible spend, and only one can mine.
+      const key = JSON.stringify([signed.project, signed.environment, signed.label, signed.planHash.toLowerCase(), signed.actionId, address, BigInt(signed.nonce).toString()]);
+      const group = groups.get(key) ?? [];
+      group.push(signed);
+      groups.set(key, group);
+    }
+    for (const variants of groups.values()) {
+      const first = variants[0]!;
+      const records = await priorJournal(first);
+      const signed = records.filter((record): record is StoredJournalRecord & Omit<SignedFields, 'rawTransaction'> => record.phase === 'signed' && record.planHash.toLowerCase() === first.planHash.toLowerCase() &&
+        record.actionId === first.actionId && record.signer.toLowerCase() === address && BigInt(record.nonce) === BigInt(first.nonce));
+      const indexed = new Set(variants.map(entry => entry.transactionHash.toLowerCase()));
+      if (signed.length !== variants.length || indexed.size !== variants.length ||
+        signed.some(record => !indexed.has(record.transactionHash.toLowerCase())) ||
+        signed.some((record, index) => index === 0 ? Boolean(record.replacement || record.replacesTransactionHash) :
+          !record.replacement || record.replacesTransactionHash?.toLowerCase() !== signed[index - 1]!.transactionHash.toLowerCase())) {
+        throw new ApplyError('journal', `Signer index entries for ${first.actionId} are not one signed replacement chain.`, { actionId: first.actionId });
+      }
+      const activeCurrent = first.project === scope.project && first.environment === scope.environment && first.label === scope.label &&
+        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
+        signed.every(record => activeSignatures.has(record.transactionHash.toLowerCase()));
+      if (activeCurrent) continue;
+      let mined: { signed: SignedIndexEntry; receipt: Receipt } | null = null;
+      for (const signed of variants) {
+        const receipt = await findReceipt(ctx.client, signed.transactionHash);
+        if (receipt) { mined = { signed, receipt }; break; }
+      }
+      if (!mined) {
+        const signed = variants[0]!;
+        throw new ApplyError('foreign-outstanding', `Deployment ${signed.project}/${signed.environment}/${signed.label} has unresolved transaction ${signed.transactionHash} for signer ${address}. Resume that deployment first.`, { actionId: signed.actionId, retryable: true });
+      }
+      await stableReceipt(ctx, mined.signed.transactionHash, mined.receipt, mined.signed.actionId);
+    }
+  }
+}
+
+async function assertLocalJournalSettled(ctx: ApplyContext, file: string, address: Address, currentRecords: JournalRecord[] | null,
+  activeSignatures: ReadonlySet<string>): Promise<void> {
+  let records: JournalRecord[];
+  try { records = currentRecords ?? await readLocalJournal(file); }
+  catch (error) { throw new ApplyError('journal', `Cannot inspect signer journal ${file}: ${error instanceof Error ? error.message : String(error)}`); }
+  const groups = new Map<string, SignedRecord[]>();
+  for (const record of records) {
+    if (record.phase !== 'signed' || record.signer.toLowerCase() !== address || record.chain.id !== ctx.plan.chain.id ||
+      record.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase()) continue;
+    const key = JSON.stringify([record.planHash, record.actionId, record.signer.toLowerCase(), BigInt(record.nonce).toString()]);
+    const group = groups.get(key) ?? [];
+    group.push(record);
+    groups.set(key, group);
+  }
+  for (const variants of groups.values()) {
+    const first = variants[0]!;
+    if (variants.some((record, index) => index === 0 ? Boolean(record.replacement || record.replacesTransactionHash) :
+      !record.replacement || record.replacesTransactionHash?.toLowerCase() !== variants[index - 1]!.transactionHash.toLowerCase())) {
+      throw new ApplyError('journal', `Signer journal ${file} has invalid replacement links.`, { actionId: first.actionId });
+    }
+    for (const signed of variants) {
+      try { intentForSigned(records, signed); }
+      catch (error) { throw new ApplyError('journal', `Signer journal ${file}: ${error instanceof Error ? error.message : String(error)}`, { actionId: signed.actionId }); }
+    }
+    if (first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
+      variants.every(record => activeSignatures.has(record.transactionHash.toLowerCase()))) continue;
+    let receipt: Receipt | null = null;
+    let mined: SignedRecord | null = null;
+    for (const signed of variants) {
+      receipt = await findReceipt(ctx.client, signed.transactionHash);
+      if (receipt) { mined = signed; break; }
+    }
+    if (!receipt || !mined) throw new ApplyError('foreign-outstanding', `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Resume that journal first.`, { actionId: first.actionId, retryable: true });
+    await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId);
   }
 }
 
@@ -52,7 +159,12 @@ export async function send(ctx: ApplyContext, item: PreparedAction, signed: Sign
     if (sent.nonceTooLow) {
       const receipt = await findKnownReceipt(ctx.client, variants);
       if (receipt) return receipt;
-      await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
+      if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
+        const late = await findKnownReceipt(ctx.client, variants);
+        if (late) return late;
+        await fail(ctx, item, 'nonce-race', `Signer ${signed.signer} nonce ${signed.nonce} was used by a transaction that is not in the journal. Stop the other writer, then rerun this plan.`, { retryable: true, signer: signed.signer, nonce: signed.nonce, transactionHash: signed.transactionHash });
+      }
+      throw new ApplyError('broadcast-failed', `Broadcast of ${signed.transactionHash} was rejected as nonce too low, but nonce ${signed.nonce} is not yet consumed on chain. Rerun to settle this signed transaction.`, { actionId: item.planned.id, retryable: true });
     }
     const code = sent.replacementUnderpriced ? 'replacement-underpriced' : 'broadcast-failed';
     throw new ApplyError(code, `Broadcast of ${signed.transactionHash} failed: ${sent.error}. Rerun to resend the same signed transaction.`, { actionId: item.planned.id, retryable: true });
@@ -98,13 +210,12 @@ export async function replaceSigned(ctx: ApplyContext, item: PreparedAction, sig
   if (!signer) throw new ApplyError('signer', `Signer ${signed.signer} for the replacement is unavailable.`, { actionId: item.planned.id });
   const balance = await ctx.client.getBalance({ address: signed.signer });
   if (balance < cost) throw new ApplyError('insufficient-funds', `Signer ${signed.signer} has ${balance} wei; replacement can cost ${cost} wei.`, { actionId: item.planned.id, retryable: true });
-  const budget = ctx.config.budgets[signed.signer.toLowerCase()];
-  if (budget !== undefined) {
-    const ledger = await commitments(ctx);
-    ledger.get(signed.signer.toLowerCase())?.delete(String(signed.nonce));
-    if (signedSpend(ledger, signed.signer.toLowerCase()) + cost > BigInt(budget)) {
-      throw new ApplyError('budget-exceeded', `Replacement would exceed signer ${signed.signer}'s ${budget} wei budget.`, { actionId: item.planned.id, retryable: true });
-    }
+  const lane = signed.signer.toLowerCase();
+  const ledger = await commitments(ctx);
+  const budget = budgetFor(ctx, lane);
+  const committed = spendWithVariant(ledger, lane, signed.nonce, cost);
+  if (committed > budget) {
+    throw new ApplyError('budget-exceeded', `Replacement would commit ${committed} wei for signer ${signed.signer}, above its ${budget} wei budget.`, { actionId: item.planned.id, retryable: true });
   }
   let intent: IntentRecord;
   if (orphan && pending?.phase === 'intent') intent = pending;
@@ -113,12 +224,12 @@ export async function replaceSigned(ctx: ApplyContext, item: PreparedAction, sig
       maxCostWei: String(ceiling), signer: signed.signer, nonce: signed.nonce, to: envelope.to,
       value: String(envelope.value), dataHash: keccak256(envelope.data), gas: String(envelope.gas),
       maxFeePerGas: String(fees.maxFeePerGas), maxPriorityFeePerGas: String(fees.maxPriorityFeePerGas),
-      ...Object.fromEntries((['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId'] as const)
+      ...Object.fromEntries((['wave', 'reservationId', 'signerRole', 'pooled', 'nonceOffset', 'waveAttemptId', 'attemptId'] as const)
         .filter(field => oldIntent[field] !== undefined).map(field => [field, oldIntent[field]])) });
   }
   let bytes: SignedBytes;
   try { bytes = await signWithLease(ctx, item.planned.id, signer, envelope); }
-  catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: item.planned.id, retryable: true }); }
+  catch (error) { throw new ApplyError('signer', safeExternalError(error), { actionId: item.planned.id, retryable: true }); }
   const { formatVersion, planHash, chain, actionId, sequence, at, ...intentFields } = intent;
   const replacement = await append(ctx, item.planned.id, { ...intentFields, phase: 'signed', ...bytes });
   await validateSignedTransaction(replacement, intent, item.planned, ctx.plan.chain.id);
@@ -141,8 +252,9 @@ async function settle(ctx: ApplyContext, item: PreparedAction, signed: SignedRec
     }
   }
   if (!receipt) {
-    const observed = await precondition(ctx, item);
-    if (observed.satisfied && observed.verification) return markVerified(ctx, item, observed.verification, { outcome: 'already-satisfied', unsentTransaction: signed.transactionHash });
+    // The transaction is already signed and may still mine, even if another
+    // writer has since satisfied the getter. Keep its nonce live until a
+    // journaled variant has a receipt or an unknown transaction consumes it.
     await checkExecutionDependencies(ctx, [{ item }], false);
     signed = await replaceSigned(ctx, item, signed, variants);
     receipt = await findKnownReceipt(ctx.client, variants);

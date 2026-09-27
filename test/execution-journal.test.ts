@@ -82,7 +82,7 @@ test('decoded verification and error evidence round-trip without treating field 
   await reopened.close();
 });
 
-test('live transactions are signed, broadcast, or receipt records without a later outcome', () => {
+test('live transactions include retryable nonce races until their signatures are reconciled', () => {
   let sequence = 0;
   const record = (actionId, phase, extra = {}) => ({ formatVersion: 1, ...base, actionId, phase, sequence: ++sequence, ...extra });
   const tx = (hash, nonce) => ({ signer, nonce, transactionHash: hash, rawTransaction: '0x02c0' });
@@ -99,7 +99,7 @@ test('live transactions are signed, broadcast, or receipt records without a late
     record('contract:d', 'signed', tx(`0x${'04'.repeat(32)}`, '3')),
     record('contract:d', 'verified', { transactionHash: `0x${'04'.repeat(32)}` }),
   ];
-  assert.deepEqual(liveTransactions(records).map(item => [item.latest.phase, item.signed.transactionHash]), [['broadcast', h1], ['receipt', h3]]);
+  assert.deepEqual(liveTransactions(records).map(item => [item.latest.phase, item.signed.transactionHash]), [['broadcast', h1], ['failed', h2], ['receipt', h3]]);
   assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:c')).phase, 'receipt');
   assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:a')).phase, 'broadcast');
 });

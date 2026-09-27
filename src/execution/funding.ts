@@ -45,6 +45,14 @@ export function signedSpend(commitments: CommitmentLedger, signer: string, excep
   }, 0n);
 }
 
+// A new variant changes a nonce's commitment only when its cap exceeds every
+// signed variant already at that nonce. Other signed nonces still count in full.
+export function spendWithVariant(commitments: CommitmentLedger, signer: string, nonce: string, cost: bigint): bigint {
+  const variants = commitments.get(signer)?.get(BigInt(nonce).toString()) ?? [];
+  const current = variants.reduce((max, entry) => entry.cost > max ? entry.cost : max, 0n);
+  return signedSpend(commitments, signer) - current + (cost > current ? cost : current);
+}
+
 export function budgetFor(ctx: ApplyContext, signer: string): bigint {
   if (!ctx.plan.maxSpendWei) throw new ApplyError('plan-policy', 'The saved plan needs a maxSpendWei ceiling.');
   const approved = BigInt(ctx.plan.maxSpendWei);

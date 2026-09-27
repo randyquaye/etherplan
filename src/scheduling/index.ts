@@ -1,4 +1,4 @@
-import { isAddress } from 'viem';
+import { isUserAddress } from '../address.ts';
 import type { Address, ResourceId } from '../types.ts';
 import type { ExecutionWaves, Lane, LaneRole, SchedulableResource, Schedule, ScheduleEntry, ScheduleLane, ScheduleOptions, SchedulePlan, ScheduleWave, SignerGroup } from './types.ts';
 
@@ -86,10 +86,10 @@ export function createSchedule(plan: SchedulePlan, deployers: string[], options:
   const { owner = null, parallel = true, pipeline = false } = options;
   assert(plan && Array.isArray(plan.resources), 'Schedule needs a plan with resources[].');
   assert(Array.isArray(deployers) && deployers.length > 0, 'Supply at least one deployer address.');
-  assert(deployers.every(address => isAddress(address, { strict: false })), 'Every deployer must be an Ethereum address.');
+  assert(deployers.every(isUserAddress), 'Every deployer must be an Ethereum address with a valid mixed-case checksum.');
   const pool = deployers.map(address => address.toLowerCase() as Address);
   assert(new Set(pool).size === pool.length, 'Deployer addresses must be distinct.');
-  assert(owner === null || isAddress(owner, { strict: false }), 'Owner must be an Ethereum address.');
+  assert(owner === null || isUserAddress(owner), 'Owner must be an Ethereum address with a valid mixed-case checksum.');
   const ownerLane = owner === null ? null : owner.toLowerCase() as Address;
   const blocked = plan.resources.filter(resource => !APPLICABLE.has(resource.action));
   assert(blocked.length === 0, `Cannot schedule a plan with conflict or unverified resources: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`);

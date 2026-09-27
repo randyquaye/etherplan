@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
-import { keccak256 } from 'viem';
+import { concatHex, keccak256 } from 'viem';
 import { normalizeArtifact } from '../src/artifacts.ts';
 import { applyPlan } from '../src/execution/index.ts';
 import { hashJson } from '../src/identity.ts';
@@ -73,6 +73,8 @@ const importSpec = (options = {}) => vaultSpec({ address: vaultAddress, ...optio
 
 // A read-only chain with the vault runtime at its CREATE2 address. Its value() getter returns 1.
 function mockChain() {
+  const initcode = prepared(vaultSpec(), original).initcode;
+  assert.ok(initcode);
   return {
     async getChainId() { return 31337; },
     async getBlock({ blockNumber }) { return blockNumber === 0n ? { number: 0n, hash: GENESIS } : { number: 7n, hash: OBSERVED }; },
@@ -80,24 +82,46 @@ function mockChain() {
       if (address.toLowerCase() === FACTORY.toLowerCase()) return FACTORY_CODE;
       return address.toLowerCase() === vaultAddress.toLowerCase() ? RUNTIME : '0x';
     },
+    async getTransaction({ hash }) {
+      if (hash !== DEPLOY_TX && hash !== CREATION_TX) return null;
+      return { hash, from: deployerA.address, to: hash === DEPLOY_TX ? FACTORY : null,
+        input: hash === DEPLOY_TX ? concatHex([SALT, initcode]) : initcode,
+        blockNumber: 7n, blockHash: OBSERVED };
+    },
+    async getTransactionReceipt({ hash }) {
+      if (hash !== DEPLOY_TX && hash !== CREATION_TX) return null;
+      return { transactionHash: hash, status: 'success', blockNumber: 7n, blockHash: OBSERVED,
+        contractAddress: hash === CREATION_TX ? vaultAddress : null };
+    },
+    async call() { return { data: RUNTIME }; },
     async readContract() { return 1n; },
   };
 }
 
 async function appliedState(client) {
   const resource = prepared(vaultSpec(), original);
-  return recordResource({ resource, verification: await verifyResource(resource, client), state: null, chain: chainIdentity, transactions: [DEPLOY_TX] });
+  const verification = await verifyResource(resource, client, { transactionHash: DEPLOY_TX, chain: chainIdentity });
+  assert.equal(verification.status, 'verified', JSON.stringify(verification));
+  return recordResource({ resource, verification, state: null, chain: chainIdentity, transactions: [DEPLOY_TX] });
 }
 
 async function importedState(client) {
   const resource = prepared(importSpec(), original);
-  const verification = { ...(await verifyResource(resource, client)), evidence: { creation: { status: 'verified', transactionHash: CREATION_TX } } };
+  const verification = await verifyResource(resource, client, { transactionHash: CREATION_TX, chain: chainIdentity });
   return importResource({ resource, verification, state: null, chain: chainIdentity, creationTransactionHash: CREATION_TX });
 }
 
 async function planVault({ spec = vaultSpec(), artifact = rebuilt, client, state }) {
   return (await createPlan({ spec, artifacts: new Map([['vault', artifact]]), client, state })).resources[0];
 }
+
+test('a custom factory transaction cannot prove an automated deployer created the contract', async () => {
+  const resource = prepared(vaultSpec(), original);
+  const verification = await verifyResource(resource, mockChain(), { transactionHash: DEPLOY_TX,
+    chain: chainIdentity, expectedCreator: deployerA.address });
+  assert.equal(verification.status, 'unverified');
+  assert.match(verification.missingProofs.join(' '), /bundled atomic bytecode/);
+});
 
 test('an artifact-only rebuild of an unchanged CREATE2 deployment is reused, with its drift in the plan', async () => {
   const client = mockChain();
@@ -141,7 +165,7 @@ test('a saved deployment does not drift when only top-level ABI order changes', 
   const reordered = normalizeArtifact({ ...raw, abi: [...raw.abi].reverse() }, 'Vault reordered');
   const client = mockChain();
   const resource = prepared(vaultSpec(), first);
-  const state = recordResource({ resource, verification: await verifyResource(resource, client), state: null, chain: chainIdentity, transactions: [DEPLOY_TX] });
+  const state = recordResource({ resource, verification: await verifyResource(resource, client, { transactionHash: DEPLOY_TX, chain: chainIdentity }), state: null, chain: chainIdentity, transactions: [DEPLOY_TX] });
   const plan = await createPlan({ spec: vaultSpec(), artifacts: new Map([['vault', reordered]]), client, state });
   assert.equal(plan.resources[0].action, 'reuse');
   assert.equal(plan.resources[0].observation.stateComparison.artifactMatches, true);
@@ -165,7 +189,8 @@ test('artifact drift stays blocked for changed live code, runtime, checks, missi
   await blocked({ state: unknown }, /State has no code hash/);
   await blocked({ artifact: vaultArtifact({ sourceHash: `0x${'45'.repeat(32)}`, runtime: '0x6001' }) }, /leaves the live contract conflict/);
   await blocked({ spec: vaultSpec({ checks: { value: '2' } }) }, /leaves the live contract conflict/);
-  await blocked({ artifact: vaultArtifact({ sourceHash: `0x${'46'.repeat(32)}`, immutableReferences: { 1: [{ start: 1, length: 1 }] } }) }, /leaves the live contract unverified/);
+  const unavailableClient = { ...client, async getTransactionReceipt() { throw new Error('receipt unavailable'); } };
+  await blocked({ client: unavailableClient, artifact: vaultArtifact({ sourceHash: `0x${'46'.repeat(32)}`, immutableReferences: { 1: [{ start: 1, length: 1 }] } }) }, /leaves the live contract unverified/);
   const imported = await importedState(client);
   await blocked({ spec: importSpec(), state: imported }, /etherplan import --id contract:vault --rebaseline/);
 
@@ -212,6 +237,7 @@ test('recording a rebuilt artifact keeps deployment provenance and appends an ar
 
   const moved = structuredClone(state);
   moved.resources['contract:vault'].codeHash = `0x${'77'.repeat(32)}`;
+  delete moved.resources['contract:vault'].creationProof;
   assert.throws(() => recordResource({ resource, verification, state: moved, chain: chainIdentity }), /live code hash differs from the saved code hash/);
   const importedResource = prepared(importSpec(), rebuilt);
   const imported = await importedState(client);
@@ -287,9 +313,11 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract an
   refuses({ resource: otherAddress, verification: { ...verification, address: TWO } }, /different state address/);
   const moved = structuredClone(state);
   moved.resources['contract:vault'].codeHash = `0x${'77'.repeat(32)}`;
+  delete moved.resources['contract:vault'].creationProof;
   refuses({ state: moved }, /live code hash differs/);
   const unknown = structuredClone(state);
   unknown.resources['contract:vault'].codeHash = null;
+  delete unknown.resources['contract:vault'].creationProof;
   refuses({ state: unknown }, /state has no code hash/);
   refuses({ resource: prepared(importSpec(), original) }, /nothing to rebaseline/);
   refuses({ verification: { ...verification, status: 'unverified' } }, /without verified live evidence/);

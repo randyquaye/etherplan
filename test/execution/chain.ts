@@ -1,5 +1,9 @@
 import { spawn } from 'node:child_process';
+import { randomInt } from 'node:crypto';
+import { mkdtemp, readdir, unlink } from 'node:fs/promises';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { createPublicClient, http } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { holderArtifact, registryArtifact } from './contracts.ts';
@@ -34,7 +38,12 @@ function freePort() {
 // Starts a private Anvil on an ephemeral port. It never uses the shared test chain.
 export async function startAnvil(args = []) {
   const port = await freePort();
-  const child = spawn('anvil', ['--port', String(port), '--silent', ...args], { stdio: 'ignore' });
+  const coordinationRoot = await mkdtemp(path.join(os.tmpdir(), 'etherplan-test-signers-'));
+  process.env.ETHERPLAN_TEST_SIGNER_COORDINATION_ROOT = coordinationRoot;
+  // Independent test chains must have distinct genesis identities even when
+  // they use Anvil's default accounts and chain ID.
+  const timestamp = args.includes('--timestamp') ? [] : ['--timestamp', String(1_700_000_000 + randomInt(1_000_000_000))];
+  const child = spawn('anvil', ['--port', String(port), '--silent', ...timestamp, ...args], { stdio: 'ignore' });
   const url = `http://127.0.0.1:${port}`;
   const client = createPublicClient({ transport: http(url) });
   for (let attempt = 0; ; attempt++) {
@@ -52,7 +61,17 @@ export async function startAnvil(args = []) {
   return {
     url,
     client,
-    rpc: (method, params = []) => client.request({ method, params }),
+    rpc: async (method, params = []) => {
+      const result = await client.request({ method, params });
+      // Reverting a snapshot discards signatures on that test chain. The
+      // signer registry must follow the reverted test fixture as well.
+      if (method === 'evm_revert' && result) {
+        for (const name of await readdir(coordinationRoot).catch(() => [])) {
+          if (name.endsWith('.json')) await unlink(path.join(coordinationRoot, name));
+        }
+      }
+      return result;
+    },
     stop: () => new Promise(resolve => {
       if (child.exitCode !== null) return resolve();
       child.once('exit', () => resolve());

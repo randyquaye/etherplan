@@ -3,6 +3,7 @@ import { keccak256 } from 'viem';
 import { findKnownReceipt, nonceConsumed, broadcast, validateSignedTransaction, waitForReceipt } from './transactions.ts';
 import { intentForSigned, signedVariants } from './journal.ts';
 import { ApplyError } from './errors.ts';
+import { safeExternalError } from './rpc-error.ts';
 import { transactionFor, pause } from './shared.ts';
 import { commitments, signedSpend, budgetFor } from './funding.ts';
 import { decide, precondition, finish, checkExecutionDependencies } from './outcome.ts';
@@ -47,6 +48,11 @@ export function pipelineAttempt(ctx: ApplyContext, wave: ScheduleWave): { intent
   const intents = attemptId
     ? records.filter((record): record is IntentRecord => record.phase === 'intent' && record.waveAttemptId === attemptId)
     : records.filter((record): record is IntentRecord => record.phase === 'intent' && !record.waveAttemptId && record.sequence < firstSignature.sequence).slice(-wave.batches.flat().length);
+  if (attemptId && (intents.some(intent => intent.sequence >= firstSignature.sequence) ||
+    records.some(record => record.phase === 'intent' && record.sequence < firstSignature.sequence &&
+      record.waveAttemptId !== attemptId && !record.waveAttemptId))) {
+    throw new ApplyError('journal', `Wave ${wave.wave} has an ambiguous abandoned attempt.`);
+  }
   if (intents.length !== wave.batches.flat().length || signatures.some(record => !intents.some(intent =>
     intent.actionId === record.actionId && intent.reservationId === record.reservationId))) {
     throw new ApplyError('journal', `Wave ${wave.wave} has an incomplete or ambiguous signed attempt.`);
@@ -168,7 +174,9 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     await decide(ctx, job.item);
     job.completed = true;
   }
-  await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address));
+  const activeSignatures = new Set(jobs.filter(job => job.signed && !job.receipt && !job.completed)
+    .flatMap(job => job.variants.map(variant => variant.transactionHash.toLowerCase())));
+  await assertSignerHistory(ctx, jobs.filter(job => !job.signed).map(job => job.signer.address), activeSignatures);
   for (const job of jobs.filter(entry => !entry.signed)) {
     const { intent, item, signer } = job;
     const tx = transactionFor(item);
@@ -176,7 +184,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       gas: BigInt(intent.gas), maxFeePerGas: BigInt(intent.maxFeePerGas), maxPriorityFeePerGas: BigInt(intent.maxPriorityFeePerGas), nonce: Number(intent.nonce) };
     let signed: SignedBytes;
     try { signed = await signWithLease(ctx, item.planned.id, signer, envelope); }
-    catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: item.planned.id, retryable: true }); }
+    catch (error) { throw new ApplyError('signer', safeExternalError(error), { actionId: item.planned.id, retryable: true }); }
     const signedRecord = await append(ctx, item.planned.id, { ...intentFields({ envelope, entry: job.entry, signer }, wave.wave, intent.reservationId!, attemptId), phase: 'signed', ...signed });
     job.signed = signedRecord;
     job.signedIntent = intent;
@@ -248,7 +256,7 @@ export async function signPipelineBatch(ctx: ApplyContext, { wave, work }: Pipel
     if (!intent?.reservationId || job.envelope.nonce === undefined) throw new ApplyError('journal', `Wave ${wave} has no durable intent for ${job.item.planned.id}.`, { actionId: job.item.planned.id });
     let signed: SignedBytes;
     try { signed = await signWithLease(ctx, job.item.planned.id, job.signer, { ...job.envelope, nonce: job.envelope.nonce }); }
-    catch (error) { throw new ApplyError('signer', error instanceof Error ? error.message : String(error), { actionId: job.item.planned.id, retryable: true }); }
+    catch (error) { throw new ApplyError('signer', safeExternalError(error), { actionId: job.item.planned.id, retryable: true }); }
     const signedRecord = await append(ctx, job.item.planned.id, { ...intentFields(job, wave, intent.reservationId, waveAttemptId), phase: 'signed', ...signed });
     signedWork.push({ ...job, intent, signedIntent: intent, signed: signedRecord, variants: [signedRecord] });
     const signer = job.signer.address.toLowerCase();

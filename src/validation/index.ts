@@ -1,4 +1,5 @@
-import { encodeAbiParameters, encodeDeployData, encodeFunctionData, isAddress } from 'viem';
+import { encodeAbiParameters, encodeDeployData, encodeFunctionData } from 'viem';
+import { isUserAddress } from '../address.ts';
 import { assertAbi } from '../artifacts.ts';
 import { linkBytecode } from '../verification/bytecode.ts';
 import { abiArguments, normalizeOutputs } from '../verification/values.ts';
@@ -60,7 +61,8 @@ export function validateLibraries(artifact: NormalizedArtifact, libraries: Recor
     const required = new Set([...libraryKeys(creation), ...libraryKeys(runtime)]);
     for (const key of required) {
       const address = libraries[key];
-      assert(address !== undefined && isAddress(address, { strict: false }), `Missing linked library ${key}.`);
+      assert(address !== undefined, `Missing linked library ${key}.`);
+      assert(isUserAddress(address), `Linked library ${key} has an invalid address or checksum.`);
     }
     for (const key of Object.keys(libraries)) assert(required.has(key), `Unknown linked library ${key}.`);
     linkBytecode(artifact.bytecode.object, creation, selectedLibraries(creation, libraries));

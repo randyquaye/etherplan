@@ -3,6 +3,7 @@ import { compareRuntime, create2Address, fillLibraryGuard, hasLibraryGuard, immu
 import { simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
+import { DEFAULT_FACTORY } from '../spec/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
 import type { AbiFunction } from 'viem';
 import type { NormalizedArtifact, NamedImmutable } from '../artifacts/types.ts';
@@ -152,6 +153,7 @@ async function creationEvidence(result: VerificationResult, resource: PreparedCo
   if (result.evidence) result.evidence.creation = evidence;
   if (creation.status === 'verified' && creation.proof) result.creationProof = creation.proof;
   if (creation.status === 'conflict') result.reasons.push(...creation.reasons);
+  if (creation.status === 'unverified') result.missingProofs.push(...creation.reasons);
   return creation.status === 'verified' ? method : null;
 }
 
@@ -397,6 +399,16 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.reasons.push('Creation transaction or receipt is not available.');
     return result;
   }
+  if (options.expectedCreator && lower(transaction.from) !== lower(options.expectedCreator)) {
+    result.status = 'conflict';
+    result.reasons.push('Creation transaction came from a different signer than the planned deployment.');
+    return result;
+  }
+  if (saved && lower(transaction.from) !== lower(saved.creator)) {
+    result.status = 'conflict';
+    result.reasons.push('Creation transaction sender differs from the saved proof.');
+    return result;
+  }
   if ((transaction.hash && lower(transaction.hash) !== lower(transactionHash)) ||
     (receipt.transactionHash && lower(receipt.transactionHash) !== lower(transactionHash))) {
     result.reasons.push('Creation transaction and receipt have different transaction identities.');
@@ -474,9 +486,13 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     result.reasons.push('The transaction is neither a direct CREATE nor a call to the resource CREATE2 factory.');
     return result;
   }
+  if (kind === 'create2' && options.expectedCreator && lower(resource.factory?.codeHash) !== lower(DEFAULT_FACTORY.codeHash)) {
+    result.reasons.push('The CREATE2 factory does not have the bundled atomic bytecode, so a successful call cannot prove this signer created the contract.');
+    return result;
+  }
   assert(chain.genesisHash && result.blockNumber && result.initcodeHash && result.codeHash, 'Creation proof is missing chain or runtime identity.');
   const base = {
-    chain: { id: chain.id, genesisHash: lower(chain.genesisHash) }, transactionHash: lower(transactionHash),
+    chain: { id: chain.id, genesisHash: lower(chain.genesisHash) }, transactionHash: lower(transactionHash), creator: lower(transaction.from),
     blockNumber: result.blockNumber, blockHash: lower(receipt.blockHash), address: lower(resource.address),
     initcodeHash: result.initcodeHash, codeHash: result.codeHash,
   };
@@ -507,7 +523,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
     const same = (left: string | null | undefined, right: string | null | undefined) => lower(left) === lower(right);
     if (saved.chain.id !== proof.chain.id || !same(saved.chain.genesisHash, proof.chain.genesisHash) ||
       saved.blockNumber !== proof.blockNumber || !same(saved.blockHash, proof.blockHash) ||
-      !same(saved.address, proof.address) || saved.kind !== proof.kind ||
+      !same(saved.address, proof.address) || !same(saved.creator, proof.creator) || saved.kind !== proof.kind ||
       !same(saved.initcodeHash, proof.initcodeHash) || !same(saved.codeHash, proof.codeHash) ||
       (kind === 'create2' && saved.kind === 'create2' && proof.kind === 'create2' && (!same(saved.factory.address, proof.factory.address) || !same(saved.factory.codeHash, proof.factory.codeHash) || !same(saved.salt, proof.salt)))) {
       result.reasons.push('Saved creation proof differs from canonical deployment identity or current runtime.');

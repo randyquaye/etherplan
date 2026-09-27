@@ -2,7 +2,7 @@ import { concatHex, keccak256 } from 'viem';
 import { canonicalJson, hashJson } from '../identity.ts';
 import { encodeMethod } from '../validation/index.ts';
 import { ApplyError } from './errors.ts';
-import { dependencyGraphs, dependencyMode, dependencyWarnings, usesDependencyPlan } from '../spec/index.ts';
+import { DEFAULT_FACTORY, dependencyGraphs, dependencyMode, dependencyWarnings, usesDependencyPlan } from '../spec/index.ts';
 import { executionWaves } from '../scheduling/index.ts';
 import type { DeployableContract, Plan, PlannedContract, PlannedResource, PlannedTransaction, PreparedCall, PreparedContract, PreparedResource } from '../planning/types.ts';
 import type { Factory } from '../spec/types.ts';
@@ -166,6 +166,11 @@ export async function preflight(input: PlanIdentityInput): Promise<Map<ResourceI
     if (resource.kind !== 'contract' || resource.factory === undefined) throw new ApplyError('plan-format', `${resource.id} is planned for deployment without a CREATE2 factory.`);
     factories.set(resource.factory.address.toLowerCase(), resource.factory);
   }
-  for (const factory of factories.values()) await checkFactory(input.client, factory);
+  for (const factory of factories.values()) {
+    if (factory.codeHash.toLowerCase() !== DEFAULT_FACTORY.codeHash.toLowerCase()) {
+      throw new ApplyError('factory', 'Automated CREATE2 deployment requires the bundled atomic factory bytecode; import contracts from other factories explicitly.');
+    }
+    await checkFactory(input.client, factory);
+  }
   return prepared;
 }

@@ -6,6 +6,7 @@ import type { DependencyEdge, DependencyGraphs, DependencyMode, ExecutionAssumpt
 import type { StateFile } from '../state/types.ts';
 import type { Address, CallId, ChainIdentity, Client, ContractId, DecimalString, ExternalId, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
+import type { RecoveryRecord } from '../recovery.ts';
 
 /** A getter check with its expected value resolved. */
 export type PreparedCheck = {
@@ -252,6 +253,8 @@ export interface CreatePlanInput {
   artifacts: Artifacts;
   client: Client;
   state?: StateFile | null;
+  /** Optional validated local or production journal history for recovering completed deployments. */
+  journalRecords?: readonly RecoveryRecord[];
   /** Supply at most one of `pipeline` and `signers`. */
   pipeline?: PlanSignerInput | null;
   signers?: PlanSignerInput | null;

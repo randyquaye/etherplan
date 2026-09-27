@@ -211,7 +211,12 @@ test('planner chooses call only at the allowed before value and locks encoded ca
   const artifacts = new Map([['vault', vaultArtifact], ['router', callableRouterArtifact]]);
   const prepared = prepareResources(parsed, graph(parsed), artifacts);
   const live = new Map(Object.values(prepared.addresses).map(address => [address.toLowerCase(), '0x6000']));
-  const plan = await createPlan({ spec, artifacts, client: planningClient({ code: live, binding: ONE }) });
+  let state = null;
+  for (const resource of prepared.resources.filter(resource => resource.kind === 'contract')) {
+    state = importResource({ resource, verification: { id: resource.id, address: resource.address, status: 'verified', codeHash: keccak256('0x6000') },
+      state, chain: { id: 31337, genesisHash: GENESIS } });
+  }
+  const plan = await createPlan({ spec, artifacts, state, client: planningClient({ code: live, binding: ONE }) });
   const call = plan.resources.at(-1);
   assert.equal(call.action, 'call');
   assert.equal(call.observation.bindingChecks[0].observed, 'before');

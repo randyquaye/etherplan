@@ -2,9 +2,10 @@ import { hashJson } from '../identity.ts';
 import { createSchedule } from '../scheduling/index.ts';
 import { preflight } from './preflight.ts';
 import { ApplyError } from './errors.ts';
+import { isRpcError, safeRpcMessage } from './rpc-error.ts';
 import { roleOf } from './shared.ts';
 import { commitments } from './funding.ts';
-import { checkExecutionDependencies, recheckReused, revalidateVerified } from './outcome.ts';
+import { assertCanonicalSnapshot, assertRecoveryEvidence, checkExecutionDependencies, recheckReused, revalidateDesiredState, revalidateVerified } from './outcome.ts';
 import { settleJournal } from './settlement.ts';
 import { pipelineAttempt, resumePipelineWave, signPipelineBatch, settlePipelineBatch } from './pipeline.ts';
 import { prepareBatch, signBatch, settleBatch } from './batch.ts';
@@ -38,6 +39,7 @@ async function runBatch(ctx: ApplyContext, wave: number, batch: ScheduleEntry[])
 
 async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
   await revalidateVerified(ctx);
+  const snapshot = await revalidateDesiredState(ctx);
   if (!ctx.deps.recordResource) return { file: ctx.stateFile, written: false, reason: 'The state module has no recordResource function.' };
   const verified = ctx.plan.resources.filter(resource => {
     const outcome = ctx.outcomes.get(resource.id);
@@ -54,9 +56,14 @@ async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
     const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id)
       .filter((record): record is JournalRecord & ReceiptFields => record.phase === 'receipt' && record.receipt.status === 'success')
       .map(record => record.transactionHash);
+    if (item.planned.action === 'reuse' && item.resource.kind === 'contract' && item.resource.initcode &&
+      !ctx.stateSnapshot?.resources?.[resource.id] && outcome.verification.creationProof) {
+      transactions.push(outcome.verification.creationProof.transactionHash);
+    }
     state = ctx.deps.recordResource({ resource: item.resource, verification: outcome.verification, state, chain: ctx.plan.chain, transactions });
   }
   if (!state) throw new ApplyError('stale-state', 'Verified resources did not produce a state file.');
+  await assertCanonicalSnapshot(ctx, snapshot);
   await ctx.lock.assertHeld?.();
   await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
   return { file: ctx.stateFile, written: true, resources: verified.length };
@@ -71,7 +78,6 @@ function assertFreshState(ctx: ApplyContext, state: StateFile | null): void {
 
 async function run(ctx: ApplyContext): Promise<ApplyResult> {
   ctx.prepared = await preflight(ctx);
-  ctx.preflightComplete = true;
   ctx.stateSnapshot = (await ctx.readState()).value;
   if (ctx.stateSnapshot && (ctx.stateSnapshot.chain?.id !== ctx.plan.chain.id || ctx.stateSnapshot.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase())) {
     throw new ApplyError('wrong-chain', 'State belongs to a different chain than the saved plan.');
@@ -97,6 +103,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   if (ctx.schedule.deferred.length) throw new ApplyError('unschedulable', `Some actions have dependencies that the plan cannot satisfy: ${ctx.schedule.deferred.map(entry => entry.id).join(', ')}.`, { evidence: ctx.schedule.deferred });
   await commitments(ctx);
   await revalidateVerified(ctx);
+  assertRecoveryEvidence(ctx);
   await settleJournal(ctx);
   await recheckReused(ctx);
   // Preserve the dependency check for a later signed wave before revisiting
@@ -115,15 +122,15 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   for (const wave of ctx.schedule.waves) {
     await revalidateVerified(ctx);
     if (ctx.pipeline && await resumePipelineWave(ctx, wave)) {
-      ctx.state = await persist(ctx);
       continue;
     }
     for (const batch of wave.batches) {
       await revalidateVerified(ctx);
       await runBatch(ctx, wave.wave, batch);
-      ctx.state = await persist(ctx);
     }
   }
+  // Later planned writes can invalidate an earlier getter, so record state only
+  // after every action has settled and all desired conditions pass together.
   ctx.state = await persist(ctx);
   return summary(ctx, 'applied');
 }
@@ -137,17 +144,12 @@ export async function applyPlan(input: ApplyInput): Promise<ApplyResult> {
       return await run(ctx);
     } catch (error) {
       if (!error || typeof error !== 'object') throw error;
-      const failure = error as Error & Partial<ApplyError>;
+      // Viem exceptions can contain URLs, headers or response bodies even outside broadcast.
+      const failure = isRpcError(error) ? new ApplyError('dependency', safeRpcMessage('request-failed'), { retryable: true }) : error as Error & Partial<ApplyError>;
       await report(ctx, failure.code === 'conflict' || failure.code === 'plan-mismatch' ? 'conflict' : 'terminal-failure', { actionId: failure.actionId, code: failure.code, reason: failure.message }).catch(() => {});
-      if (ctx.preflightComplete) {
-        try {
-          ctx.state = await persist(ctx);
-        } catch (stateError) {
-          ctx.state = { file: ctx.stateFile, written: false, reason: stateError instanceof Error ? stateError.message : String(stateError) };
-        }
-      }
+      ctx.state = { file: ctx.stateFile, written: false, reason: failure.message };
       failure.result = summary(ctx, 'stopped', failure);
-      throw error;
+      throw failure;
     }
   } finally {
     await close();

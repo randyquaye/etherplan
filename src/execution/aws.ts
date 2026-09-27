@@ -8,9 +8,11 @@ import { hashJson, canonicalJson } from '../identity.ts';
 import { scopeKey } from './backends.ts';
 import type { AwsBackend, AwsBackendOptions, AwsJournalCiphertext, DeploymentScope, FenceEntry, JournalCipher, JournalStore, LockProvider, LockScope, PlanStore, StateStore } from './types.ts';
 
-const lockKey = (scope: LockScope) => `LOCK#${[scope.project, scope.environment, scope.chainId, scope.genesisHash, scope.kind, scope.kind === 'deployment' ? scope.label : scope.address].map(encodeURIComponent).join('/')}`;
+const lockKey = (scope: LockScope) => `LOCK#${(scope.kind === 'deployment'
+  ? [scope.project, scope.environment, scope.chainId, scope.genesisHash.toLowerCase(), scope.kind, scope.label]
+  : [scope.chainId, scope.genesisHash.toLowerCase(), scope.kind, scope.address.toLowerCase()]).map(encodeURIComponent).join('/')}`;
 const deploymentKey = (scope: DeploymentScope) => `DEPLOY#${scopeKey(scope)}`;
-const signerKey = (scope: DeploymentScope, address: string) => `SIGNER#${[scope.project, scope.environment, scope.chainId, scope.genesisHash, address.toLowerCase()].map(encodeURIComponent).join('/')}`;
+const signerKey = (scope: DeploymentScope, address: string) => `SIGNER#${[scope.chainId, scope.genesisHash.toLowerCase(), address.toLowerCase()].map(encodeURIComponent).join('/')}`;
 const isConditional = (error: unknown) => error instanceof Error && (error.name === 'ConditionalCheckFailedException' || error.name === 'TransactionCanceledException');
 
 function requireFence(fence: FenceEntry[] | null): { ConditionCheck: { TableName: string | undefined; Key: { PK: string; SK: string }; ConditionExpression: string; ExpressionAttributeNames: Record<string, string>; ExpressionAttributeValues: Record<string, string | number> } }[] {
@@ -153,7 +155,7 @@ export function createAwsBackend({ tableName, kmsKeyId, bucket, prefix = 'etherp
         { Put: { TableName: tableName, Item: { PK, SK: `J#${String(expectedSequence).padStart(12, '0')}`, record }, ConditionExpression: 'attribute_not_exists(PK)' } },
         ...(record.phase === 'signed' ? [{ Put: { TableName: tableName, Item: {
           PK: signerKey(scope, record.signer), SK: `TX#${record.transactionHash.toLowerCase()}`,
-          signed: { label: scope.label, planHash: record.planHash, actionId: record.actionId, signer: record.signer.toLowerCase(), nonce: record.nonce, transactionHash: record.transactionHash.toLowerCase() },
+          signed: { project: scope.project, environment: scope.environment, label: scope.label, planHash: record.planHash, actionId: record.actionId, signer: record.signer.toLowerCase(), nonce: record.nonce, transactionHash: record.transactionHash.toLowerCase() },
         }, ConditionExpression: 'attribute_not_exists(PK)' } }] : []),
       ] }));
       return record;

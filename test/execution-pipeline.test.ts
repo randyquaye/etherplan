@@ -353,7 +353,7 @@ test('B4: a partially signed two-signer wave resumes its original nonces, includ
         for (const record of before) delete record.waveAttemptId;
         await writeFile(ws.journalFile, `${before.map(record => JSON.stringify(record)).join('\n')}\n`);
         await chain.rpc('eth_sendRawTransaction', [first.rawTransaction]);
-        const receipt = await chain.client.getTransactionReceipt({ hash: first.transactionHash });
+        const receipt = await until(() => chain.client.getTransactionReceipt({ hash: first.transactionHash }).catch(() => null), 'mined legacy transaction');
         assert.equal(receipt.status, 'success');
         if (scenario === 'legacy-verified') {
           const common = { formatVersion: 1, planHash: plan.planHash, chain: plan.chain, actionId: first.actionId };
