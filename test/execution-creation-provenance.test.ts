@@ -153,6 +153,44 @@ test('an independent verification RPC completes a deployment when the primary re
   } finally { await ws.close(); }
 });
 
+test('an independent verification RPC can verify when the primary reports a replay revert', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    let replayFailures = 0;
+    const reverting = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2))) {
+        replayFailures++;
+        throw Object.assign(new Error('execution reverted'), { name: 'ExecutionRevertedError', code: 3 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    const result = await ws.apply(plan, { client: reverting, verificationClient: ws.chain.client, verificationTimeoutMs: 1_000 });
+    assert.equal(result.status, 'applied');
+    assert.ok(replayFailures >= 1);
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+  } finally { await ws.close(); }
+});
+
+test('an independent verification RPC can verify when the primary replays different runtime', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    let replayMismatches = 0;
+    const differing = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2))) {
+        replayMismatches++;
+        return { data: '0x6001' };
+      }
+      return ws.chain.client.call(request);
+    } });
+    const result = await ws.apply(plan, { client: differing, verificationClient: ws.chain.client, verificationTimeoutMs: 1_000 });
+    assert.equal(result.status, 'applied');
+    assert.ok(replayMismatches >= 1);
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+  } finally { await ws.close(); }
+});
+
 test('a verification RPC on another chain is rejected before signing', async () => {
   const ws = await setup();
   try {

@@ -663,6 +663,7 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
       result.replayFailure = 'provider';
       result.reasons.push('Creation simulation at the receipt block could not be completed by the RPC provider. Retry this saved plan with a compatible RPC endpoint.');
     } else {
+      result.replayFailure = 'execution';
       result.reasons.push(`Creation simulation at the receipt block failed: ${safeError(error)} See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
     }
     return result;
@@ -670,6 +671,9 @@ export async function verifyCreation(client: Client, resource: PreparedContract,
   if (result.exactRuntime) {
     result.status = 'verified';
     result.proof = proof;
-  } else result.reasons.push(`Creation simulation at the receipt block returned different runtime code. See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
+  } else {
+    result.replayFailure = 'mismatch';
+    result.reasons.push(`Creation simulation at the receipt block returned different runtime code. See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}`);
+  }
   return result;
 }
