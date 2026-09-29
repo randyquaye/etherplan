@@ -20,6 +20,13 @@ function providerVerificationFailure(verification: VerificationResult): boolean 
     verification.evidence?.creation?.replayFailure === 'provider';
 }
 
+function creationReplayFailed(verification: VerificationResult): boolean {
+  const creation = verification.evidence?.creation;
+  return verification.status === 'unverified' && verification.reasons.length === 0 &&
+    creation?.kind === 'create2' && creation.matched &&
+    (creation.replayFailure === 'execution' || creation.replayFailure === 'mismatch');
+}
+
 export async function verify(ctx: ApplyContext, item: PreparedAction, options: import('../verification/types.ts').VerifyOptions = {}, client: Client = ctx.client): Promise<VerificationResult> {
   const id = item.planned.id;
   const outcome = ctx.outcomes.get(id);
@@ -41,12 +48,12 @@ async function verifyWithFallback(ctx: ApplyContext, item: PreparedAction,
   catch (error) {
     if (item.planned.action !== 'deploy' || !isRpcError(error)) throw error;
   }
-  if (primary && !providerVerificationFailure(primary)) return primary;
+  if (primary && !providerVerificationFailure(primary) && !creationReplayFailed(primary)) return primary;
   if (item.planned.action === 'deploy' && ctx.verificationClient) {
     try {
       await checkVerificationChain(ctx.verificationClient, ctx.plan.chain, anchor);
       const alternate = await verify(ctx, item, options, ctx.verificationClient);
-      if (!providerVerificationFailure(alternate)) return alternate;
+      if (alternate.status === 'verified' || (primary && providerVerificationFailure(primary) && !providerVerificationFailure(alternate))) return alternate;
     } catch (error) {
       if (!(error instanceof ApplyError && error.code === 'reorg') && !isRpcError(error)) throw error;
     }
