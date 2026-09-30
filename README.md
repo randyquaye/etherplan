@@ -6,7 +6,7 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install
 
-Use Node.js 22.18 or newer. Install this beta from its GitHub tag with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.9-beta'`. The npm registry package is not published yet.
+Use Node.js 22.18 or newer. Install this beta from its GitHub tag with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.10-beta'`. The npm registry package is not published yet.
 
 To work from a checkout instead, install it as a CLI with `npm install --global .`. The test suite also needs Foundry's `anvil` on `PATH`.
 
