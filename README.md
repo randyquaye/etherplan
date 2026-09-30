@@ -200,11 +200,17 @@ command "plan" {
   pipeline  = true
   deployers = ["0x…"]
 }
+
+command "apply" {
+  max-fee-per-gas      = "30000000000"
+  priority-fee-per-gas = "1000000000"
+  gas-multiplier       = "1.5"
+}
 ```
 
-Config can set `state`, `journal`, `backend`, `out`, `deployers`, `owner`, `parallel`, and `pipeline`, and a command block can set only the options that command accepts. `out` goes in a command block, because it names a plan file for `plan` and a directory for `adapters`. A flag on the command line overrides the command block, which overrides `defaults`. An explicit `--signer-module` replaces configured deployers and owner. Paths in config are relative to the config file; paths given as flags stay relative to the working directory. A flag cannot turn off a boolean that config sets; set `parallel = false` in that command's block instead. Commands print the options they took from config on stderr.
+Config can set `state`, `journal`, `backend`, `out`, `deployers`, `owner`, `parallel`, `pipeline`, `max-fee-per-gas`, `priority-fee-per-gas`, `gas-multiplier`, `receipt-timeout-ms`, and `verification-timeout-ms`, and a command block can set only the options that command accepts. `out` goes in a command block, because it names a plan file for `plan` and a directory for `adapters`. A flag on the command line overrides the command block, which overrides `defaults`. An explicit `--signer-module` replaces configured deployers and owner. Paths in config are relative to the config file; paths given as flags stay relative to the working directory. Write wei amounts and milliseconds as whole numbers or decimal strings, and quote a fractional `gas-multiplier`. A flag cannot turn off a boolean that config sets; set `parallel = false` in that command's block instead. Commands print the options they took from config on stderr.
 
-Config never sets `--plan`, `--max-spend-wei`, `--signer-module`, `--id`, `--creation-tx`, or `--rebaseline`, so `apply` without `--plan` still creates a fresh plan and asks for approval. Keep signer keys in the environment. Config options are not part of the spec hash; settings that a saved plan pins, such as signers and `parallel`, must still match it.
+Config never sets `--plan`, `--max-spend-wei`, the `--replace-*` fees, `--signer-module`, `--id`, `--creation-tx`, or `--rebaseline`, so `apply` without `--plan` still creates a fresh plan and asks for approval. Keep signer keys in the environment. Config options are not part of the spec hash; settings that a saved plan pins, such as signers and `parallel`, must still match it.
 
 ## Validate, plan, apply, and verify
 
@@ -269,6 +275,8 @@ A planned CREATE2 deployment stops if its predicted address acquires code withou
 Automated CREATE2 apply requires the bundled factory bytecode (at its default address or another address with the same runtime). Etherplan rejects deployment through an arbitrary factory before signing because a factory that returns success when CREATE2 fails cannot prove which transaction created the code. Contracts deployed through another factory can be adopted with `import` after reviewing their live state.
 
 A saved plan pins the state it observed. Apply rejects it with `stale-state` if another plan or import changed that state; create a new plan from the current state to proceed. An interrupted apply can resume its own saved plan.
+
+By default, apply prices each new transaction from the RPC's fee estimate and sets its gas limit to 1.2 times the RPC's gas estimate. `--max-fee-per-gas` and `--priority-fee-per-gas` (together, in wei) set the fee caps instead; EIP-1559 charges the block's base fee plus the priority fee, never more than the maximum fee per gas, and a transaction waits while the base fee is above its cap. `--gas-multiplier` sets the gas-limit multiple, at least 1. `--receipt-timeout-ms` (default 120000) sets how long apply waits for each receipt before it stops with a retryable `receipt-timeout`. These settings choose fees only for transactions that apply has not yet signed; a rerun resends signed transactions unchanged, and only the replacement flags below raise their fees. Apply still checks every transaction's gas limit times maximum fee, plus value, against the plan's `maxSpendWei` before signing.
 
 If a signed transaction remains unmined because its fee cap is too low, rerun the saved plan with `--replace-max-fee-per-gas`, `--replace-priority-fee-per-gas`, and `--replace-max-cost-wei` (all in wei). The two fee caps must each rise by at least 10%; the cost ceiling is the maximum gas cost plus value allowed for each replacement. For example: `etherplan apply --plan plan.json --replace-max-fee-per-gas 20000000000 --replace-priority-fee-per-gas 4000000000 --replace-max-cost-wei 2000000000000000`. Apply checks the old transaction's receipt and nonce before signing at the same nonce, saves the replacement link before broadcast, and accepts a receipt from either signed variant. Rerunning with the same fees resends the saved replacement. Review the fee caps and ceiling against the plan's gas and payload before applying.
 

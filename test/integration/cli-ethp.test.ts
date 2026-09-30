@@ -111,7 +111,7 @@ test('plan bundles split files and saved-plan apply rejects an edit to a split f
   }
 });
 
-test('.ethpconfig supplies plan options, and apply sends the compiled call and verifies its check', async () => {
+test('.ethpconfig supplies plan and fee options, and apply sends the compiled call and verifies its check', async () => {
   await writeFile(file('main.ethpconfig'), `defaults {
   state = "deploy/state.json"
 }
@@ -121,6 +121,12 @@ command "plan" {
   deployers = ["${owner}"]
   owner     = "${owner}"
 }
+
+command "apply" {
+  max-fee-per-gas      = 50000000000
+  priority-fee-per-gas = "1500000000"
+  gas-multiplier       = "1.5"
+}
 `);
   const planned = runCli(['plan', '--max-spend-wei', maxSpend]);
   const plan = succeeded(planned);
@@ -128,12 +134,24 @@ command "plan" {
   assert.deepEqual(JSON.parse(await readFile(file('deploy/plan.json'), 'utf8')), plan);
 
   const nonceBefore = await nonce();
-  const applied = succeeded(runCli(['apply', '--plan', file('deploy/plan.json')], true));
+  const appliedRun = runCli(['apply', '--plan', file('deploy/plan.json')], true);
+  const applied = succeeded(appliedRun);
+  assert.match(appliedRun.stderr, /Using --gas-multiplier, --max-fee-per-gas, --priority-fee-per-gas, --state from .*main\.ethpconfig\./);
   assert.equal(applied.status, 'applied');
   assert.equal(applied.transactionsSigned, 6);
   assert.equal(BigInt(await nonce()) - BigInt(nonceBefore), 6n);
   const state = JSON.parse(await readFile(file('deploy/default/state.json'), 'utf8'));
   assert.ok(state.resources['call:bind']);
+  const journal = (await readFile(file('deploy/default/state.json.journal.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  const hashes = journal.filter(record => record.phase === 'signed').map(record => record.transactionHash);
+  assert.equal(hashes.length, 6);
+  for (const hash of hashes) {
+    const [transaction, receipt] = await Promise.all([anvil.rpc('eth_getTransactionByHash', [hash]), anvil.rpc('eth_getTransactionReceipt', [hash])]);
+    assert.equal(BigInt(transaction.maxFeePerGas), 50_000_000_000n);
+    assert.equal(BigInt(transaction.maxPriorityFeePerGas), 1_500_000_000n);
+    // The limit is 1.5 times the estimate, and a successful transaction uses no more than its estimate.
+    assert.ok(BigInt(transaction.gas) * 2n >= BigInt(receipt.gasUsed) * 3n, `${hash} gas ${BigInt(transaction.gas)} used ${BigInt(receipt.gasUsed)}`);
+  }
 
   const verified = succeeded(runCli(['verify']));
   assert.equal(verified.status, 'verified');

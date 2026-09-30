@@ -22,10 +22,13 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     maxFeePerGas: options['replace-max-fee-per-gas'], maxPriorityFeePerGas: options['replace-priority-fee-per-gas'],
     maxCostWei: options['replace-max-cost-wei'],
   } as ReplacementFees : undefined;
-  const verificationTimeoutMs = options['verification-timeout-ms'] === undefined ? undefined : Number(options['verification-timeout-ms']);
   const verificationRpcUrl = process.env.ETH_VERIFICATION_RPC_URL;
-  const verificationOptions = {
-    ...(verificationTimeoutMs === undefined ? {} : { verificationTimeoutMs }),
+  // validateCombination has checked these values and requires the two fee caps together.
+  const transactionOptions = {
+    ...(options['max-fee-per-gas'] === undefined ? {} : { fees: { maxFeePerGas: options['max-fee-per-gas'], maxPriorityFeePerGas: options['priority-fee-per-gas']! } }),
+    ...(options['gas-multiplier'] === undefined ? {} : { gasMultiplier: Number(options['gas-multiplier']) }),
+    ...(options['receipt-timeout-ms'] === undefined ? {} : { receiptTimeoutMs: Number(options['receipt-timeout-ms']) }),
+    ...(options['verification-timeout-ms'] === undefined ? {} : { verificationTimeoutMs: Number(options['verification-timeout-ms']) }),
     ...(verificationRpcUrl ? { verificationClient: createPublicClient({ transport: http(verificationRpcUrl) }) } : {}),
   };
   if (!options.plan && options.pipeline) throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
@@ -64,7 +67,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
   progress?.start();
   try {
     const common = { plan, spec, artifacts, client, ...signerSource, parallel: options.parallel ?? false,
-      pipeline: options.pipeline ?? false, replacementFees, ...verificationOptions,
+      pipeline: options.pipeline ?? false, replacementFees, ...transactionOptions,
       ...(progress ? { reporter: progress.reporter } : {}) };
     if (options.backend) {
       const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });

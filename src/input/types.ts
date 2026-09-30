@@ -121,7 +121,7 @@ export interface CompiledSpec {
   executionAssumptions?: JsonObject[];
 }
 
-export type ConfigOptionName = 'state' | 'journal' | 'backend' | 'out' | 'deployers' | 'owner' | 'parallel' | 'pipeline';
+export type ConfigOptionName = keyof ConfigOptions;
 
 /** Options one .ethpconfig block sets. Paths are resolved; `deployers` is comma-joined like the CLI flag. */
 export interface ConfigOptions {
@@ -133,6 +133,11 @@ export interface ConfigOptions {
   owner?: string;
   parallel?: boolean;
   pipeline?: boolean;
+  'max-fee-per-gas'?: string;
+  'priority-fee-per-gas'?: string;
+  'gas-multiplier'?: string;
+  'receipt-timeout-ms'?: string;
+  'verification-timeout-ms'?: string;
 }
 
 export interface CompiledConfig {
