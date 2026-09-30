@@ -191,6 +191,55 @@ test('an independent verification RPC can verify when the primary replays differ
   } finally { await ws.close(); }
 });
 
+test('a transient alternate replay revert does not end retries while the primary RPC is unavailable', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    let primaryFailures = 0;
+    let alternateAttempts = 0;
+    const replayRequest = request => request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() &&
+      request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2));
+    const primary = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (replayRequest(request)) {
+        primaryFailures++;
+        throw Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    const alternate = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (replayRequest(request) && ++alternateAttempts === 1) {
+        throw Object.assign(new Error('execution reverted'), { name: 'ExecutionRevertedError', code: 3 });
+      }
+      return ws.chain.client.call(request);
+    } });
+    const result = await ws.apply(plan, { client: primary, verificationClient: alternate, verificationTimeoutMs: 5_000 });
+    assert.equal(result.status, 'applied');
+    assert.ok(primaryFailures >= 2);
+    assert.ok(alternateAttempts >= 2);
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+  } finally { await ws.close(); }
+});
+
+test('disagreeing RPC replay failures remain retryable when the deadline expires', async () => {
+  const ws = await setup();
+  try {
+    const plan = await createPlan(ws.input);
+    const replayRequest = request => request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() &&
+      request.blockNumber !== undefined && request.data?.toLowerCase().includes(SALT.slice(2));
+    const primary = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (replayRequest(request)) throw Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+      return ws.chain.client.call(request);
+    } });
+    const alternate = Object.assign(Object.create(ws.chain.client), { call: async request => {
+      if (replayRequest(request)) throw Object.assign(new Error('execution reverted'), { name: 'ExecutionRevertedError', code: 3 });
+      return ws.chain.client.call(request);
+    } });
+    await assert.rejects(ws.apply(plan, { client: primary, verificationClient: alternate, verificationTimeoutMs: 0 }),
+      error => error.code === 'postcondition' && error.retryable === true);
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+  } finally { await ws.close(); }
+});
+
 test('a verification RPC on another chain is rejected before signing', async () => {
   const ws = await setup();
   try {
