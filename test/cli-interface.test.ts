@@ -37,6 +37,12 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);
 });
 
+test('the built bin is executable through its shebang', { skip: process.platform === 'win32' }, () => {
+  const version = spawnSync(fileURLToPath(new URL('../dist/cli.js', import.meta.url)), ['--version'], { cwd: root, encoding: 'utf8' });
+  assert.equal(version.status, 0, version.error?.message ?? version.stderr);
+  assert.equal(version.stdout.trim(), packageVersion);
+});
+
 test('invalid and unrelated options fail before a spec or RPC is opened', () => {
   for (const args of [
     [], ['missing'], ['graph', '--value', 'owner'], ['compile', '--out', 'spec.json'], ['impact'],
