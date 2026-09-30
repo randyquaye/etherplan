@@ -53,9 +53,16 @@ async function verifyWithFallback(ctx: ApplyContext, item: PreparedAction,
     try {
       await checkVerificationChain(ctx.verificationClient, ctx.plan.chain, anchor);
       const alternate = await verify(ctx, item, options, ctx.verificationClient);
-      if (alternate.status === 'verified' || (primary && providerVerificationFailure(primary) && !providerVerificationFailure(alternate))) return alternate;
+      if (alternate.status === 'verified') return alternate;
+      // An execution failure from one RPC cannot settle a provider failure from
+      // the other. Keep retrying the canonical receipt until one verifies or
+      // the bounded verification window expires.
+      if ((!primary || providerVerificationFailure(primary)) && creationReplayFailed(alternate)) return primary;
+      if (providerVerificationFailure(alternate)) return primary && creationReplayFailed(primary) ? alternate : primary;
+      return alternate;
     } catch (error) {
       if (!(error instanceof ApplyError && error.code === 'reorg') && !isRpcError(error)) throw error;
+      if (primary && creationReplayFailed(primary)) return null;
     }
   }
   return primary;
