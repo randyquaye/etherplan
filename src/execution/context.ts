@@ -85,9 +85,22 @@ export interface OpenedApplyContext {
 }
 
 export async function openApplyContext({ plan, spec, artifacts, client, verificationClient, signers, signerProvider, signerRoles, stateStore, journalStore, lockProvider, journalCipher, scope: scopeInput, principal, ttlMs, stateFile, journalFile, parallel = false, pipeline = false, ...options }: ApplyInput): Promise<OpenedApplyContext> {
-  if (options.verificationTimeoutMs !== undefined &&
-    (!Number.isSafeInteger(options.verificationTimeoutMs) || options.verificationTimeoutMs < 0)) {
-    throw new ApplyError('config', 'verificationTimeoutMs must be a non-negative integer in milliseconds.');
+  for (const name of ['receiptTimeoutMs', 'verificationTimeoutMs'] as const) {
+    const value = options[name];
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+      throw new ApplyError('config', `${name} must be a non-negative integer in milliseconds.`);
+    }
+  }
+  if (options.gasMultiplier !== undefined && (!Number.isFinite(options.gasMultiplier) || options.gasMultiplier < 1)) {
+    throw new ApplyError('config', 'gasMultiplier must be a number no less than 1.');
+  }
+  if (options.fees) {
+    const wei = (value: unknown) => /^[0-9]+$/.test(String(value)) && (typeof value !== 'number' || Number.isSafeInteger(value)) ? BigInt(value as string) : null;
+    const maxFee = wei(options.fees.maxFeePerGas);
+    const priorityFee = wei(options.fees.maxPriorityFeePerGas);
+    if (maxFee === null || priorityFee === null || maxFee === 0n || priorityFee > maxFee) {
+      throw new ApplyError('config', 'fees needs a positive maxFeePerGas and a maxPriorityFeePerGas no greater than it, as wei integers.');
+    }
   }
   if (pipeline && plan?.pipeline) parallel = plan.pipeline.parallel;
   if (options.replacementFees !== undefined && (!options.replacementFees ||

@@ -19,7 +19,8 @@ const SALT = `0x${'11'.repeat(32)}`;
 const COMMANDS = {
   validate: ['spec'],
   plan: ['spec', 'out', 'state', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei'],
-  apply: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei'],
+  apply: ['spec', 'plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'max-spend-wei',
+    'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'replace-max-fee-per-gas', 'receipt-timeout-ms', 'verification-timeout-ms'],
   verify: ['spec', 'state', 'backend'],
 };
 
@@ -290,11 +291,36 @@ command "apply" {
   assert.equal(configOptions(config('command "plan" {\n out = "-"\n}'), 'plan', COMMANDS.plan).out, '-');
 });
 
+test('config supplies apply fee, gas, and timeout defaults in their CLI string form', async () => {
+  const parsed = config(`
+defaults {
+  receipt-timeout-ms = 300000
+}
+command "apply" {
+  max-fee-per-gas         = 30000000000
+  priority-fee-per-gas    = "1000000000"
+  gas-multiplier          = "1.5"
+  verification-timeout-ms = "600000"
+}`);
+  assert.deepEqual(configOptions(parsed, 'apply', COMMANDS.apply), {
+    'gas-multiplier': '1.5', 'max-fee-per-gas': '30000000000', 'priority-fee-per-gas': '1000000000',
+    'receipt-timeout-ms': '300000', 'verification-timeout-ms': '600000',
+  });
+  assert.deepEqual(configOptions(parsed, 'plan', COMMANDS.plan), {});
+  assert.equal(configOptions(config('command "apply" {\n gas-multiplier = 2\n}'), 'apply', COMMANDS.apply)['gas-multiplier'], '2');
+});
+
 test('config rejects options that must stay explicit, options a command lacks, and secrets', async () => {
   const cases = [
     ['command "apply" {\n plan = "plan.json"\n}', /command "apply" cannot set plan\. Config can set only/],
     ['command "plan" {\n signer-module = "signer.mjs"\n}', /cannot set signer-module/],
     ['command "plan" {\n max-spend-wei = "1"\n}', /cannot set max-spend-wei/],
+    ['command "apply" {\n replace-max-fee-per-gas = "1"\n}', /cannot set replace-max-fee-per-gas/],
+    ['command "plan" {\n max-fee-per-gas = "1"\n}', /command "plan" cannot set max-fee-per-gas; the command has no --max-fee-per-gas option/],
+    ['command "apply" {\n gas-multiplier = 1.5\n}', /Number 1\.5 must be a whole number/],
+    ['command "apply" {\n gas-multiplier = "fast"\n}', /gas-multiplier must be a whole number or a quoted decimal, such as "1\.5"/],
+    ['command "apply" {\n max-fee-per-gas = "30 gwei"\n}', /test\.ethpconfig:2:20: max-fee-per-gas must be a whole number of wei/],
+    ['defaults {\n receipt-timeout-ms = true\n}', /receipt-timeout-ms must be a whole number of milliseconds/],
     ['command "verify" {\n journal = "journal.jsonl"\n}', /command "verify" cannot set journal; the command has no --journal option/],
     ['defaults {\n out = "plan.json"\n}', /defaults cannot set out; set it in a command block/],
     ['command "status" {\n backend = "backend.json"\n}', /command "status" does not read a spec/],

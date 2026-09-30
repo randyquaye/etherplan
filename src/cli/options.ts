@@ -4,9 +4,10 @@ export type CommandName = keyof typeof COMMANDS;
 export type CliOptions = {
   value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
   'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
-  'max-spend-wei'?: string; 'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string;
-  'replace-max-cost-wei'?: string; parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
-  'verification-timeout-ms'?: string; quiet?: boolean;
+  'max-spend-wei'?: string; 'max-fee-per-gas'?: string; 'priority-fee-per-gas'?: string; 'gas-multiplier'?: string;
+  'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string; 'replace-max-cost-wei'?: string;
+  parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
+  'receipt-timeout-ms'?: string; 'verification-timeout-ms'?: string; quiet?: boolean;
   var?: string[]; 'var-file'?: string[]; workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
@@ -21,7 +22,7 @@ export const COMMANDS = {
   graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
   impact: { description: 'Show resources affected by a named value.', options: ['value', ...INPUTS] },
   plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'quiet', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', ...INPUTS] },
+  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'quiet', 'max-spend-wei', 'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'receipt-timeout-ms', 'verification-timeout-ms', ...INPUTS] },
   verify: { description: 'Verify desired state against the chain.', options: ['state', 'backend', ...INPUTS] },
   schedule: { description: 'Preview signer assignments and execution waves.', options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
   import: { description: 'Record a verified existing contract in local state.', options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
@@ -44,9 +45,13 @@ const OPTION_HELP = {
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
+  'max-fee-per-gas': 'Maximum fee per gas in wei for new transactions (default: RPC estimate)',
+  'priority-fee-per-gas': 'Priority fee per gas in wei for new transactions (default: RPC estimate)',
+  'gas-multiplier': 'Gas limit as a multiple of the RPC gas estimate, at least 1 (default: 1.2)',
   'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
+  'receipt-timeout-ms': 'Time to wait for each transaction receipt before stopping (default: 120000 ms)',
   'verification-timeout-ms': 'Time to retry provider errors after a successful deployment (default: 300000 ms)',
   quiet: 'Suppress live apply progress (final JSON, approval prompts, and errors still appear)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
@@ -55,7 +60,7 @@ const OPTION_HELP = {
   'var-file': 'Read variable values from an .ethpvars file; repeatable, later files win',
   workspace: 'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
-const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'verification-timeout-ms', 'workspace']);
+const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'receipt-timeout-ms', 'verification-timeout-ms', 'workspace']);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'quiet', 'rebaseline', 'reconfigure']);
 export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
@@ -133,5 +138,27 @@ export function validateCombination(command: CommandName, options: CliOptions): 
   }
   if (command === 'apply' && options.pipeline && options.parallel) {
     throw new UsageError('A pipeline apply reads the parallel setting from its saved plan; omit --parallel.');
+  }
+  if (command === 'apply') validateApplyValues(options);
+}
+
+const WHOLE = /^[0-9]+$/;
+
+// Config can supply these, so the checks run on the merged options.
+function validateApplyValues(options: CliOptions): void {
+  for (const name of ['max-fee-per-gas', 'priority-fee-per-gas', 'receipt-timeout-ms', 'verification-timeout-ms'] as const) {
+    const value = options[name];
+    if (value !== undefined && (!WHOLE.test(value) || (name.endsWith('-ms') && !Number.isSafeInteger(Number(value))))) {
+      throw new UsageError(`--${name} must be a whole number of ${name.endsWith('-ms') ? 'milliseconds' : 'wei'}.`);
+    }
+  }
+  const maxFee = options['max-fee-per-gas'];
+  const priorityFee = options['priority-fee-per-gas'];
+  if ((maxFee === undefined) !== (priorityFee === undefined)) throw new UsageError('--max-fee-per-gas and --priority-fee-per-gas go together; give both or neither.');
+  if (maxFee !== undefined && BigInt(maxFee) === 0n) throw new UsageError('--max-fee-per-gas must be positive.');
+  if (maxFee !== undefined && BigInt(priorityFee!) > BigInt(maxFee)) throw new UsageError('--priority-fee-per-gas cannot exceed --max-fee-per-gas.');
+  const multiplier = options['gas-multiplier'];
+  if (multiplier !== undefined && (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)) {
+    throw new UsageError('--gas-multiplier must be a decimal number no less than 1, such as 1.5.');
   }
 }

@@ -72,8 +72,14 @@ const CALL_CHECK_FIELDS = new Set(['getter', 'args', 'before', 'equals']);
 // Getter names a getter-list check cannot use; enabled is the block's meta-argument there.
 const RESERVED_GETTERS = new Set(['getter', 'args', 'before', 'equals', 'after']);
 
-export const CONFIG_OPTIONS: ConfigOptionName[] = ['state', 'journal', 'backend', 'out', 'deployers', 'owner', 'parallel', 'pipeline'];
+export const CONFIG_OPTIONS: ConfigOptionName[] = ['state', 'journal', 'backend', 'out', 'deployers', 'owner', 'parallel', 'pipeline',
+  'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'receipt-timeout-ms', 'verification-timeout-ms'];
 const CONFIG_PATHS = new Set(['state', 'journal', 'backend', 'out']);
+// Numeric options keep the CLI's string form; HCL numbers are whole, so a fractional multiplier is quoted.
+const CONFIG_NUMBERS = new Map([
+  ['max-fee-per-gas', /^[0-9]+$/], ['priority-fee-per-gas', /^[0-9]+$/], ['gas-multiplier', /^[0-9]+(?:\.[0-9]+)?$/],
+  ['receipt-timeout-ms', /^[0-9]+$/], ['verification-timeout-ms', /^[0-9]+$/],
+]);
 
 function assert(condition: unknown, node: Located | undefined, message: string): asserts condition {
   if (!condition) fail(node as Located, message);
@@ -476,6 +482,13 @@ export function compileConfig(document: HclDocument, commands: CommandOptions, r
     if (name === 'parallel' || name === 'pipeline') {
       assert(typeof value === 'boolean', attribute.value, `${name} must be true or false.`);
       return [name, value];
+    }
+    const number = CONFIG_NUMBERS.get(name);
+    if (number) {
+      const text = typeof value === 'number' ? String(value) : value;
+      assert(typeof text === 'string' && number.test(text), attribute.value, name === 'gas-multiplier'
+        ? 'gas-multiplier must be a whole number or a quoted decimal, such as "1.5".' : `${name} must be a whole number${name.endsWith('-ms') ? ' of milliseconds' : ' of wei'}.`);
+      return [name, text];
     }
     if (name === 'deployers') {
       assert(Array.isArray(value) && value.length > 0 && value.every(item => typeof item === 'string' && ADDRESS.test(item)), attribute.value, 'deployers must be a nonempty list of addresses.');

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
+import { applyPlan } from '../src/execution/index.ts';
 import { signEnvelope, validateSignedTransaction } from '../src/execution/transactions.ts';
 import { TEST_KEYS } from './execution/chain.ts';
 
@@ -54,4 +55,17 @@ test('pipeline copies of intent fields are checked, and zero priority fee is val
   await validateSignedTransaction(signed, zeroIntent, planned, zero.chainId);
   await assert.rejects(validateSignedTransaction({ ...signed, pooled: true }, zeroIntent, planned, zero.chainId), /Signed pooled/);
   await assert.rejects(validateSignedTransaction({ ...signed, reservationId: undefined }, zeroIntent, planned, zero.chainId), /Signed reservationId/);
+});
+
+test('apply rejects invalid fee caps, gas multipliers, and timeouts before it opens a lock', async () => {
+  const cases = [
+    [{ fees: { maxFeePerGas: 0n, maxPriorityFeePerGas: 0n } }, /fees needs a positive maxFeePerGas/],
+    [{ fees: { maxFeePerGas: 1n, maxPriorityFeePerGas: 2n } }, /no greater than it/],
+    [{ fees: { maxFeePerGas: '1.5', maxPriorityFeePerGas: '1' } }, /fees needs/],
+    [{ gasMultiplier: 0.9 }, /gasMultiplier must be a number no less than 1/],
+    [{ gasMultiplier: Number.NaN }, /gasMultiplier must be/],
+    [{ receiptTimeoutMs: -1 }, /receiptTimeoutMs must be a non-negative integer/],
+    [{ verificationTimeoutMs: 1.5 }, /verificationTimeoutMs must be a non-negative integer/],
+  ];
+  for (const [options, message] of cases) await assert.rejects(applyPlan(options), { code: 'config', message });
 });

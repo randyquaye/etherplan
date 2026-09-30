@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { UsageError, validateCombination } from '../src/cli/options.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -31,6 +32,9 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('help', 'plan').stdout, /--out.*plan\.json/);
   assert.match(cli('import', '--help').stdout, /--rebaseline/);
   assert.match(cli('apply', '--help').stdout, /--signer-module/);
+  for (const flag of ['max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'receipt-timeout-ms']) {
+    assert.match(cli('apply', '--help').stdout, new RegExp(`--${flag}`));
+  }
   assert.match(cli('status', '--help').stdout, /--backend/);
   assert.match(cli('init', '--help').stdout, /--reconfigure/);
   assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
@@ -53,6 +57,24 @@ test('invalid and unrelated options fail before a spec or RPC is opened', () => 
     assert.equal(result.status, 2, `${args.join(' ')}: ${result.stderr}`);
     assert.equal(result.stdout, '');
     assert.match(result.stderr, /Usage: etherplan/);
+  }
+});
+
+test('apply fee, gas, and timeout values are checked after config is merged', () => {
+  validateCombination('apply', { 'max-fee-per-gas': '30000000000', 'priority-fee-per-gas': '0', 'gas-multiplier': '1.5', 'receipt-timeout-ms': '0' });
+  const cases = [
+    [{ 'max-fee-per-gas': '30000000000' }, /go together/],
+    [{ 'priority-fee-per-gas': '1' }, /go together/],
+    [{ 'max-fee-per-gas': '0', 'priority-fee-per-gas': '0' }, /--max-fee-per-gas must be positive/],
+    [{ 'max-fee-per-gas': '1', 'priority-fee-per-gas': '2' }, /--priority-fee-per-gas cannot exceed --max-fee-per-gas/],
+    [{ 'max-fee-per-gas': '30gwei', 'priority-fee-per-gas': '1' }, /--max-fee-per-gas must be a whole number of wei/],
+    [{ 'gas-multiplier': '0.9' }, /--gas-multiplier must be a decimal number no less than 1/],
+    [{ 'gas-multiplier': '1e3' }, /--gas-multiplier must be/],
+    [{ 'receipt-timeout-ms': '-5' }, /--receipt-timeout-ms must be a whole number of milliseconds/],
+    [{ 'verification-timeout-ms': '99999999999999999999' }, /--verification-timeout-ms must be a whole number of milliseconds/],
+  ];
+  for (const [options, message] of cases) {
+    assert.throws(() => validateCombination('apply', options), error => error instanceof UsageError && message.test(error.message), JSON.stringify(options));
   }
 });
 
