@@ -30,7 +30,7 @@
     }
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.ts test/integration/*.test.ts",
     "prepare": "npm run build",
