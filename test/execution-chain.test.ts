@@ -11,7 +11,7 @@ import { localSignerJournals } from '../src/execution/local-signer.ts';
 import { estimateGasLimit } from '../src/execution/transactions.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan } from '../src/planning/index.ts';
-import { verifyResource } from '../src/verification/index.ts';
+import { PROBE_ADDRESS, verifyResource } from '../src/verification/index.ts';
 import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../src/verification/limitations.ts';
 import { deployerA, deployerB, fixture, owner, outsider, startAnvil, TEST_KEYS } from './execution/chain.ts';
 
@@ -235,6 +235,38 @@ describe('apply on a private automining chain', () => {
       assert.equal(await nonce(deployerA), 4, `${phase}/${actionId} sent no duplicate deployment`);
       assert.equal(await nonce(owner), callPlanned ? 1 : 0, `${phase}/${actionId} sent no duplicate call`);
       assert.deepEqual(result.rebroadcasts.map(entry => entry.actionId), phase === 'signed' ? [actionId] : []);
+      await chain.rpc('evm_revert', [inner]);
+    }
+  });
+
+  test('a saved-plan resume checks earlier-wave dependencies with their journaled creation proofs', async () => {
+    // Like a Sepolia RPC that answers reads but rejects every historical CREATE2 replay.
+    const replayRejected = Object.assign(Object.create(chain.client), { call: async request => {
+      if (request.to?.toLowerCase() === PROBE_ADDRESS.toLowerCase() && request.blockNumber !== undefined &&
+        ['a', 'b', 'c', 'd'].some(digit => request.data?.toLowerCase().includes(digit.repeat(64)))) {
+        throw Object.assign(new Error('internal eth error'), { name: 'InternalRpcError', code: -32603 });
+      }
+      return chain.client.call(request);
+    } });
+    // gamma depends on alpha, so it runs in the second wave.
+    for (const [pipeline, phase] of [[false, 'signed'], [true, 'signed'], [true, 'verified']] as const) {
+      const label = `${pipeline ? 'pipeline' : 'serial'} after gamma ${phase}`;
+      const inner = await chain.rpc('evm_snapshot');
+      const { spec, artifacts } = fixture({ withCall: false });
+      const policy = { deployers: [deployerA.address], parallel: false };
+      const plan = await createPlan({ spec, artifacts, client: chain.client, maxSpendWei: '100000000000000000000', ...(pipeline ? { pipeline: policy } : { signers: policy }) });
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(plan));
+      const killed = await runChild({ rpcUrl: chain.url, planFile: ws.planFile, stateFile: ws.stateFile, journalFile: ws.journalFile, deployers: [0], pipeline, fixture: { withCall: false }, crash: { phase, actionId: 'contract:gamma' } });
+      assert.equal(killed.signal, 'SIGKILL', `${label}: ${killed.stderr}`);
+
+      // The verification RPC can still replay gamma itself after its receipt.
+      const result = await applyPlan({ plan, spec, artifacts, client: replayRejected, verificationClient: chain.client, signers: { deployer: [deployerA] },
+        stateFile: ws.stateFile, journalFile: ws.journalFile, pipeline, pollIntervalMs: 20 });
+      assert.equal(result.status, 'applied', label);
+      const records = await journalOf(ws.journalFile);
+      assert.equal(count(records, 'signed', 'contract:gamma'), 1, `${label}: gamma was signed once`);
+      assert.equal(await nonce(deployerA), 4, `${label}: no duplicate deployment`);
       await chain.rpc('evm_revert', [inner]);
     }
   });
