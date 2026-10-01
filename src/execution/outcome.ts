@@ -364,7 +364,10 @@ export async function checkExecutionDependencies(ctx: ApplyContext, work: { item
           .filter((record): record is JournalRecord & (import('./types.ts').ReceiptFields | VerifiedFields) =>
             (record.phase === 'receipt' || record.phase === 'verified') && Boolean(record.transactionHash)).at(-1);
         const transactionHash = outcome && 'transactionHash' in outcome ? outcome.transactionHash : evidence?.transactionHash;
-        checked.set(id, await verify(ctx, dependency, transactionHash ? { transactionHash } : {}));
+        // Recovery can check a dependency before its wave is revisited. Reuse the
+        // creation proof this plan journaled instead of replaying the creation.
+        const creationProof = !outcome && evidence?.phase === 'verified' ? evidence.creationProof : undefined;
+        checked.set(id, await verify(ctx, dependency, { ...(transactionHash ? { transactionHash } : {}), ...(creationProof ? { creationProof } : {}) }));
       }
       const verification = checked.get(id)!;
       if (verification.status !== 'verified') {
