@@ -57,7 +57,7 @@ async function setup() {
 for (const [mode, pipeline, legacy] of [
   ['local', false, false], ['production', false, false], ['production', true, false], ['production', false, true],
 ] as const) {
-  test(`${mode}${pipeline ? ' pipeline' : ''} resumes a ${legacy ? 'terminal' : 'provider'} CREATE2 replay failure from the original receipt`, async () => {
+  test(`${mode}${pipeline ? ' pipeline' : ''} replans a ${legacy ? 'terminal' : 'provider'} CREATE2 replay failure from the original receipt`, async () => {
     const ws = await setup();
     try {
       const genesisHash = (await ws.chain.client.getBlock({ blockNumber: 0n })).hash;
@@ -86,10 +86,13 @@ for (const [mode, pipeline, legacy] of [
         await assert.rejects(apply(failingClient), error => error.code === 'postcondition' && error.retryable);
         assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
       }
-      const fresh = await createPlan({ ...ws.input, journalRecords: history, client: ws.chain.client });
-      assert.equal(fresh.resources[0].action, 'unverified');
+      const fresh = await createPlan({ ...ws.input, journalRecords: history, client: ws.chain.client,
+        ...(pipeline ? { signers: null, pipeline: { deployers: [deployerA.address], parallel: false } } : {}) });
+      assert.equal(fresh.resources[0].action, 'recover');
+      assert.equal(fresh.resources[0].observation.recovery.transactionHash, signed[0].transactionHash);
 
-      const resumed = await apply(ws.chain.client);
+      const resumed = await applyPlan({ plan: fresh, spec: ws.spec, artifacts: ws.artifacts, client: ws.chain.client,
+        signers: { deployer: [deployerA] }, ...storage, pipeline, pollIntervalMs: 20, verificationTimeoutMs: 0 });
       assert.equal(resumed.status, 'applied');
       assert.equal(resumed.transactionsSigned, 0);
       const after = backend ? backend.records : await readLocalJournal(ws.journalFile);

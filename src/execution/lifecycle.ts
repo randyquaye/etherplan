@@ -7,6 +7,7 @@ import { roleOf } from './shared.ts';
 import { commitments } from './funding.ts';
 import { assertCanonicalSnapshot, assertRecoveryEvidence, checkExecutionDependencies, recheckReused, revalidateDesiredState, revalidateVerified } from './outcome.ts';
 import { settleJournal } from './settlement.ts';
+import { recoverEarlierActions } from './recover.ts';
 import { pipelineAttempt, resumePipelineWave, signPipelineBatch, settlePipelineBatch } from './pipeline.ts';
 import { prepareBatch, signBatch, settleBatch } from './batch.ts';
 import { checkBatchFunding } from './funding.ts';
@@ -56,7 +57,7 @@ async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
     const transactions = ctx.journal.forAction(ctx.plan.planHash, resource.id)
       .filter((record): record is JournalRecord & ReceiptFields => record.phase === 'receipt' && record.receipt.status === 'success')
       .map(record => record.transactionHash);
-    if (item.planned.action === 'reuse' && item.resource.kind === 'contract' && item.resource.initcode &&
+    if (['reuse', 'recover'].includes(item.planned.action) && item.resource.kind === 'contract' && item.resource.initcode &&
       !ctx.stateSnapshot?.resources?.[resource.id] && outcome.verification.creationProof) {
       transactions.push(outcome.verification.creationProof.transactionHash);
     }
@@ -83,7 +84,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     throw new ApplyError('wrong-chain', 'State belongs to a different chain than the saved plan.');
   }
   assertFreshState(ctx, ctx.stateSnapshot);
-  const ownerActions = ctx.plan.resources.filter(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
+  const ownerActions = ctx.plan.resources.filter(resource => ['deploy', 'call', 'recover'].includes(resource.action) && roleOf(resource) === 'owner');
   if (ownerActions.length && !ctx.lanes.owner) throw new ApplyError('signer', `The plan has owner actions (${ownerActions.map(resource => resource.id).join(', ')}), but no owner signer was supplied.`);
   if (ctx.pipeline !== Boolean(ctx.plan.pipeline)) throw new ApplyError('pipeline-plan', 'A pipeline apply requires a saved pipeline plan, and a pipeline plan requires --pipeline.');
   const deployers = ctx.lanes.pool.map(account => account.address.toLowerCase() as Address);
@@ -104,6 +105,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   await commitments(ctx);
   await revalidateVerified(ctx);
   assertRecoveryEvidence(ctx);
+  await recoverEarlierActions(ctx);
   await settleJournal(ctx);
   await recheckReused(ctx);
   // Preserve the dependency check for a later signed wave before revisiting

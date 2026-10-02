@@ -114,7 +114,16 @@ export interface PlannedTransaction {
   value: DecimalString;
 }
 
-export type PlanAction = 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
+export type PlanAction = 'reuse' | 'deploy' | 'call' | 'recover' | 'conflict' | 'unverified';
+
+/** A signed transaction in an earlier plan which this plan must settle before new writes. */
+export interface PlannedRecovery {
+  originPlanHash: Hash;
+  signedSequence: number;
+  transactionHash: Hash;
+  signer: Address;
+  nonce: DecimalString;
+}
 
 /** Why a plan accepts a rebuilt artifact for an unchanged CREATE2 deployment, or why it does not. */
 export interface ArtifactDrift {
@@ -166,6 +175,7 @@ export type PlanObservation = VerificationResult & {
   stateComparison?: StateComparison;
   dependencyConflicts?: ResourceId[];
   pending?: { reason: string; targetId: ResourceId };
+  recovery?: PlannedRecovery;
 };
 
 interface PlannedBase {
@@ -176,7 +186,7 @@ interface PlannedBase {
   executionEdges?: DependencyEdge[];
   action: PlanAction;
   observation: PlanObservation;
-  /** Present when `action` is `deploy` or `call`. */
+  /** Present when `action` is `deploy`, `call`, or `recover`. Recovery keeps the original nonce and payload. */
   tx?: PlannedTransaction;
 }
 
@@ -280,6 +290,8 @@ export interface CreatePlanInput {
   state?: StateFile | null;
   /** Optional validated local or production journal history for recovering completed deployments. */
   journalRecords?: readonly RecoveryRecord[];
+  /** Optional notification before each resource's chain verification begins. */
+  onResourceCheck?: (id: ResourceId) => void;
   /** Supply at most one of `pipeline` and `signers`. */
   pipeline?: PlanSignerInput | null;
   signers?: PlanSignerInput | null;

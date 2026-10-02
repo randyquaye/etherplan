@@ -23,6 +23,7 @@ import { assertAwsBackendInitialized, inWorkspace, publicClient, stateFileFor } 
 import { COMMANDS, SPEC_COMMANDS, isCommand, parseOptions, usage, UsageError, validateCombination, validateOptions } from './options.ts';
 import type { CliOptions, CommandName } from './options.ts';
 import { print } from './shared.ts';
+import { formatApplyReport } from './reporting.ts';
 
 function variableReport(variables: VariableValue[]): string {
   const width = Math.max(...variables.map(variable => variable.name.length));
@@ -90,13 +91,21 @@ export async function main(): Promise<void> {
   } else if (args.includes('--help') || args.includes('-h')) {
     console.log(usage(command));
   } else {
+    let options: CliOptions | undefined;
     try {
-      const options = parseOptions(args);
+      options = parseOptions(args);
       validateOptions(command, options);
       await run(command, options);
     } catch (error) {
       const failure = error as { message?: string };
-      if (error instanceof ApplyError && error.result) print(error.result);
+      if (error instanceof ApplyError && error.result) {
+        if (options?.json) print(error.result);
+        else {
+          process.stdout.write(formatApplyReport(error.result));
+          process.exitCode = 1;
+          return;
+        }
+      }
       console.error(`${error instanceof ApplyError ? `${error.code}: ` : ''}${isRpcError(error) ? safeRpcMessage('request-failed') : failure?.message}${error instanceof UsageError ? `\n${usage(command)}` : ''}`);
       process.exitCode = error instanceof UsageError ? 2 : 1;
     }

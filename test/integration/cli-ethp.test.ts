@@ -78,7 +78,7 @@ test('editing .ethpvars after planning stops a saved-plan apply at stale-spec be
     const nonceBefore = await nonce();
     const stale = runCli(['apply', '--plan', planFile, '--state', file('stale-state.json')], true);
     assert.equal(stale.status, 1, stale.stdout);
-    assert.match(stale.stderr, /stale-spec: The spec changed after the plan was created/);
+    assert.match(`${stale.stdout}\n${stale.stderr}`, /stale-spec\): The spec changed after the plan was created/);
     assert.equal(await nonce(), nonceBefore);
   } finally {
     await writeFile(file('main.ethpvars'), vars);
@@ -103,7 +103,7 @@ test('plan bundles split files and saved-plan apply rejects an edit to a split f
     const nonceBefore = await nonce();
     const stale = runCli(['apply', '--plan', planFile, '--state', file('split-state.json')], true);
     assert.equal(stale.status, 1, stale.stdout);
-    assert.match(stale.stderr, /stale-spec: The spec changed after the plan was created/);
+    assert.match(`${stale.stdout}\n${stale.stderr}`, /stale-spec\): The spec changed after the plan was created/);
     assert.equal(await nonce(), nonceBefore);
   } finally {
     await writeFile(file('main.ethp'), main);
@@ -134,7 +134,7 @@ command "apply" {
   assert.deepEqual(JSON.parse(await readFile(file('deploy/plan.json'), 'utf8')), plan);
 
   const nonceBefore = await nonce();
-  const appliedRun = runCli(['apply', '--plan', file('deploy/plan.json')], true);
+  const appliedRun = runCli(['apply', '--json', '--plan', file('deploy/plan.json')], true);
   const applied = succeeded(appliedRun);
   assert.match(appliedRun.stderr, /Using --gas-multiplier, --max-fee-per-gas, --priority-fee-per-gas, --state from .*main\.ethpconfig\./);
   assert.equal(applied.status, 'applied');
@@ -153,7 +153,7 @@ command "apply" {
     assert.ok(BigInt(transaction.gas) * 2n >= BigInt(receipt.gasUsed) * 3n, `${hash} gas ${BigInt(transaction.gas)} used ${BigInt(receipt.gasUsed)}`);
   }
 
-  const verified = succeeded(runCli(['verify']));
+  const verified = succeeded(runCli(['verify', '--json']));
   assert.equal(verified.status, 'verified');
   assert.deepEqual(verified.resources.find(resource => resource.id === 'call:bind').action, 'reuse');
 });
@@ -188,13 +188,13 @@ resource "contract" "doubler" {
   const nonceBefore = await nonce();
   const drifted = run(['apply', '--workspace', 'blue', '--plan', planFile, '--var', `salt=${green}`], true);
   assert.equal(drifted.status, 1, drifted.stdout);
-  assert.match(drifted.stderr, /stale-spec: The spec changed after the plan was created/);
+  assert.match(`${drifted.stdout}\n${drifted.stderr}`, /stale-spec\): The spec changed after the plan was created/);
   assert.equal(await nonce(), nonceBefore);
 
-  assert.equal(succeeded(run(['apply', '--workspace', 'blue', '--plan', planFile], true)).status, 'applied');
+  assert.equal(succeeded(run(['apply', '--json', '--workspace', 'blue', '--plan', planFile], true)).status, 'applied');
   assert.ok(JSON.parse(await readFile(path.join(project, '.etherplan/blue/state.json'), 'utf8')).resources['contract:doubler']);
   await assert.rejects(readFile(path.join(project, '.etherplan/default/state.json')), { code: 'ENOENT' });
-  assert.equal(succeeded(run(['verify'], false, { ETHP_WORKSPACE: 'blue' })).status, 'verified');
+  assert.equal(succeeded(run(['verify', '--json'], false, { ETHP_WORKSPACE: 'blue' })).status, 'verified');
 
   const other = succeeded(run(['plan', '--out', '-', ...write], false, { ETHP_VAR_salt: green }));
   assert.deepEqual(other.resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);

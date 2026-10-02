@@ -27,6 +27,10 @@ function creationReplayFailed(verification: VerificationResult): boolean {
     (creation.replayFailure === 'execution' || creation.replayFailure === 'mismatch');
 }
 
+function createsContract(item: PreparedAction): boolean {
+  return item.resource.kind === 'contract' && (item.planned.action === 'deploy' || item.planned.action === 'recover');
+}
+
 export async function verify(ctx: ApplyContext, item: PreparedAction, options: import('../verification/types.ts').VerifyOptions = {}, client: Client = ctx.client): Promise<VerificationResult> {
   const id = item.planned.id;
   const outcome = ctx.outcomes.get(id);
@@ -46,10 +50,10 @@ async function verifyWithFallback(ctx: ApplyContext, item: PreparedAction,
   let primary: VerificationResult | null = null;
   try { primary = await verify(ctx, item, options); }
   catch (error) {
-    if (item.planned.action !== 'deploy' || !isRpcError(error)) throw error;
+    if (!createsContract(item) || !isRpcError(error)) throw error;
   }
   if (primary && !providerVerificationFailure(primary) && !creationReplayFailed(primary)) return primary;
-  if (item.planned.action === 'deploy' && ctx.verificationClient) {
+  if (createsContract(item) && ctx.verificationClient) {
     try {
       await checkVerificationChain(ctx.verificationClient, ctx.plan.chain, anchor);
       const alternate = await verify(ctx, item, options, ctx.verificationClient);
@@ -114,7 +118,9 @@ export async function stableReceipt(ctx: ApplyContext, transactionHash: Hash, re
 
 export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
   for (const item of ctx.prepared.values()) {
-    const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
+    const planHash = item.planned.action === 'recover' ? item.planned.observation.recovery?.originPlanHash : ctx.plan.planHash;
+    if (!planHash) throw new ApplyError('plan-format', `Recovery for ${item.planned.id} has no origin plan.`, { actionId: item.planned.id });
+    const records = ctx.journal.forAction(planHash, item.planned.id);
     const latest = records.at(-1);
     if (latest?.phase !== 'verified') continue;
     const hash = latest.transactionHash ?? latest.revertedTransaction;
@@ -137,7 +143,7 @@ export async function revalidateDesiredState(ctx: ApplyContext): Promise<{ numbe
     }
     const verificationStart = Date.now();
     let verification: VerificationResult | null = null;
-    const deadline = verificationStart + (item.planned.action === 'deploy' ? ctx.config.verificationTimeoutMs : 0);
+    const deadline = verificationStart + (createsContract(item) ? ctx.config.verificationTimeoutMs : 0);
     let delay = 500;
     for (;;) {
       verification = await verifyWithFallback(ctx, item, { blockNumber: block.number }, { blockNumber: block.number, blockHash: block.hash });
@@ -211,7 +217,7 @@ export async function finish(ctx: ApplyContext, item: PreparedAction, signed: Si
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
   if (verification.status !== 'verified') {
     const retryable = item.planned.action === 'deploy' && providerVerificationFailure(verification);
-    const replayHelp = retryable ? ' Retry this saved plan with an RPC endpoint that supports historical state overrides.' :
+    const replayHelp = retryable ? ' Replan with the same journal and an RPC endpoint that supports historical state overrides, then apply the recovery.' :
       item.planned.action === 'deploy' && verification.missingProofs.some(reason => reason.includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL))
         ? ` See the stateful constructor limitation and recovery steps: ${STATEFUL_CONSTRUCTOR_LIMITATION_URL}` : '';
     await fail(ctx, item, 'postcondition', `Transaction ${transactionHash} succeeded, but the result is ${verification.status}.${replayHelp}`, {

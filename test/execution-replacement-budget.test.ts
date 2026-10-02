@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { applyPlan } from '../src/execution/index.ts';
+import { readLocalJournal } from '../src/execution/journal.ts';
 import { createPlan } from '../src/planning/index.ts';
 import { deployerA, fixtureMany, startAnvil } from './execution/chain.ts';
 
@@ -86,6 +87,26 @@ test('a fitting replacement settles and variants at its nonce commit only the la
     assert.ok(cost(variants[0]) + cost(variants[1]) > BigInt(input.plan.maxSpendWei),
       'the variants would exceed the ceiling if counted separately');
     assert.ok(cost(variants[1]) <= BigInt(input.plan.maxSpendWei));
+  } finally { await chain.stop(); }
+});
+
+test('a fresh plan replaces an earlier pending signature at the same nonce', async () => {
+  const chain = await startAnvil(['--no-mining']);
+  try {
+    const { input, ws, records: before } = await stuckPlan(chain, 1, '1600000000000000');
+    const original = before.find(record => record.phase === 'signed');
+    const fresh = await createPlan({ spec: input.spec, artifacts: input.artifacts, client: chain.client,
+      journalRecords: await readLocalJournal(ws.journalFile),
+      pipeline: { deployers: [deployerA.address], parallel: false }, maxSpendWei: input.plan.maxSpendWei });
+    assert.equal(fresh.resources[0].action, 'recover');
+    const result = await apply(chain, { ...input, plan: fresh }, ws, { replacementFees, hooks: { async afterRecord(record) {
+      if (record.phase === 'broadcast' && record.transactionHash !== original.transactionHash) await chain.rpc('evm_mine');
+    } } });
+    assert.equal(result.status, 'applied');
+    const variants = (await recordsOf(ws.journalFile)).filter(record => record.phase === 'signed');
+    assert.equal(variants.length, 2);
+    assert.equal(variants[0].nonce, variants[1].nonce);
+    assert.equal(variants[1].replacesTransactionHash, original.transactionHash);
   } finally { await chain.stop(); }
 });
 

@@ -108,6 +108,29 @@ test('pinned runtime verifies a fresh constructor-created child and revalidates 
   } finally { await ws.close(); }
 });
 
+test('a fresh plan recovers a signed pinned-runtime deployment under its original commitment', async () => {
+  const ws = await fixture();
+  try {
+    ws.spec.contracts[0].creationProofMode = 'pinned-runtime';
+    ws.spec.contracts[0].codeHash = ws.parentHash;
+    ws.spec.contracts[0].createdCode = [{ getter: 'implementation', createNonce: 1, codeHash: ws.childHash }];
+    const original = await createPlan(ws.input);
+    await assert.rejects(applyPlan({ plan: original, spec: ws.spec, artifacts: ws.artifacts, client: ws.chain.client,
+      signers: { deployer: [deployerA] }, stateFile: ws.stateFile, journalFile: ws.journalFile,
+      hooks: { afterRecord(record: { phase: string }) {
+        if (record.phase === 'signed') throw new Error('stop after signature');
+      } } }), /stop after signature/);
+    const history = await readLocalJournal(ws.journalFile);
+    const fresh = await createPlan({ ...ws.input, journalRecords: history });
+    assert.equal(fresh.resources[0]?.action, 'recover');
+    const result = await ws.apply(fresh);
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, 0);
+    assert.equal(result.resources[0]?.verification.creation.method, 'pinned-runtime');
+    assert.equal((await readLocalJournal(ws.journalFile)).filter(record => record.phase === 'signed').length, 1);
+  } finally { await ws.close(); }
+});
+
 test('HCL pins lower to the same validated JSON commitments', () => {
   const hash = `0x${'ab'.repeat(32)}`;
   const source = `variable "parent_hash" {
@@ -150,7 +173,7 @@ test('constructor replay remains the default and cannot be upgraded after signin
     ws.spec.contracts[0].codeHash = ws.parentHash;
     ws.spec.contracts[0].createdCode = [{ getter: 'implementation', createNonce: 1, codeHash: ws.childHash }];
     const result = await createPlan({ ...ws.input, journalRecords: records });
-    assert.equal(result.resources[0].action, 'unverified');
+    assert.equal(result.resources[0].action, 'conflict');
     assert.equal(result.resources[0].observation.creationProof, undefined);
   } finally { await ws.close(); }
 });

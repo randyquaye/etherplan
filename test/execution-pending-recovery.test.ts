@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createWalletClient, encodeFunctionData, http } from 'viem';
 import { applyPlan } from '../src/execution/index.ts';
+import { readLocalJournal } from '../src/execution/journal.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan } from '../src/planning/index.ts';
 import { deployerA, fixture, outsider, owner, spare, startAnvil } from './execution/chain.ts';
@@ -59,7 +60,7 @@ async function setup(chain: Awaited<ReturnType<typeof startAnvil>>) {
   const plan = await createPlan({ spec, artifacts: base.artifacts, client: chain.client, state,
     signers: { deployers: [deployerA.address], owner: owner.address }, maxSpendWei: '100000000000000000000' });
   assert.equal(plan.resources.find(resource => resource.id === callId)?.action, 'call');
-  return { input: { spec, artifacts: base.artifacts, plan, ...common }, address, journalFile };
+  return { input: { spec, artifacts: base.artifacts, plan, ...common }, address, journalFile, stateFile };
 }
 
 async function pendingCall(chain: Awaited<ReturnType<typeof startAnvil>>, input: Awaited<ReturnType<typeof setup>>) {
@@ -105,8 +106,12 @@ test('a satisfied getter cannot close a pending signed call; its later side effe
     assert.equal(unresolved.filter(record => record.actionId === callId && record.phase === 'signed').length, 1);
     await assertPending(chain, signed);
 
+    const fresh = await createPlan({ spec: input.input.spec, artifacts: input.input.artifacts, client: chain.client,
+      state: JSON.parse(await readFile(input.stateFile, 'utf8')), journalRecords: await readLocalJournal(input.journalFile),
+      signers: { deployers: [deployerA.address], owner: owner.address }, maxSpendWei: '100000000000000000000' });
+    assert.equal(fresh.resources.find(resource => resource.id === callId)?.action, 'recover');
     await chain.rpc('evm_mine');
-    const result = await applyPlan(input.input);
+    const result = await applyPlan({ ...input.input, plan: fresh });
     assert.equal(result.status, 'applied');
     assert.equal((await chain.client.getTransactionReceipt({ hash: signed.transactionHash })).status, 'success');
     assert.equal(await chain.client.getStorageAt({ address: input.address, slot: '0x1' }), '0x' + '0'.repeat(63) + '2');
@@ -114,7 +119,7 @@ test('a satisfied getter cannot close a pending signed call; its later side effe
     assert.equal(settled.filter(record => record.actionId === callId && record.phase === 'receipt').length, 1);
     assert.equal(settled.filter(record => record.actionId === callId && record.phase === 'verified').length, 1);
     assert.equal(settled.find(record => record.actionId === callId && record.phase === 'verified').transactionHash, signed.transactionHash);
-    assert.equal((await applyPlan(input.input)).transactionsSigned, 0);
+    assert.equal((await applyPlan({ ...input.input, plan: fresh })).transactionsSigned, 0);
     assert.equal((await records(input.journalFile)).filter(record => record.actionId === callId && record.phase === 'verified').length, 1);
   } finally {
     await chain.rpc('anvil_setAutomine', [true]).catch(() => {});
