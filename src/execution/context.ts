@@ -73,7 +73,8 @@ async function signersFromProvider(provider: SignerProvider, roles: SignerRoles 
     } };
   };
   const deployer = await Promise.all(deployerRoles.map(account));
-  const needsOwner = plan?.resources?.some(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
+  const needsOwner = Boolean((plan.pipeline ?? plan.signers)?.owner) ||
+    plan?.resources?.some(resource => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner');
   return { deployer, ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}) };
 }
 

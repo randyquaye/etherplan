@@ -87,8 +87,8 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   if (ownerActions.length && !ctx.lanes.owner) throw new ApplyError('signer', `The plan has owner actions (${ownerActions.map(resource => resource.id).join(', ')}), but no owner signer was supplied.`);
   if (ctx.pipeline !== Boolean(ctx.plan.pipeline)) throw new ApplyError('pipeline-plan', 'A pipeline apply requires a saved pipeline plan, and a pipeline plan requires --pipeline.');
   const deployers = ctx.lanes.pool.map(account => account.address.toLowerCase() as Address);
-  const owner = (ctx.pipeline || ownerActions.length) ? ctx.lanes.owner?.address.toLowerCase() as Address ?? null : null;
   const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
+  const owner = (ctx.pipeline || ownerActions.length || pinned?.owner) ? ctx.lanes.owner?.address.toLowerCase() as Address ?? null : null;
   const hasWrites = ctx.plan.resources.some(resource => ['deploy', 'call'].includes(resource.action));
   if (hasWrites && (!pinned || !Array.isArray(pinned.deployers) || pinned.deployers.length === 0 ||
     typeof pinned.parallel !== 'boolean' || typeof ctx.plan.maxSpendWei !== 'string' ||
