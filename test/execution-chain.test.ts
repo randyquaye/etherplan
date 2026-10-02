@@ -115,6 +115,39 @@ describe('apply on a private automining chain', () => {
     }
   });
 
+  test('reuse-only pipeline apply loads and checks its pinned owner signer', async () => {
+    const input = fixture({ withCall: false });
+    input.spec.contracts = input.spec.contracts.slice(0, 1);
+    input.artifacts = new Map([['alpha', input.artifacts.get('alpha')!]]);
+    const ws = await workspace();
+    const initial = await createPlan({ ...input, client: chain.client,
+      signers: { deployers: [deployerA.address] }, maxSpendWei: '100000000000000000000' });
+    await apply({ ...input, plan: initial }, ws);
+    const state = JSON.parse(await readFile(ws.stateFile, 'utf8'));
+    const plan = await createPlan({ ...input, client: chain.client, state,
+      pipeline: { deployers: [deployerA.address], owner: owner.address, parallel: false },
+      maxSpendWei: '100000000000000000000' });
+    assert.ok(plan.resources.every(resource => resource.action === 'reuse'));
+    assert.equal(plan.pipeline?.owner, owner.address.toLowerCase());
+
+    const requested: string[] = [];
+    const signerProvider = {
+      async address(role: string) { requested.push(role); return role === 'owner' ? owner.address : deployerA.address; },
+      async signTransaction() { throw new Error('Reuse-only apply must not sign.'); },
+    };
+    const options = { ...input, plan, client: chain.client, signerProvider,
+      stateFile: ws.stateFile, journalFile: ws.journalFile, pipeline: true, pollIntervalMs: 20 };
+    const result = await applyPlan(options);
+    assert.deepEqual(requested, ['deployer', 'owner']);
+    assert.equal(result.transactionsSigned, 0);
+    assert.ok(result.resources.every(resource => resource.outcome === 'reused'));
+
+    const wrongOwner = { ...signerProvider, async address(role: string) {
+      return role === 'owner' ? outsider.address : deployerA.address;
+    } };
+    await rejectsWith(applyPlan({ ...options, signerProvider: wrongOwner }), 'signer');
+  });
+
   test('a saved plan cannot replace state written by a newer plan', async () => {
     const older = fixture({ withCall: false });
     older.spec.contracts = older.spec.contracts.slice(0, 1);
