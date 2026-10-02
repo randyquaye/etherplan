@@ -92,7 +92,7 @@ export async function assertSignerHistory(ctx: ApplyContext, addresses: Address[
       }
       if (!mined) {
         const signed = variants[0]!;
-        throw new ApplyError('foreign-outstanding', `Deployment ${signed.project}/${signed.environment}/${signed.label} has unresolved transaction ${signed.transactionHash} for signer ${address}. Resume that deployment first.`, { actionId: signed.actionId, retryable: true });
+        throw new ApplyError('foreign-outstanding', `Deployment ${signed.project}/${signed.environment}/${signed.label} has unresolved transaction ${signed.transactionHash} for signer ${address}. Settle that deployment before continuing.`, { actionId: signed.actionId, retryable: true });
       }
       await stableReceipt(ctx, mined.signed.transactionHash, mined.receipt, mined.signed.actionId);
     }
@@ -131,7 +131,7 @@ async function assertLocalJournalSettled(ctx: ApplyContext, file: string, addres
       receipt = await findReceipt(ctx.client, signed.transactionHash);
       if (receipt) { mined = signed; break; }
     }
-    if (!receipt || !mined) throw new ApplyError('foreign-outstanding', `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Resume that journal first.`, { actionId: first.actionId, retryable: true });
+    if (!receipt || !mined) throw new ApplyError('foreign-outstanding', `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Replan using that journal and apply its recovery before continuing.`, { actionId: first.actionId, retryable: true });
     await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId);
   }
 }
@@ -244,7 +244,7 @@ export async function replaceSigned(ctx: ApplyContext, item: PreparedAction, sig
 
 // Resolves every signed variant at a reserved nonce before resending or replacing it.
 
-async function settle(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord): Promise<void> {
+export async function settle(ctx: ApplyContext, item: PreparedAction, signed: SignedRecord): Promise<void> {
   await report(ctx, 'recovery', { actionId: item.planned.id, transactionHash: signed.transactionHash });
   const variants = signedVariants(ctx.journal.forAction(ctx.plan.planHash, item.planned.id), signed);
   let receipt = await findKnownReceipt(ctx.client, variants);
@@ -276,7 +276,7 @@ async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<J
   let receipt = await findKnownReceipt(ctx.client, variants);
   if (!receipt) {
     if (!await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-      throw new ApplyError('foreign-outstanding', `Plan ${signed.planHash} has signed transaction ${signed.transactionHash} (signer ${signed.signer}, nonce ${signed.nonce}) that is not on chain. Resume that plan, or wait until the nonce is used, before you apply another plan.`, { actionId: signed.actionId, retryable: true });
+      throw new ApplyError('foreign-outstanding', `Plan ${signed.planHash} has signed transaction ${signed.transactionHash} (signer ${signed.signer}, nonce ${signed.nonce}) that is not on chain. Replan using its journaled action before applying another plan.`, { actionId: signed.actionId, retryable: true });
     }
     receipt = await findKnownReceipt(ctx.client, variants);
     if (!receipt) return append(ctx, signed.actionId, { phase: 'failed', code: 'nonce-consumed', reason: 'Another transaction used this nonce.', retryable: true,
@@ -291,7 +291,7 @@ export async function settleJournal(ctx: ApplyContext): Promise<void> {
   const { id, genesisHash } = ctx.plan.chain;
   const records = ctx.journal.records.filter(record => record.chain.id === id && record.chain.genesisHash.toLowerCase() === genesisHash.toLowerCase());
   for (const { latest, signed } of liveTransactions(records)) {
-    if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Resume that plan first.`, { actionId: latest.actionId });
+    if (latest.planHash !== ctx.plan.planHash && ctx.remote) throw new ApplyError('plan-mismatch', `An unfinished transaction belongs to plan ${latest.planHash}. Create a plan that recovers its action before applying new writes.`, { actionId: latest.actionId });
     if (latest.planHash === ctx.plan.planHash) {
       const item = ctx.prepared.get(latest.actionId);
       if (!item) throw new ApplyError('journal', 'Journal has a transaction for an action that is not in this plan.', { actionId: latest.actionId });

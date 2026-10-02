@@ -133,7 +133,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
       gate = await startRpcGate(anvil.rpcUrl, phase);
       const running = runAsync([
-        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], gate.url);
       await waitForPhase(journalFile, running.child, phase);
       assert.equal(running.child.kill('SIGKILL'), true);
@@ -141,7 +141,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       gate.release();
 
       const resumed = runSync([
-        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], anvil.rpcUrl, true);
       assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}\n${JSON.stringify(running.output())}`);
       const result = JSON.parse(resumed.stdout);
@@ -164,3 +164,42 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
     }
   });
 }
+
+test('CLI replans an interrupted signed deployment and applies the new recovery plan', async () => {
+  const anvil = await startAnvil();
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-cli-fresh-recovery-'));
+  const originalPlanFile = path.join(directory, 'original.json');
+  const freshPlanFile = path.join(directory, 'fresh.json');
+  const stateFile = path.join(directory, 'state.json');
+  const journalFile = path.join(directory, 'journal.jsonl');
+  let gate;
+  try {
+    const planned = runSync(['plan', '--fixture', specFile, '--out', originalPlanFile, '--state', stateFile,
+      '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000'], anvil.rpcUrl);
+    assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+    gate = await startRpcGate(anvil.rpcUrl, 'signed');
+    const running = runAsync(['apply', '--json', '--fixture', specFile, '--plan', originalPlanFile,
+      '--state', stateFile, '--journal', journalFile], gate.url);
+    await waitForPhase(journalFile, running.child, 'signed');
+    assert.equal(running.child.kill('SIGKILL'), true);
+    await new Promise(resolve => running.child.once('exit', resolve));
+    gate.release();
+
+    const replanned = runSync(['plan', '--fixture', specFile, '--out', freshPlanFile, '--state', stateFile,
+      '--journal', journalFile, '--deployers', owner, '--owner', owner,
+      '--max-spend-wei', '100000000000000000000'], anvil.rpcUrl);
+    assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
+    const fresh = JSON.parse(await readFile(freshPlanFile, 'utf8'));
+    assert.equal(fresh.resources.find(resource => resource.id === 'contract:stateFixture').action, 'recover');
+    const reapplied = runSync(['apply', '--json', '--fixture', specFile, '--plan', freshPlanFile,
+      '--state', stateFile, '--journal', journalFile], anvil.rpcUrl, true);
+    assert.equal(reapplied.status, 0, `${reapplied.stderr}\n${reapplied.stdout}`);
+    const result = JSON.parse(reapplied.stdout);
+    assert.equal(result.status, 'applied');
+    assert.equal((await readJournal(journalFile)).filter(record => record.actionId === 'contract:stateFixture' && record.phase === 'signed').length, 1);
+  } finally {
+    await gate?.close();
+    await rm(directory, { recursive: true, force: true });
+    await stopAnvil(anvil);
+  }
+});

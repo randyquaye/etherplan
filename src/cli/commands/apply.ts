@@ -12,6 +12,7 @@ import type { Backend, SignerModuleSource, SignerSource } from '../environment.t
 import { approvePlan, defaultJournalFile, print, writeJsonAtomic } from '../shared.ts';
 import type { ChainCommandContext } from './context.ts';
 import { createApplyProgress } from '../progress.ts';
+import { formatApplyReport } from '../reporting.ts';
 
 export { defaultJournalFile } from '../shared.ts';
 
@@ -63,7 +64,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       process.stderr.write(`Approved plan saved for recovery: ${recoveryPlanFile}\n`);
     }
   }
-  const progress = options.quiet ? null : createApplyProgress(plan);
+  const progress = options.quiet ? null : createApplyProgress(plan, options.json ? process.stderr : process.stdout);
   progress?.start();
   try {
     const common = { plan, spec, artifacts, client, ...signerSource, parallel: options.parallel ?? false,
@@ -73,14 +74,18 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       const backend = planningBackend ?? await backendFromFile(options.backend, plan.chain, { requireBucket: true });
       if (backend.planStore) await backend.planStore.read(backend.scope, plan.planHash);
       const result = await applyPlan({ ...common, ...backend });
-      progress?.complete(result);
-      print(result);
+      if (options.json) {
+        progress?.complete(result);
+        print(result);
+      } else process.stdout.write(`${progress ? '\n' : ''}${formatApplyReport(result)}`);
       return;
     }
     const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
     const result = await applyPlan({ ...common, stateFile, journalFile });
-    progress?.complete(result);
-    print(result);
+    if (options.json) {
+      progress?.complete(result);
+      print(result);
+    } else process.stdout.write(`${progress ? '\n' : ''}${formatApplyReport(result)}`);
   } finally {
     progress?.stop();
   }

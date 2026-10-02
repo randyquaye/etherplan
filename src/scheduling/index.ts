@@ -6,7 +6,7 @@ import type { ExecutionWaves, Lane, LaneRole, SchedulableResource, Schedule, Sch
 export const PERMISSIONLESS_FACTORY_CODE_HASHES = new Set([
   '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989',
 ]);
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'deploy', 'call', 'recover']);
 const OWNER_LANE = 'owner';
 
 /** An action with its lane and plan position, before a batch assigns its signer. */
@@ -26,7 +26,7 @@ export function poolable(resource: SchedulableResource): boolean {
 }
 
 export function executionWaves(resources: SchedulableResource[]): ExecutionWaves {
-  const satisfied = new Set(resources.filter(resource => resource.action === 'reuse').map(resource => resource.id));
+  const satisfied = new Set(resources.filter(resource => resource.action === 'reuse' || resource.action === 'recover').map(resource => resource.id));
   const remaining = new Map(resources.filter(resource => ['deploy', 'call'].includes(resource.action)).map((resource): [ResourceId, SchedulableResource] => [resource.id, resource]));
   const waves: ResourceId[][] = [];
   while (remaining.size > 0) {
@@ -96,12 +96,12 @@ export function createSchedule(plan: SchedulePlan, deployers: string[], options:
 
   const byId = new Map(plan.resources.map((resource): [ResourceId, SchedulableResource] => [resource.id, resource]));
   const dependenciesOf = (id: ResourceId): ResourceId[] => byId.get(id)?.dependencies ?? [];
-  const satisfied = new Set(plan.resources.filter(resource => resource.action === 'reuse').map(resource => resource.id));
+  const satisfied = new Set(plan.resources.filter(resource => resource.action === 'reuse' || resource.action === 'recover').map(resource => resource.id));
   // Nonempty by the assert above.
   const primary = pool[0]!;
   const actions = plan.resources.flatMap((resource, order): PendingAction[] => {
     const { action } = resource;
-    // `blocked` is empty, so every action that is not a reuse is a deploy or a call.
+    // Recovery is completed before the scheduled waves and consumes no new nonce.
     if (action !== 'deploy' && action !== 'call') return [];
     const { role, lane } = laneFor(resource, primary, ownerLane);
     const pooled = parallel && pool.length > 1 && poolable(resource);

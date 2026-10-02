@@ -1,11 +1,52 @@
 import { canonicalJson } from './identity.ts';
-import { pinnedJournalCommitment, samePinnedCommitments } from './verification/pinned-runtime.ts';
-import type { PreparedContract } from './planning/types.ts';
+import { keccak256 } from 'viem';
+import { intentForSigned } from './execution/journal.ts';
+import { transactionFor } from './planning/resources.ts';
+import { pinnedCommitment, pinnedJournalCommitment, samePinnedCommitments } from './verification/pinned-runtime.ts';
+import type { PlannedRecovery, PreparedContract, PreparedResource } from './planning/types.ts';
 import type { ChainIdentity } from './types.ts';
-import type { JournalRecord, StoredJournalRecord } from './execution/types.ts';
+import type { JournalRecord, SignedRecord, StoredJournalRecord } from './execution/types.ts';
 import type { CreationProof } from './verification/types.ts';
 
 export type RecoveryRecord = JournalRecord | StoredJournalRecord;
+
+/** Return only attempts that still have a signed transaction to settle or verify. */
+export function pendingRecovery(records: readonly RecoveryRecord[], resource: PreparedResource, chain: ChainIdentity):
+  { recovery: PlannedRecovery; matches: boolean } | null {
+  if (resource.kind === 'external') return null;
+  const groups = new Map<string, RecoveryRecord[]>();
+  for (const record of records) {
+    if (record.actionId !== resource.id || record.chain.id !== chain.id || !same(record.chain.genesisHash, chain.genesisHash)) continue;
+    const group = groups.get(record.planHash) ?? [];
+    group.push(record);
+    groups.set(record.planHash, group);
+  }
+  const candidates = [...groups.values()].flatMap(group => {
+    const latest = group.at(-1);
+    if (!latest || latest.phase === 'verified' ||
+      (latest.phase === 'failed' && !['postcondition', 'nonce-race'].includes(latest.code))) return [];
+    const signed = group.filter(record => record.phase === 'signed').at(-1);
+    if (!signed || signed.phase !== 'signed') return [];
+    return [{ group, signed }];
+  }).sort((a, b) => b.signed.sequence - a.signed.sequence);
+  const candidate = candidates[0];
+  if (!candidate) return null;
+  const { signed } = candidate;
+  const recovery: PlannedRecovery = { originPlanHash: signed.planHash, signedSequence: signed.sequence,
+    transactionHash: signed.transactionHash, signer: signed.signer, nonce: signed.nonce };
+  try {
+    const intent = intentForSigned(records as JournalRecord[], signed as SignedRecord);
+    const tx = transactionFor(resource);
+    const pinnedMatches = resource.kind !== 'contract' ? !intent.pinnedCommitment :
+      resource.creationProofMode === 'pinned-runtime'
+        ? same(intent.pinnedCommitment, pinnedCommitment(signed.planHash, resource))
+        : !intent.pinnedCommitment;
+    return { recovery, matches: candidates.length === 1 && same(intent.to, tx.to) && intent.value === tx.value &&
+      same(intent.dataHash, keccak256(tx.data)) && pinnedMatches };
+  } catch {
+    return { recovery, matches: false };
+  }
+}
 
 const same = (left: string | null | undefined, right: string | null | undefined): boolean =>
   left?.toLowerCase() === right?.toLowerCase();

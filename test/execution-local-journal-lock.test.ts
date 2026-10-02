@@ -162,7 +162,7 @@ test('CLI defaults derive separate journals from two state filenames in one dire
     const plan = spawnSync(process.execPath, ['dist/cli.js', 'plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
       '--deployers', accounts[0].address, '--max-spend-wei', '100000000000000000000'], { cwd: projectDirectory, encoding: 'utf8', env });
     assert.equal(plan.status, 0, `${plan.stdout}\n${plan.stderr}`);
-    const applied = spawnSync(process.execPath, ['dist/cli.js', 'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile],
+    const applied = spawnSync(process.execPath, ['dist/cli.js', 'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile],
       { cwd: projectDirectory, encoding: 'utf8', env });
     assert.equal(applied.status, 0, `${applied.stdout}\n${applied.stderr}`);
     const journalFile = defaultJournalFile(stateFile);

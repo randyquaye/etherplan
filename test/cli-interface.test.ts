@@ -32,6 +32,8 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('help', 'plan').stdout, /--out.*plan\.json/);
   assert.match(cli('import', '--help').stdout, /--rebaseline/);
   assert.match(cli('apply', '--help').stdout, /--signer-module/);
+  assert.match(cli('apply', '--help').stdout, /--json/);
+  assert.match(cli('verify', '--help').stdout, /--json/);
   for (const flag of ['max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'receipt-timeout-ms']) {
     assert.match(cli('apply', '--help').stdout, new RegExp(`--${flag}`));
   }

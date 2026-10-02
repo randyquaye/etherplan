@@ -47,7 +47,7 @@ async function runScenario(parallel) {
     assert.equal(scheduled.status, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
     const started = performance.now();
     const applied = runCli([
-      'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+      'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ...(parallel ? ['--parallel'] : []),
     ], anvil.rpcUrl, true);
     const elapsedMs = performance.now() - started;

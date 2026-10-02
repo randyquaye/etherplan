@@ -6,7 +6,7 @@ import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
 import { createSchedule } from '../scheduling/index.ts';
 import { verifyResource } from '../verification/index.ts';
-import { recoveryProof } from '../recovery.ts';
+import { pendingRecovery, recoveryProof } from '../recovery.ts';
 import { assertPinnedAbsent } from '../verification/pinned-runtime.ts';
 import type { Block } from 'viem';
 import type { ContractStateResource, StateFile } from '../state/types.ts';
@@ -54,7 +54,7 @@ function planResource(resource: PreparedResource, observation: PlanObservation, 
   }
   result.action = action;
   result.observation = observation;
-  if (action === 'deploy' || action === 'call') result.tx = transactionFor(resource);
+  if (action === 'deploy' || action === 'call' || action === 'recover') result.tx = transactionFor(resource);
   return result as unknown as PlannedResource;
 }
 
@@ -68,7 +68,8 @@ function decide(resource: PreparedResource, observation: VerificationResult, pla
     const state = bindingState(observation);
     if (state === 'after') return 'reuse';
     if (state === 'before') return 'call';
-    if (state === 'read-failed' && observation.bindingChecks?.[0]?.targetAbsent === true && plannedById.get(resource.targetId)?.action === 'deploy') return 'call';
+    if (state === 'read-failed' && observation.bindingChecks?.[0]?.targetAbsent === true &&
+      ['deploy', 'recover'].includes(plannedById.get(resource.targetId)?.action ?? '')) return 'call';
     if (state === 'other' || state === 'read-failed') return 'conflict';
   }
   if (observation.status === 'verified') return 'reuse';
@@ -175,7 +176,7 @@ function assertStateChain(state: StateFile | null, chain: ChainIdentity): void {
  * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null, journalRecords = [], pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, journalRecords = [], onResourceCheck, pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const described = usesDependencyPlan(spec);
@@ -199,7 +200,13 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     assert(code && code !== '0x' && keccak256(code).toLowerCase() === factory.codeHash.toLowerCase(), 'CREATE2 factory code differs or is absent.');
   }
 
-  const observations = new Map<ResourceId, { observation: PlanObservation; verification: VerificationResult; stateComparison: StateComparison | null }>();
+  const observations = new Map<ResourceId, { observation: PlanObservation; verification: VerificationResult; stateComparison: StateComparison | null;
+    recovery: ReturnType<typeof pendingRecovery> }>();
+  const configuredSigners = pipeline ?? signers;
+  const recoverySigners = configuredSigners ? new Set([
+    ...(configuredSigners.parallel ? configuredSigners.deployers : configuredSigners.deployers.slice(0, 1)),
+    ...(configuredSigners.owner ? [configuredSigners.owner] : []),
+  ].map(address => address.toLowerCase())) : null;
   const resourceById = new Map(resources.map((resource): [ResourceId, PreparedResource] => [resource.id, resource]));
   const plannedById = new Map<ResourceId, PlannedResource>();
   for (const resource of resources) {
@@ -211,17 +218,31 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     if (saved?.creationProof || recovered) options.creationProof = saved?.creationProof ?? recovered!;
     options.chain = chain;
     options.journalRecords = journalRecords;
+    onResourceCheck?.(resource.id);
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
     const observation: PlanObservation = stateComparison ? { ...verification, stateComparison } : verification;
-    observations.set(resource.id, { observation, verification, stateComparison });
+    const recovery = pendingRecovery(journalRecords, resource, chain);
+    observations.set(resource.id, { observation, verification, stateComparison, recovery });
   }
   for (const node of executionOrder(ordered)) {
     const resource = lookup(resourceById, node.id);
     const observedEntry = lookup(observations, node.id);
-    const { verification, stateComparison } = observedEntry;
+    const { verification, stateComparison, recovery } = observedEntry;
     let { observation } = observedEntry;
     let action: PlanAction = stateComparison?.conflict ? 'conflict' : decide(resource, verification, plannedById);
+    if (recovery) {
+      observation = { ...observation, recovery: recovery.recovery };
+      const signerAvailable = !recoverySigners || recoverySigners.has(recovery.recovery.signer.toLowerCase());
+      if (recovery.matches && !stateComparison?.conflict && signerAvailable) action = 'recover';
+      else {
+        action = 'conflict';
+        observation = { ...observation, status: 'conflict', reasons: [...observation.reasons,
+          signerAvailable
+            ? `An unresolved signed transaction from plan ${recovery.recovery.originPlanHash} cannot be safely recovered from this resource. Check its payload, saved state, and other outstanding attempts.`
+            : `Recovery needs the original signer ${recovery.recovery.signer} so Etherplan can lock that account.`] };
+      }
+    }
     if (resource.kind === 'contract' && action === 'deploy') await assertPinnedAbsent(client, resource, observed.number);
     // A predicted CREATE2 address is not an adopted deployment merely because
     // its runtime matches. Another account can submit the same factory calldata
@@ -233,7 +254,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
       action = 'unverified';
       observation = { ...observation, status: 'unverified', missingProofs: [
         ...observation.missingProofs,
-        'The CREATE2 address has code but no verified creation transaction or explicit import. Resume its deployment or import it deliberately.',
+        'The CREATE2 address has code but no verified creation transaction or explicit import. Replan with its deployment journal or import it deliberately.',
       ] };
     }
     const unsafeDependencies = resource.dependencies.filter(dependency => {
@@ -285,7 +306,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     const deployers = (signers.parallel ? signers.deployers : signers.deployers?.slice(0, 1))?.map(address => address.toLowerCase() as Address);
     assert(deployers?.length && deployers.every(isUserAddress) && new Set(deployers).size === deployers.length, 'Plan needs distinct deployer addresses with valid mixed-case checksums.');
     assert(signers.owner == null || isUserAddress(signers.owner), 'Plan owner must be an Ethereum address with a valid mixed-case checksum.');
-    const needsOwner = planned.some(resource => ['deploy', 'call'].includes(resource.action) && resource.signerRole === 'owner');
+    const needsOwner = planned.some(resource => ['deploy', 'call', 'recover'].includes(resource.action) && resource.signerRole === 'owner');
     assert(!needsOwner || signers.owner, 'Plan with owner actions needs --owner <address>.');
     fields.signers = { deployers, owner: needsOwner && signers.owner ? signers.owner.toLowerCase() as Address : null, parallel: signers.parallel ?? false };
   }

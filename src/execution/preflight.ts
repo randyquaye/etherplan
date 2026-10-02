@@ -11,7 +11,7 @@ import type { Factory } from '../spec/types.ts';
 import type { Address, ChainIdentity, Client, ContractId, Hash, Hex, JsonSafe, ResourceId } from '../types.ts';
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'deploy', 'call', 'recover']);
 const IDENTITY_FIELDS = ['kind', 'dependencies', 'resolutionDependencies', 'executionEdges', 'address', 'artifactHash', 'initcodeHash', 'inputsHash', 'salt', 'saltDerivation', 'factory', 'checks', 'libraries', 'expectedCodeHash', 'creationProofMode', 'createdCode', 'signerRole', 'senderIndependent', 'targetId', 'method', 'args', 'check', 'before', 'after', 'ownerOnly', 'transfersOwnership'];
 
 function convert(value: unknown): unknown {
@@ -196,7 +196,19 @@ export async function checkPlanIdentity({ plan, spec, artifacts, client, deps }:
       if (planned.kind !== 'call') failures.push('only a call resource can be called');
       else if (fresh.kind === 'call' && !same(planned.tx, deps.transactionFor?.(fresh) ?? callTransaction(fresh))) failures.push('transaction payload differs');
     }
-    if (['deploy', 'call'].includes(planned.action) && String(planned.tx?.value ?? '') !== '0') failures.push('transaction value must be 0');
+    if (planned.action === 'recover') {
+      if (fresh.kind === 'external') failures.push('only a contract or call can recover a transaction');
+      else if (!planned.observation.recovery) failures.push('recovery needs a pinned signed transaction');
+      else if (!Number.isSafeInteger(planned.observation.recovery.signedSequence) || planned.observation.recovery.signedSequence < 1 ||
+        !/^0x[0-9a-fA-F]{64}$/.test(planned.observation.recovery.transactionHash) ||
+        !/^0x[0-9a-fA-F]{64}$/.test(planned.observation.recovery.originPlanHash) ||
+        !/^0x[0-9a-fA-F]{40}$/.test(planned.observation.recovery.signer) ||
+        !/^(0|[1-9][0-9]*)$/.test(planned.observation.recovery.nonce)) failures.push('recovery reference is malformed');
+      if (fresh.kind !== 'external' && !same(planned.tx, deps.transactionFor?.(fresh) ?? (fresh.kind === 'call' ? callTransaction(fresh) : deployable(fresh) ? deployTransaction(fresh) : null))) {
+        failures.push('recovery transaction payload differs');
+      }
+    }
+    if (['deploy', 'call', 'recover'].includes(planned.action) && String(planned.tx?.value ?? '') !== '0') failures.push('transaction value must be 0');
     if (failures.length) throw new ApplyError('stale-resource', `Plan entry does not match the current inputs: ${failures.join('; ')}.`, { actionId: planned.id, evidence: failures });
     prepared.set(planned.id, { planned, resource: fresh });
   }
