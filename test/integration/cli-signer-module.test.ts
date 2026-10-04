@@ -39,7 +39,7 @@ test('CLI plans and applies parallel deployers through a signer module with loca
       '--signer-module', moduleFile, '--parallel', '--max-spend-wei', '100000000000000000000');
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     assert.deepEqual(JSON.parse(planned.stdout).signers.deployers, addresses);
-    const applied = cli('apply', '--fixture', spec, '--plan', planFile, '--state', stateFile,
+    const applied = cli('apply', '--json', '--fixture', spec, '--plan', planFile, '--state', stateFile,
       '--journal', journalFile, '--signer-module', moduleFile, '--parallel');
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(JSON.parse(applied.stdout).transactionsSigned, 3);

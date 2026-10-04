@@ -77,7 +77,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
 
   const applied = runCli([
-    'apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000',
+    'apply', '--json', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000',
   ], true, 'yes\n');
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
   assert.match(applied.stderr, new RegExp(plan.planHash));
@@ -117,7 +117,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
   const rerun = runCli([
-    'apply', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile, '--quiet',
+    'apply', '--json', '--plan', recoveryPlanFile, '--state', stateFile, '--journal', journalFile, '--quiet',
   ], true);
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
   assert.match(rerun.stderr, /^Variables:\n/);
@@ -134,11 +134,11 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
     salt: `0x${'44'.repeat(32)}`,
   });
   await writeFile(path.join(directory, 'spec.json'), `${JSON.stringify(updatedSpec, null, 2)}\n`);
-  const stale = runCli(['apply', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
+  const stale = runCli(['apply', '--json', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
   assert.equal(stale.status, 1);
   assert.match(stale.stderr, /stale-spec/);
 
-  const fresh = runCli(['apply', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000'], true, 'yes\n');
+  const fresh = runCli(['apply', '--json', '--state', stateFile, '--journal', journalFile, '--max-spend-wei', '100000000000000000000'], true, 'yes\n');
   assert.equal(fresh.status, 0, `${fresh.stderr}\n${fresh.stdout}`);
   const freshResult = JSON.parse(fresh.stdout);
   assert.equal(freshResult.transactionsSigned, 1);
@@ -148,7 +148,28 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [owner, 'latest'])) - BigInt(nonceAfter), 1n);
   assert.equal(JSON.parse(await readFile(planFile, 'utf8')).planHash, plan.planHash);
 
-  const verified = runCli(['verify', '--state', stateFile]);
+  const human = runCli(['apply', '--plan', path.join(directory, 'plans', `${freshResult.planHash}.json`), '--state', stateFile, '--journal', journalFile], true);
+  assert.equal(human.status, 0, `${human.stderr}\n${human.stdout}`);
+  assert.match(human.stdout, /Applying plan .*chain 31337/);
+  assert.match(human.stdout, /Transactions signed this run: 0/);
+  assert.match(human.stdout, /Apply complete! .*verified\./);
+  assert.doesNotMatch(human.stdout, /"resources"|"planHash"/);
+
+  const quietHuman = runCli(['apply', '--plan', path.join(directory, 'plans', `${freshResult.planHash}.json`), '--state', stateFile, '--journal', journalFile, '--quiet'], true);
+  assert.equal(quietHuman.status, 0, `${quietHuman.stderr}\n${quietHuman.stdout}`);
+  assert.match(quietHuman.stdout, /^Transactions signed this run: 0\n/);
+  assert.match(quietHuman.stdout, /Apply complete! .*verified\./);
+  assert.doesNotMatch(quietHuman.stdout, /Applying plan|Apply lock acquired/);
+
+  const verification = runCli(['verify', '--state', stateFile]);
+  assert.equal(verification.status, 0, `${verification.stderr}\n${verification.stdout}`);
+  assert.match(verification.stdout, /Verifying 3 resources on chain 31337/);
+  assert.match(verification.stdout, /contract:stateFixture: checking/);
+  assert.match(verification.stdout, /contract:stateFixture: verified at 0x/);
+  assert.match(verification.stdout, /Verification complete: 3 verified, 0 unverified, 0 conflicts\./);
+  assert.doesNotMatch(verification.stdout, /"resources"/);
+
+  const verified = runCli(['verify', '--json', '--state', stateFile]);
   assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
   assert.equal(JSON.parse(verified.stdout).status, 'verified');
 });
@@ -173,7 +194,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
   assert.notEqual(drift.artifactHash, drift.previousArtifactHash);
 
   const nonceBefore = await anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
-  const applied = runCli(['apply', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
+  const applied = runCli(['apply', '--json', '--plan', planFile, '--state', stateFile, '--journal', journalFile], true);
   assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
   assert.match(applied.stderr, /contract:stateFixture: reused and verified/);
   assert.equal(JSON.parse(applied.stdout).transactionsSigned, 0);

@@ -280,6 +280,8 @@ export interface CreatePlanInput {
   state?: StateFile | null;
   /** Optional validated local or production journal history for recovering completed deployments. */
   journalRecords?: readonly RecoveryRecord[];
+  /** Optional notification before each resource's chain verification begins. */
+  onResourceCheck?: (id: ResourceId) => void;
   /** Supply at most one of `pipeline` and `signers`. */
   pipeline?: PlanSignerInput | null;
   signers?: PlanSignerInput | null;
