@@ -17,44 +17,67 @@ export async function commitments(ctx: ApplyContext): Promise<CommitmentLedger> 
     try {
       const intent = intentForSigned(ctx.journal.records, record);
       for (const entry of [intent, record]) {
-        if (!entry || entry.chain.id !== ctx.plan.chain.id ||
-          entry.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase()) {
+        if (
+          !entry ||
+          entry.chain.id !== ctx.plan.chain.id ||
+          entry.chain.genesisHash.toLowerCase() !== ctx.plan.chain.genesisHash.toLowerCase()
+        ) {
           throw new Error('Signed transaction has no matching intent on this chain.');
         }
       }
       if (!planned) throw new Error('Signed transaction has no matching plan action.');
       const cost = await validateSignedTransaction(record, intent, planned, ctx.plan.chain.id);
       const signer = record.signer.toLowerCase();
-      const nonces = bySigner.get(signer) ?? new Map<string, { cost: bigint; reservationId?: string }[]>();
+      const nonces =
+        bySigner.get(signer) ?? new Map<string, { cost: bigint; reservationId?: string }[]>();
       const nonce = BigInt(record.nonce).toString();
       const variants = nonces.get(nonce) ?? [];
-      variants.push({ cost, ...(record.reservationId ? { reservationId: record.reservationId } : {}) });
+      variants.push({
+        cost,
+        ...(record.reservationId ? { reservationId: record.reservationId } : {}),
+      });
       nonces.set(nonce, variants);
       bySigner.set(signer, nonces);
     } catch (error) {
-      throw new ApplyError('journal', `${record.actionId}: ${error instanceof Error ? error.message : String(error)}`, { actionId: record.actionId });
+      throw new ApplyError(
+        'journal',
+        `${record.actionId}: ${error instanceof Error ? error.message : String(error)}`,
+        { actionId: record.actionId },
+      );
     }
   }
   return bySigner;
 }
 
-export function signedSpend(commitments: CommitmentLedger, signer: string, exceptReservation: string | null = null): bigint {
+export function signedSpend(
+  commitments: CommitmentLedger,
+  signer: string,
+  exceptReservation: string | null = null,
+): bigint {
   return [...(commitments.get(signer)?.values() ?? [])].reduce((sum, variants) => {
-    const costs = variants.filter(entry => entry.reservationId !== exceptReservation).map(entry => entry.cost);
-    return sum + (costs.length ? costs.reduce((max, cost) => cost > max ? cost : max) : 0n);
+    const costs = variants
+      .filter((entry) => entry.reservationId !== exceptReservation)
+      .map((entry) => entry.cost);
+    return sum + (costs.length ? costs.reduce((max, cost) => (cost > max ? cost : max)) : 0n);
   }, 0n);
 }
 
 // A new variant changes a nonce's commitment only when its cap exceeds every
 // signed variant already at that nonce. Other signed nonces still count in full.
-export function spendWithVariant(commitments: CommitmentLedger, signer: string, nonce: string, cost: bigint): bigint {
+export function spendWithVariant(
+  commitments: CommitmentLedger,
+  signer: string,
+  nonce: string,
+  cost: bigint,
+): bigint {
   const variants = commitments.get(signer)?.get(BigInt(nonce).toString()) ?? [];
-  const current = variants.reduce((max, entry) => entry.cost > max ? entry.cost : max, 0n);
+  const current = variants.reduce((max, entry) => (entry.cost > max ? entry.cost : max), 0n);
   return signedSpend(commitments, signer) - current + (cost > current ? cost : current);
 }
 
 export function budgetFor(ctx: ApplyContext, signer: string): bigint {
-  if (!ctx.plan.maxSpendWei) throw new ApplyError('plan-policy', 'The saved plan needs a maxSpendWei ceiling.');
+  if (!ctx.plan.maxSpendWei)
+    throw new ApplyError('plan-policy', 'The saved plan needs a maxSpendWei ceiling.');
   const approved = BigInt(ctx.plan.maxSpendWei);
   const supplied = ctx.config.budgets[signer];
   return supplied === undefined || approved < BigInt(supplied) ? approved : BigInt(supplied);
@@ -63,7 +86,15 @@ export function budgetFor(ctx: ApplyContext, signer: string): bigint {
 // Check the whole batch before signing any transaction in it.
 
 export async function checkBatchFunding(ctx: ApplyContext, work: FundedJob[]): Promise<void> {
-  const shortfalls: { job: FundedJob; code: FailureCode; reason: string; balanceWei?: bigint; requiredWei: bigint; budgetWei?: bigint; spentWei?: bigint }[] = [];
+  const shortfalls: {
+    job: FundedJob;
+    code: FailureCode;
+    reason: string;
+    balanceWei?: bigint;
+    requiredWei: bigint;
+    budgetWei?: bigint;
+    spentWei?: bigint;
+  }[] = [];
   const ledger = await commitments(ctx);
   const groups = new Map<string, FundedJob[]>();
   for (const job of work) {
@@ -78,14 +109,44 @@ export async function checkBatchFunding(ctx: ApplyContext, work: FundedJob[]): P
     const balance = await ctx.client.getBalance({ address: job.signer.address });
     const spent = signedSpend(ledger, lane);
     const budget = budgetFor(ctx, lane);
-    if (balance < required) shortfalls.push({ job, code: 'insufficient-funds', reason: `Signer ${job.signer.address} has ${balance} wei; the signer group can cost ${required} wei.`, balanceWei: balance, requiredWei: required });
-    else if (spent + required > budget) shortfalls.push({ job, code: 'budget-exceeded', reason: `Signer ${job.signer.address} has ${spent} wei committed; ${required} wei for ${jobs.map(entry => entry.item.planned.id).join(', ')} would exceed its ${budget} wei budget.`, budgetWei: budget, spentWei: spent, requiredWei: required });
+    if (balance < required)
+      shortfalls.push({
+        job,
+        code: 'insufficient-funds',
+        reason: `Signer ${job.signer.address} has ${balance} wei; the signer group can cost ${required} wei.`,
+        balanceWei: balance,
+        requiredWei: required,
+      });
+    else if (spent + required > budget)
+      shortfalls.push({
+        job,
+        code: 'budget-exceeded',
+        reason: `Signer ${job.signer.address} has ${spent} wei committed; ${required} wei for ${jobs.map((entry) => entry.item.planned.id).join(', ')} would exceed its ${budget} wei budget.`,
+        budgetWei: budget,
+        spentWei: spent,
+        requiredWei: required,
+      });
   }
   if (shortfalls.length) {
     for (const { job, code, reason, ...evidence } of shortfalls) {
-      await append(ctx, job.item.planned.id, { phase: 'failed', code, reason, retryable: true, signer: job.signer.address, evidence: jsonSafe(evidence) as import('../types.ts').JsonValue });
+      await append(ctx, job.item.planned.id, {
+        phase: 'failed',
+        code,
+        reason,
+        retryable: true,
+        signer: job.signer.address,
+        evidence: jsonSafe(evidence) as import('../types.ts').JsonValue,
+      });
     }
     const first = shortfalls[0]!;
-    throw new ApplyError(first.code, `${first.reason} No transaction in this batch was signed.`, { actionId: first.job.item.planned.id, retryable: true, evidence: shortfalls.map(({ job, code, reason }) => ({ id: job.item.planned.id, code, reason })) });
+    throw new ApplyError(first.code, `${first.reason} No transaction in this batch was signed.`, {
+      actionId: first.job.item.planned.id,
+      retryable: true,
+      evidence: shortfalls.map(({ job, code, reason }) => ({
+        id: job.item.planned.id,
+        code,
+        reason,
+      })),
+    });
   }
 }

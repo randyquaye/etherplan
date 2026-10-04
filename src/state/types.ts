@@ -1,6 +1,14 @@
 // The state file. Source of truth: validateState, validateResource, validateRevision, and validateChain in index.ts.
 import type { PreparedContract, PreparedResource } from '../planning/types.ts';
-import type { Address, CallId, ChainIdentity, ContractId, ExternalId, Hash, JsonValue } from '../types.ts';
+import type {
+  Address,
+  CallId,
+  ChainIdentity,
+  ContractId,
+  ExternalId,
+  Hash,
+  JsonValue,
+} from '../types.ts';
 import type { SaltDerivation } from '../spec/types.ts';
 import type { CreationProof, VerificationResult } from '../verification/types.ts';
 
@@ -49,8 +57,21 @@ export interface StateResource {
   creationProof?: CreationProof;
 }
 
-export type ContractStateResource = StateResource & Required<Pick<StateResource,
-  'artifactHash' | 'initcodeHash' | 'inputs' | 'inputsHash' | 'priorInputs' | 'priorInputsHash' | 'salt' | 'codeHash' | 'proofHash'>>;
+export type ContractStateResource = StateResource &
+  Required<
+    Pick<
+      StateResource,
+      | 'artifactHash'
+      | 'initcodeHash'
+      | 'inputs'
+      | 'inputsHash'
+      | 'priorInputs'
+      | 'priorInputsHash'
+      | 'salt'
+      | 'codeHash'
+      | 'proofHash'
+    >
+  >;
 
 export interface ImportResourceInput {
   resource: PreparedContract;

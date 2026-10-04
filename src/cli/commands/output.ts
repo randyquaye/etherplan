@@ -15,7 +15,10 @@ async function storedState(options: CliOptions, stateFile: string): Promise<Stat
   const backend = await backendFromFile(options.backend, chain);
   const stored = (await backend.stateStore.read(backend.scope))?.value;
   const state = stored == null ? null : validateState(stored);
-  if (state && (state.chain.id !== id || state.chain.genesisHash.toLowerCase() !== genesis.hash.toLowerCase())) {
+  if (
+    state &&
+    (state.chain.id !== id || state.chain.genesisHash.toLowerCase() !== genesis.hash.toLowerCase())
+  ) {
     throw new Error('Stored state belongs to a different chain.');
   }
   return state;
@@ -23,9 +26,14 @@ async function storedState(options: CliOptions, stateFile: string): Promise<Stat
 
 export async function output(options: CliOptions, stateFile: string): Promise<void> {
   const state = await storedState(options, stateFile);
-  if (!state) throw new Error(`No state found${options.backend ? ' in the backend' : ` at ${stateFile}`}. Run apply or import first.`);
+  if (!state)
+    throw new Error(
+      `No state found${options.backend ? ' in the backend' : ` at ${stateFile}`}. Run apply or import first.`,
+    );
   const addresses: Record<string, Address> = {};
-  for (const [id, resource] of Object.entries(state.resources).sort(([a], [b]) => a.localeCompare(b))) {
+  for (const [id, resource] of Object.entries(state.resources).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
     if (id.startsWith('contract:') || id.startsWith('external:')) addresses[id] = resource.address;
   }
   if (options.id) {

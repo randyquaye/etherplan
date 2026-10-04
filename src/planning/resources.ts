@@ -3,9 +3,30 @@ import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
 import { encodeConstructor, encodeMethod, validateResources } from '../validation/index.ts';
 import type { Artifacts } from '../artifacts/types.ts';
-import type { DependencyEdge, Factory, OrderedCallNode, OrderedContractNode, OrderedExternalNode, OrderedNode, ParsedSpec, ResolvedAddresses, SpecChecks, SpecContract } from '../spec/types.ts';
+import type {
+  DependencyEdge,
+  Factory,
+  OrderedCallNode,
+  OrderedContractNode,
+  OrderedExternalNode,
+  OrderedNode,
+  ParsedSpec,
+  ResolvedAddresses,
+  SpecChecks,
+  SpecContract,
+} from '../spec/types.ts';
 import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
-import type { PlannedTransaction, PreparedBinding, PreparedCall, PreparedCallCheck, PreparedCheck, PreparedContract, PreparedExternal, PreparedResource, PreparedResources } from './types.ts';
+import type {
+  PlannedTransaction,
+  PreparedBinding,
+  PreparedCall,
+  PreparedCallCheck,
+  PreparedCheck,
+  PreparedContract,
+  PreparedExternal,
+  PreparedResource,
+  PreparedResources,
+} from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 
@@ -26,20 +47,37 @@ function sameSaltHint(item: SpecContract, other: SpecContract | undefined): stri
   return ` Both derive their salt from mixer "${mine.mixer}"${mine.label === undefined ? '' : ` with label "${mine.label}"`} and have the same initcode; give one of them a label, such as salt = derive("second-instance").`;
 }
 
-function checks(value: SpecChecks | undefined, spec: ParsedSpec, addresses: ResolvedAddresses): PreparedCheck[] {
+function checks(
+  value: SpecChecks | undefined,
+  spec: ParsedSpec,
+  addresses: ResolvedAddresses,
+): PreparedCheck[] {
   return Object.entries(value ?? {})
     .sort(([left], [right]) => left.localeCompare(right))
-    .map(([functionName, expected]) => ({ functionName, expected: resolve(expected, spec, addresses) }));
+    .map(([functionName, expected]) => ({
+      functionName,
+      expected: resolve(expected, spec, addresses),
+    }));
 }
 
-function dependencyFields(node: OrderedNode, describeDependencies: boolean): { resolutionDependencies?: ResourceId[]; executionEdges?: DependencyEdge[] } {
-  return describeDependencies ? {
-    resolutionDependencies: [...node.resolutionDependencies],
-    executionEdges: node.executionEdges,
-  } : {};
+function dependencyFields(
+  node: OrderedNode,
+  describeDependencies: boolean,
+): { resolutionDependencies?: ResourceId[]; executionEdges?: DependencyEdge[] } {
+  return describeDependencies
+    ? {
+        resolutionDependencies: [...node.resolutionDependencies],
+        executionEdges: node.executionEdges,
+      }
+    : {};
 }
 
-function buildExternal(node: OrderedExternalNode, spec: ParsedSpec, addresses: ResolvedAddresses, describeDependencies: boolean): PreparedExternal {
+function buildExternal(
+  node: OrderedExternalNode,
+  spec: ParsedSpec,
+  addresses: ResolvedAddresses,
+  describeDependencies: boolean,
+): PreparedExternal {
   const item = node.item;
   const resource: PreparedExternal = {
     id: node.id,
@@ -54,11 +92,20 @@ function buildExternal(node: OrderedExternalNode, spec: ParsedSpec, addresses: R
   return resource;
 }
 
-function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: ResolvedAddresses, artifacts: Artifacts, describeDependencies: boolean): PreparedContract {
+function buildContract(
+  node: OrderedContractNode,
+  spec: ParsedSpec,
+  addresses: ResolvedAddresses,
+  artifacts: Artifacts,
+  describeDependencies: boolean,
+): PreparedContract {
   const item = node.item;
   const artifact = artifacts.get(item.id);
   assert(artifact, `Missing artifact for contract:${item.id}.`);
-  assert(typeof artifact.artifactHash === 'string' && HASH.test(artifact.artifactHash), `contract:${item.id} needs a normalized artifactHash.`);
+  assert(
+    typeof artifact.artifactHash === 'string' && HASH.test(artifact.artifactHash),
+    `contract:${item.id} needs a normalized artifactHash.`,
+  );
   const inputs = resolve(item.args ?? [], spec, addresses);
   // validateLibraries (through encodeConstructor and validateResources) checks that every value is an address.
   const libraries = resolve(item.libraries ?? {}, spec, addresses) as Record<string, Address>;
@@ -72,9 +119,20 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
     deployment = { initcode, salt: item.salt!, factory: spec.factory! };
     address = create2Address(deployment.factory.address, deployment.salt, initcode);
   }
-  assert(typeof address === 'string' && isAddress(address), `contract:${item.id} has an invalid resolved address.`);
-  const duplicate = Object.entries(addresses).find(([, existing]) => existing.toLowerCase() === address.toLowerCase())?.[0];
-  assert(duplicate === undefined, `contract:${item.id} resolves to the same address as contract:${duplicate}.${sameSaltHint(item, spec.contracts.find(other => other.id === duplicate))}`);
+  assert(
+    typeof address === 'string' && isAddress(address),
+    `contract:${item.id} has an invalid resolved address.`,
+  );
+  const duplicate = Object.entries(addresses).find(
+    ([, existing]) => existing.toLowerCase() === address.toLowerCase(),
+  )?.[0];
+  assert(
+    duplicate === undefined,
+    `contract:${item.id} resolves to the same address as contract:${duplicate}.${sameSaltHint(
+      item,
+      spec.contracts.find((other) => other.id === duplicate),
+    )}`,
+  );
   addresses[item.id] = address;
 
   const resource: PreparedContract = {
@@ -95,10 +153,13 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
   if (item.creationProofMode === 'pinned-runtime') {
     resource.creationProofMode = item.creationProofMode;
-    resource.createdCode = item.createdCode!.map(child => ({
+    resource.createdCode = item.createdCode!.map((child) => ({
       getter: child.getter,
       createNonce: child.createNonce,
-      address: getContractAddress({ from: address as Address, nonce: BigInt(child.createNonce) }).toLowerCase() as Address,
+      address: getContractAddress({
+        from: address as Address,
+        nonce: BigInt(child.createNonce),
+      }).toLowerCase() as Address,
       codeHash: child.codeHash,
     }));
   }
@@ -112,7 +173,13 @@ function buildContract(node: OrderedContractNode, spec: ParsedSpec, addresses: R
   return resource;
 }
 
-function buildCall(node: OrderedCallNode, spec: ParsedSpec, addresses: ResolvedAddresses, contracts: Map<string, PreparedContract>, describeDependencies: boolean): PreparedCall {
+function buildCall(
+  node: OrderedCallNode,
+  spec: ParsedSpec,
+  addresses: ResolvedAddresses,
+  contracts: Map<string, PreparedContract>,
+  describeDependencies: boolean,
+): PreparedCall {
   const item = node.item;
   const target = contracts.get(item.target);
   assert(target, `${node.id} has unresolved target contract:${item.target}.`);
@@ -143,7 +210,12 @@ function buildCall(node: OrderedCallNode, spec: ParsedSpec, addresses: ResolvedA
     before,
     after,
     signerRole: item.signerRole ?? 'owner',
-    ...(describeDependencies ? { ownerOnly: item.ownerOnly ?? false, transfersOwnership: item.transfersOwnership || item.method === 'transferOwnership' } : {}),
+    ...(describeDependencies
+      ? {
+          ownerOnly: item.ownerOnly ?? false,
+          transfersOwnership: item.transfersOwnership || item.method === 'transferOwnership',
+        }
+      : {}),
   };
   return resource;
 }
@@ -153,7 +225,11 @@ function buildCall(node: OrderedCallNode, spec: ParsedSpec, addresses: ResolvedA
  * Contract addresses are known before dependent arguments and call targets are resolved.
  * Validates the resulting resources without reading the chain.
  */
-export function prepareResources(specInput: unknown, orderedInput: OrderedNode[] | null | undefined, artifacts: Artifacts): PreparedResources {
+export function prepareResources(
+  specInput: unknown,
+  orderedInput: OrderedNode[] | null | undefined,
+  artifacts: Artifacts,
+): PreparedResources {
   const spec = parseSpec(specInput);
   const ordered = orderedInput ?? graph(spec);
   const describeDependencies = usesDependencyPlan(spec);
@@ -180,10 +256,18 @@ export function prepareResources(specInput: unknown, orderedInput: OrderedNode[]
 
 export function transactionFor(resource: PreparedResource): PlannedTransaction {
   if (resource.kind === 'contract' && resource.factory && resource.salt && resource.initcode) {
-    return { to: resource.factory.address, data: concatHex([resource.salt, resource.initcode]), value: '0' };
+    return {
+      to: resource.factory.address,
+      data: concatHex([resource.salt, resource.initcode]),
+      value: '0',
+    };
   }
   if (resource.kind === 'call' && resource.abi && resource.method && Array.isArray(resource.args)) {
-    return { to: resource.address, data: encodeMethod(resource.abi, resource.method, resource.args, resource.id), value: '0' };
+    return {
+      to: resource.address,
+      data: encodeMethod(resource.abi, resource.method, resource.args, resource.id),
+      value: '0',
+    };
   }
   throw new Error(`${resource.id ?? 'Resource'} has no transaction payload.`);
 }

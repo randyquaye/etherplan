@@ -12,13 +12,17 @@ test('import provenance needs creation evidence and replacement state retains th
     ...verificationResult,
     evidence: { creation: { status: 'verified', transactionHash: creationTransactionHash } },
   };
-  assert.throws(() => importResource({
-    resource: preparedResource,
-    verification: verificationResult,
-    state: null,
-    chain: plan.chain,
-    creationTransactionHash,
-  }), /unverified creation transaction/);
+  assert.throws(
+    () =>
+      importResource({
+        resource: preparedResource,
+        verification: verificationResult,
+        state: null,
+        chain: plan.chain,
+        creationTransactionHash,
+      }),
+    /unverified creation transaction/,
+  );
 
   const imported = importResource({
     resource: preparedResource,
@@ -60,11 +64,47 @@ test('state accepts a structured creation proof, validates identity, and drops i
     factory: preparedResource.factory,
     salt: preparedResource.salt,
   };
-  const state = recordResource({ resource: preparedResource, verification: { ...verificationResult, creationProof }, state: null, chain: plan.chain, transactions: [creationTransactionHash] });
+  const state = recordResource({
+    resource: preparedResource,
+    verification: { ...verificationResult, creationProof },
+    state: null,
+    chain: plan.chain,
+    transactions: [creationTransactionHash],
+  });
   assert.deepEqual(state.resources[preparedResource.id].creationProof, creationProof);
-  assert.throws(() => validateState({ ...state, resources: { [preparedResource.id]: { ...state.resources[preparedResource.id], creationProof: { ...creationProof, codeHash: `0x${'77'.repeat(32)}` } } } }), /different deployment/);
-  assert.throws(() => validateState({ ...state, resources: { [preparedResource.id]: { ...state.resources[preparedResource.id], creationProof: { ...creationProof, extra: true } } } }), /invalid fields/);
+  assert.throws(
+    () =>
+      validateState({
+        ...state,
+        resources: {
+          [preparedResource.id]: {
+            ...state.resources[preparedResource.id],
+            creationProof: { ...creationProof, codeHash: `0x${'77'.repeat(32)}` },
+          },
+        },
+      }),
+    /different deployment/,
+  );
+  assert.throws(
+    () =>
+      validateState({
+        ...state,
+        resources: {
+          [preparedResource.id]: {
+            ...state.resources[preparedResource.id],
+            creationProof: { ...creationProof, extra: true },
+          },
+        },
+      }),
+    /invalid fields/,
+  );
   const replacement = { ...preparedResource, address: replacementAddress };
-  const replaced = recordResource({ resource: replacement, verification: { ...verificationResult, address: replacementAddress }, state, chain: plan.chain, transactions: [replacementTransactionHash] });
+  const replaced = recordResource({
+    resource: replacement,
+    verification: { ...verificationResult, address: replacementAddress },
+    state,
+    chain: plan.chain,
+    transactions: [replacementTransactionHash],
+  });
   assert.equal(replaced.resources[preparedResource.id].creationProof, undefined);
 });

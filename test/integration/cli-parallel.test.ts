@@ -22,41 +22,87 @@ function runCli(arguments_, rpcUrl, signed = false) {
     env: {
       ...process.env,
       ETH_RPC_URL: rpcUrl,
-      ...(signed ? {
-        DEPLOYER_PRIVATE_KEYS: `${primaryKey},${secondaryKey}`,
-        OWNER_PRIVATE_KEY: primaryKey,
-      } : {}),
+      ...(signed
+        ? {
+            DEPLOYER_PRIVATE_KEYS: `${primaryKey},${secondaryKey}`,
+            OWNER_PRIVATE_KEY: primaryKey,
+          }
+        : {}),
     },
   });
 }
 
 async function runScenario(parallel) {
   const anvil = await startAnvil(['--block-time', '1']);
-  const directory = await mkdtemp(path.join(os.tmpdir(), `etherplan-cli-${parallel ? 'parallel' : 'sequential'}-`));
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), `etherplan-cli-${parallel ? 'parallel' : 'sequential'}-`),
+  );
   const planFile = path.join(directory, 'plan.json');
   const stateFile = path.join(directory, 'state.json');
   const journalFile = path.join(directory, 'journal.jsonl');
   try {
-    const planned = runCli(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
-      '--deployers', [primary, secondary].join(','), '--max-spend-wei', '100000000000000000000', ...(parallel ? ['--parallel'] : [])], anvil.rpcUrl);
+    const planned = runCli(
+      [
+        'plan',
+        '--fixture',
+        specFile,
+        '--out',
+        planFile,
+        '--state',
+        stateFile,
+        '--deployers',
+        [primary, secondary].join(','),
+        '--max-spend-wei',
+        '100000000000000000000',
+        ...(parallel ? ['--parallel'] : []),
+      ],
+      anvil.rpcUrl,
+    );
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
-    const scheduled = runCli([
-      'schedule', '--fixture', specFile, '--plan', planFile, '--deployers', parallel ? [primary, secondary].join(',') : primary,
-      ...(parallel ? ['--parallel'] : []),
-    ], anvil.rpcUrl);
+    const scheduled = runCli(
+      [
+        'schedule',
+        '--fixture',
+        specFile,
+        '--plan',
+        planFile,
+        '--deployers',
+        parallel ? [primary, secondary].join(',') : primary,
+        ...(parallel ? ['--parallel'] : []),
+      ],
+      anvil.rpcUrl,
+    );
     assert.equal(scheduled.status, 0, `${scheduled.stderr}\n${scheduled.stdout}`);
     const started = performance.now();
-    const applied = runCli([
-      'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
-      ...(parallel ? ['--parallel'] : []),
-    ], anvil.rpcUrl, true);
+    const applied = runCli(
+      [
+        'apply',
+        '--json',
+        '--fixture',
+        specFile,
+        '--plan',
+        planFile,
+        '--state',
+        stateFile,
+        '--journal',
+        journalFile,
+        ...(parallel ? ['--parallel'] : []),
+      ],
+      anvil.rpcUrl,
+      true,
+    );
     const elapsedMs = performance.now() - started;
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     const result = JSON.parse(applied.stdout);
-    const journal = (await readFile(journalFile, 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
-    const receiptBlocks = Object.fromEntries(journal
-      .filter(record => record.phase === 'receipt')
-      .map(record => [record.actionId, BigInt(record.receipt.blockNumber)]));
+    const journal = (await readFile(journalFile, 'utf8'))
+      .split('\n')
+      .filter(Boolean)
+      .map(JSON.parse);
+    const receiptBlocks = Object.fromEntries(
+      journal
+        .filter((record) => record.phase === 'receipt')
+        .map((record) => [record.actionId, BigInt(record.receipt.blockNumber)]),
+    );
     return {
       elapsedMs,
       plan: JSON.parse(planned.stdout),
@@ -72,11 +118,16 @@ async function runScenario(parallel) {
   }
 }
 
-test('parallel CLI apply shares an independent timed block and preserves predicted addresses', async t => {
+test('parallel CLI apply shares an independent timed block and preserves predicted addresses', async (t) => {
   const sequential = await runScenario(false);
   const parallel = await runScenario(true);
 
-  const addresses = plan => Object.fromEntries(plan.resources.filter(resource => resource.kind === 'contract').map(resource => [resource.id, resource.address]));
+  const addresses = (plan) =>
+    Object.fromEntries(
+      plan.resources
+        .filter((resource) => resource.kind === 'contract')
+        .map((resource) => [resource.id, resource.address]),
+    );
   assert.deepEqual(addresses(parallel.plan), addresses(sequential.plan));
   assert.equal(sequential.result.transactionsSigned, 3);
   assert.equal(parallel.result.transactionsSigned, 3);
@@ -86,17 +137,25 @@ test('parallel CLI apply shares an independent timed block and preserves predict
   assert.equal(parallel.secondaryNonce, 1n);
   assert.equal(sequential.schedule.parallel, false);
   assert.equal(parallel.schedule.parallel, true);
-  assert.deepEqual(sequential.schedule.waves[0].batches.flat().map(action => action.signer), [primary, primary]);
-  assert.deepEqual(parallel.schedule.waves[0].batches.flat().map(action => action.signer), [primary, secondary]);
+  assert.deepEqual(
+    sequential.schedule.waves[0].batches.flat().map((action) => action.signer),
+    [primary, primary],
+  );
+  assert.deepEqual(
+    parallel.schedule.waves[0].batches.flat().map((action) => action.signer),
+    [primary, secondary],
+  );
   assert.equal(parallel.receiptBlocks['contract:alpha'], parallel.receiptBlocks['contract:beta']);
   assert.ok(parallel.receiptBlocks['contract:gamma'] > parallel.receiptBlocks['contract:alpha']);
 
   const speedup = sequential.elapsedMs / parallel.elapsedMs;
-  t.diagnostic(JSON.stringify({
-    sequentialMs: Math.round(sequential.elapsedMs),
-    parallelMs: Math.round(parallel.elapsedMs),
-    sequentialTransactions: sequential.result.transactionsSigned,
-    parallelTransactions: parallel.result.transactionsSigned,
-    speedup: Number(speedup.toFixed(2)),
-  }));
+  t.diagnostic(
+    JSON.stringify({
+      sequentialMs: Math.round(sequential.elapsedMs),
+      parallelMs: Math.round(parallel.elapsedMs),
+      sequentialTransactions: sequential.result.transactionsSigned,
+      parallelTransactions: parallel.result.transactionsSigned,
+      speedup: Number(speedup.toFixed(2)),
+    }),
+  );
 });

@@ -17,11 +17,11 @@ const KEYS = [
   '0x47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a',
 ];
 export const TEST_KEYS = KEYS;
-export const accounts = KEYS.map(key => privateKeyToAccount(key));
+export const accounts = KEYS.map((key) => privateKeyToAccount(key));
 export const [deployerA, deployerB, spare, owner, outsider] = accounts;
 export const ZERO = '0x0000000000000000000000000000000000000000';
 
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -42,8 +42,12 @@ export async function startAnvil(args = []) {
   process.env.ETHERPLAN_TEST_SIGNER_COORDINATION_ROOT = coordinationRoot;
   // Independent test chains must have distinct genesis identities even when
   // they use Anvil's default accounts and chain ID.
-  const timestamp = args.includes('--timestamp') ? [] : ['--timestamp', String(1_700_000_000 + randomInt(1_000_000_000))];
-  const child = spawn('anvil', ['--port', String(port), '--silent', ...timestamp, ...args], { stdio: 'ignore' });
+  const timestamp = args.includes('--timestamp')
+    ? []
+    : ['--timestamp', String(1_700_000_000 + randomInt(1_000_000_000))];
+  const child = spawn('anvil', ['--port', String(port), '--silent', ...timestamp, ...args], {
+    stdio: 'ignore',
+  });
   const url = `http://127.0.0.1:${port}`;
   const client = createPublicClient({ transport: http(url) });
   for (let attempt = 0; ; attempt++) {
@@ -72,41 +76,90 @@ export async function startAnvil(args = []) {
       }
       return result;
     },
-    stop: () => new Promise(resolve => {
-      if (child.exitCode !== null) return resolve();
-      child.once('exit', () => resolve());
-      child.kill('SIGKILL');
-    }),
+    stop: () =>
+      new Promise((resolve) => {
+        if (child.exitCode !== null) return resolve();
+        child.once('exit', () => resolve());
+        child.kill('SIGKILL');
+      }),
   };
 }
 
-const salt = digit => `0x${digit.repeat(64)}`;
+const salt = (digit) => `0x${digit.repeat(64)}`;
 
 // Four CREATE2 contracts and one owner call. alpha, beta, and registry are independent; gamma needs alpha; the call needs gamma and registry.
-export function fixture({ upstream = '0x0000000000000000000000000000000000000001', withCall = true } = {}) {
+export function fixture({
+  upstream = '0x0000000000000000000000000000000000000001',
+  withCall = true,
+} = {}) {
   const spec = {
     schema: 1,
     chainId: 31337,
-    values: { upstream, other: '0x0000000000000000000000000000000000000002', owner: owner.address, zero: ZERO },
+    values: {
+      upstream,
+      other: '0x0000000000000000000000000000000000000002',
+      owner: owner.address,
+      zero: ZERO,
+    },
     contracts: [
-      { id: 'alpha', artifact: 'Holder.json', salt: salt('a'), args: [{ ref: 'values.upstream' }], checks: { UPSTREAM: { ref: 'values.upstream' } }, senderIndependent: true },
-      { id: 'beta', artifact: 'Holder.json', salt: salt('b'), args: [{ ref: 'values.other' }], checks: { UPSTREAM: { ref: 'values.other' } }, senderIndependent: true },
-      { id: 'registry', artifact: 'Registry.json', salt: salt('c'), args: [{ ref: 'values.owner' }], senderIndependent: true },
-      { id: 'gamma', artifact: 'Holder.json', salt: salt('d'), args: [{ ref: 'contracts.alpha.address' }], checks: { UPSTREAM: { ref: 'contracts.alpha.address' } }, senderIndependent: true },
+      {
+        id: 'alpha',
+        artifact: 'Holder.json',
+        salt: salt('a'),
+        args: [{ ref: 'values.upstream' }],
+        checks: { UPSTREAM: { ref: 'values.upstream' } },
+        senderIndependent: true,
+      },
+      {
+        id: 'beta',
+        artifact: 'Holder.json',
+        salt: salt('b'),
+        args: [{ ref: 'values.other' }],
+        checks: { UPSTREAM: { ref: 'values.other' } },
+        senderIndependent: true,
+      },
+      {
+        id: 'registry',
+        artifact: 'Registry.json',
+        salt: salt('c'),
+        args: [{ ref: 'values.owner' }],
+        senderIndependent: true,
+      },
+      {
+        id: 'gamma',
+        artifact: 'Holder.json',
+        salt: salt('d'),
+        args: [{ ref: 'contracts.alpha.address' }],
+        checks: { UPSTREAM: { ref: 'contracts.alpha.address' } },
+        senderIndependent: true,
+      },
     ],
     calls: [
-      { id: 'bindGamma', target: 'registry', method: 'setBinding', args: [{ ref: 'contracts.gamma.address' }], check: { function: 'binding', equals: { ref: 'contracts.gamma.address' } }, before: { equals: { ref: 'values.zero' } } },
+      {
+        id: 'bindGamma',
+        target: 'registry',
+        method: 'setBinding',
+        args: [{ ref: 'contracts.gamma.address' }],
+        check: { function: 'binding', equals: { ref: 'contracts.gamma.address' } },
+        before: { equals: { ref: 'values.zero' } },
+      },
     ],
   };
   if (!withCall) spec.calls = [];
-  const artifacts = new Map([['alpha', holderArtifact], ['beta', holderArtifact], ['registry', registryArtifact], ['gamma', holderArtifact]]);
+  const artifacts = new Map([
+    ['alpha', holderArtifact],
+    ['beta', holderArtifact],
+    ['registry', registryArtifact],
+    ['gamma', holderArtifact],
+  ]);
   return { spec, artifacts };
 }
 
 // Independent CREATE2 deployments in one ready wave. The varying constructor
 // value and salt make every resource distinct while keeping one artifact.
 export function fixtureMany(n) {
-  if (!Number.isInteger(n) || n < 1 || n > 255) throw new Error('fixtureMany needs 1 to 255 contracts.');
+  if (!Number.isInteger(n) || n < 1 || n > 255)
+    throw new Error('fixtureMany needs 1 to 255 contracts.');
   const contracts = Array.from({ length: n }, (_, index) => {
     const name = `holder${String(index).padStart(2, '0')}`;
     const upstream = `0x${(index + 1).toString(16).padStart(40, '0')}`;
@@ -121,6 +174,6 @@ export function fixtureMany(n) {
   });
   return {
     spec: { schema: 1, chainId: 31337, values: {}, contracts, calls: [] },
-    artifacts: new Map(contracts.map(contract => [contract.id, holderArtifact])),
+    artifacts: new Map(contracts.map((contract) => [contract.id, holderArtifact])),
   };
 }

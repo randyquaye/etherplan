@@ -24,13 +24,32 @@ export function deriveSalt(mixer: string, label?: string): Hash {
 
 /** Validates a saltDerivation object from a spec or a state record. */
 export function assertSaltDerivation(value: unknown, location: string): SaltDerivation {
-  assert(isObject(value) && Object.keys(value).every(key => key === 'mixer' || key === 'label'), `${location} must be an object with mixer and an optional label.`);
-  assert(typeof value.mixer === 'string' && MIXER.test(value.mixer), `${location} mixer must be ${MIXER_HINT}.`);
-  assert(value.label === undefined || (typeof value.label === 'string' && MIXER.test(value.label)), `${location} label must be ${MIXER_HINT}.`);
-  return value.label === undefined ? { mixer: value.mixer } : { mixer: value.mixer, label: value.label };
+  assert(
+    isObject(value) && Object.keys(value).every((key) => key === 'mixer' || key === 'label'),
+    `${location} must be an object with mixer and an optional label.`,
+  );
+  assert(
+    typeof value.mixer === 'string' && MIXER.test(value.mixer),
+    `${location} mixer must be ${MIXER_HINT}.`,
+  );
+  assert(
+    value.label === undefined || (typeof value.label === 'string' && MIXER.test(value.label)),
+    `${location} label must be ${MIXER_HINT}.`,
+  );
+  return value.label === undefined
+    ? { mixer: value.mixer }
+    : { mixer: value.mixer, label: value.label };
 }
 
 /** Checks that a salt is the one its derivation produces. */
-export function assertDerivedSalt(salt: unknown, derivation: SaltDerivation, location: string): void {
-  assert(typeof salt === 'string' && salt.toLowerCase() === deriveSalt(derivation.mixer, derivation.label), `${location} salt is not the salt derived from its saltDerivation.`);
+export function assertDerivedSalt(
+  salt: unknown,
+  derivation: SaltDerivation,
+  location: string,
+): void {
+  assert(
+    typeof salt === 'string' &&
+      salt.toLowerCase() === deriveSalt(derivation.mixer, derivation.label),
+    `${location} salt is not the salt derived from its saltDerivation.`,
+  );
 }

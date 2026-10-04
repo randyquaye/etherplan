@@ -4,7 +4,12 @@ import { appendFile, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { currentTransaction, intentForSigned, liveTransactions, openJournal } from '../src/execution/journal.ts';
+import {
+  currentTransaction,
+  intentForSigned,
+  liveTransactions,
+  openJournal,
+} from '../src/execution/journal.ts';
 import { acquireLock, LockError } from '../src/execution/lock.ts';
 
 const chain = { id: 31337, genesisHash: `0x${'aa'.repeat(32)}` };
@@ -20,16 +25,39 @@ test('journal appends durable records with increasing sequence and reads them ba
   const journal = await openJournal(file);
   const [first, second] = await Promise.all([
     journal.append({ ...base, actionId: 'contract:a', phase: 'intent', signer, nonce: '0' }),
-    journal.append({ ...base, actionId: 'contract:a', phase: 'signed', signer, nonce: '0', rawTransaction: '0x02c0', transactionHash: `0x${'cc'.repeat(32)}` }),
+    journal.append({
+      ...base,
+      actionId: 'contract:a',
+      phase: 'signed',
+      signer,
+      nonce: '0',
+      rawTransaction: '0x02c0',
+      transactionHash: `0x${'cc'.repeat(32)}`,
+    }),
   ]);
   assert.deepEqual([first.sequence, second.sequence], [1, 2]);
   await journal.close();
   const lines = (await readFile(file, 'utf8')).trim().split('\n');
   assert.equal(lines.length, 2);
   const reopened = await openJournal(file);
-  assert.deepEqual(reopened.records.map(record => record.phase), ['intent', 'signed']);
+  assert.deepEqual(
+    reopened.records.map((record) => record.phase),
+    ['intent', 'signed'],
+  );
   assert.equal(reopened.tornTail, null);
-  assert.equal((await reopened.append({ ...base, actionId: 'contract:a', phase: 'broadcast', signer, nonce: '0', transactionHash: `0x${'cc'.repeat(32)}` })).sequence, 3);
+  assert.equal(
+    (
+      await reopened.append({
+        ...base,
+        actionId: 'contract:a',
+        phase: 'broadcast',
+        signer,
+        nonce: '0',
+        transactionHash: `0x${'cc'.repeat(32)}`,
+      })
+    ).sequence,
+    3,
+  );
   await reopened.close();
 });
 
@@ -42,10 +70,22 @@ test('an unterminated last line is removed on open, and earlier records survive'
   const recovered = await openJournal(file);
   assert.equal(recovered.tornTail, '{"formatVersion":1,"phase":"sig');
   assert.equal(recovered.records.length, 1);
-  await recovered.append({ ...base, actionId: 'contract:a', phase: 'failed', code: 'test', retryable: true });
+  await recovered.append({
+    ...base,
+    actionId: 'contract:a',
+    phase: 'failed',
+    code: 'test',
+    retryable: true,
+  });
   await recovered.close();
-  const lines = (await readFile(file, 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line));
-  assert.deepEqual(lines.map(line => line.phase), ['intent', 'failed']);
+  const lines = (await readFile(file, 'utf8'))
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    lines.map((line) => line.phase),
+    ['intent', 'failed'],
+  );
 });
 
 test('a corrupt complete line, a sequence regression, or signer metadata fails closed', async () => {
@@ -54,17 +94,56 @@ test('a corrupt complete line, a sequence regression, or signer metadata fails c
   await writeFile(corrupt, 'not json\n');
   await assert.rejects(openJournal(corrupt), /line 1 is not valid JSON/);
 
-  const record = { formatVersion: 1, ...base, actionId: 'contract:a', phase: 'intent', sequence: 2 };
+  const record = {
+    formatVersion: 1,
+    ...base,
+    actionId: 'contract:a',
+    phase: 'intent',
+    sequence: 2,
+  };
   const regressed = path.join(dir, 'regressed.jsonl');
-  await writeFile(regressed, `${JSON.stringify(record)}\n${JSON.stringify({ ...record, sequence: 1 })}\n`);
+  await writeFile(
+    regressed,
+    `${JSON.stringify(record)}\n${JSON.stringify({ ...record, sequence: 1 })}\n`,
+  );
   await assert.rejects(openJournal(regressed), /sequence is not increasing/);
 
   const journal = await openJournal(path.join(dir, 'secret.jsonl'));
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', privateKey: '0x01' }), /forbidden key privateKey/);
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', metadata: { secret_key: '0x01' } }), /forbidden key secret_key/);
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'intent', evidence: { result: undefined } }), /must contain only JSON values/);
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'unknown' }), /unknown phase/);
-  await assert.rejects(journal.append({ ...base, actionId: 'contract:a', phase: 'verified', creationProof: { kind: 'create' } }), /creationProof.*invalid fields/);
+  await assert.rejects(
+    journal.append({ ...base, actionId: 'contract:a', phase: 'intent', privateKey: '0x01' }),
+    /forbidden key privateKey/,
+  );
+  await assert.rejects(
+    journal.append({
+      ...base,
+      actionId: 'contract:a',
+      phase: 'intent',
+      metadata: { secret_key: '0x01' },
+    }),
+    /forbidden key secret_key/,
+  );
+  await assert.rejects(
+    journal.append({
+      ...base,
+      actionId: 'contract:a',
+      phase: 'intent',
+      evidence: { result: undefined },
+    }),
+    /must contain only JSON values/,
+  );
+  await assert.rejects(
+    journal.append({ ...base, actionId: 'contract:a', phase: 'unknown' }),
+    /unknown phase/,
+  );
+  await assert.rejects(
+    journal.append({
+      ...base,
+      actionId: 'contract:a',
+      phase: 'verified',
+      creationProof: { kind: 'create' },
+    }),
+    /creationProof.*invalid fields/,
+  );
   assert.equal(journal.records.length, 0);
   await journal.close();
 });
@@ -73,7 +152,12 @@ test('decoded verification and error evidence round-trip without treating field 
   const file = path.join(await directory(), 'journal.jsonl');
   const journal = await openJournal(file);
   const decoded = { secretHash: `0x${'12'.repeat(32)}`, privateKey: 'a contract field' };
-  await journal.append({ ...base, actionId: 'call:a', phase: 'verified', verification: { bindingChecks: [{ actual: decoded }] } });
+  await journal.append({
+    ...base,
+    actionId: 'call:a',
+    phase: 'verified',
+    verification: { bindingChecks: [{ actual: decoded }] },
+  });
   await journal.append({ ...base, actionId: 'call:a', phase: 'failed', evidence: { decoded } });
   await journal.close();
   const reopened = await openJournal(file);
@@ -84,7 +168,14 @@ test('decoded verification and error evidence round-trip without treating field 
 
 test('live transactions include retryable nonce races until their signatures are reconciled', () => {
   let sequence = 0;
-  const record = (actionId, phase, extra = {}) => ({ formatVersion: 1, ...base, actionId, phase, sequence: ++sequence, ...extra });
+  const record = (actionId, phase, extra = {}) => ({
+    formatVersion: 1,
+    ...base,
+    actionId,
+    phase,
+    sequence: ++sequence,
+    ...extra,
+  });
   const tx = (hash, nonce) => ({ signer, nonce, transactionHash: hash, rawTransaction: '0x02c0' });
   const h1 = `0x${'01'.repeat(32)}`;
   const h2 = `0x${'02'.repeat(32)}`;
@@ -99,14 +190,34 @@ test('live transactions include retryable nonce races until their signatures are
     record('contract:d', 'signed', tx(`0x${'04'.repeat(32)}`, '3')),
     record('contract:d', 'verified', { transactionHash: `0x${'04'.repeat(32)}` }),
   ];
-  assert.deepEqual(liveTransactions(records).map(item => [item.latest.phase, item.signed.transactionHash]), [['broadcast', h1], ['failed', h2], ['receipt', h3]]);
-  assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:c')).phase, 'receipt');
-  assert.equal(currentTransaction(records.filter(item => item.actionId === 'contract:a')).phase, 'broadcast');
+  assert.deepEqual(
+    liveTransactions(records).map((item) => [item.latest.phase, item.signed.transactionHash]),
+    [
+      ['broadcast', h1],
+      ['failed', h2],
+      ['receipt', h3],
+    ],
+  );
+  assert.equal(
+    currentTransaction(records.filter((item) => item.actionId === 'contract:c')).phase,
+    'receipt',
+  );
+  assert.equal(
+    currentTransaction(records.filter((item) => item.actionId === 'contract:a')).phase,
+    'broadcast',
+  );
 });
 
 test('a live signature uses exactly one intent from its own action and attempt', () => {
   let sequence = 0;
-  const record = (actionId, phase, extra = {}) => ({ formatVersion: 1, ...base, actionId, phase, sequence: ++sequence, ...extra });
+  const record = (actionId, phase, extra = {}) => ({
+    formatVersion: 1,
+    ...base,
+    actionId,
+    phase,
+    sequence: ++sequence,
+    ...extra,
+  });
   const old = record('contract:a', 'intent');
   const foreign = record('contract:b', 'intent');
   const first = record('contract:a', 'signed');
@@ -116,27 +227,59 @@ test('a live signature uses exactly one intent from its own action and attempt',
   const signed = record('contract:a', 'signed');
   assert.equal(intentForSigned([old, foreign, first, failed, current, signed], signed), current);
   assert.throws(() => intentForSigned([old, foreign, first, failed, signed], signed), /found 0/);
-  assert.throws(() => intentForSigned([old, foreign, first, failed, current, duplicate, signed], signed), /found 2/);
+  assert.throws(
+    () => intentForSigned([old, foreign, first, failed, current, duplicate, signed], signed),
+    /found 2/,
+  );
   const otherChain = { ...current, chain: { ...chain, genesisHash: `0x${'cc'.repeat(32)}` } };
-  assert.throws(() => intentForSigned([old, foreign, first, failed, otherChain, signed], signed), /found 0/);
+  assert.throws(
+    () => intentForSigned([old, foreign, first, failed, otherChain, signed], signed),
+    /found 0/,
+  );
 });
 
 test('the writer lock excludes a live holder and recovers only a dead holder on this host', async () => {
   const dir = await directory();
   const file = path.join(dir, 'state.json.lock');
   const lock = await acquireLock(file, { planHash: base.planHash });
-  await assert.rejects(acquireLock(file, { planHash: base.planHash }), error => error instanceof LockError && error.holder.pid === process.pid);
+  await assert.rejects(
+    acquireLock(file, { planHash: base.planHash }),
+    (error) => error instanceof LockError && error.holder.pid === process.pid,
+  );
   await lock.release();
 
-  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], { encoding: 'utf8' });
+  const dead = spawnSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
+    encoding: 'utf8',
+  });
   const deadPid = Number(dead.stdout);
-  await writeFile(file, JSON.stringify({ id: 'stale', pid: deadPid, host: os.hostname(), planHash: base.planHash, acquiredAt: 'then' }));
+  await writeFile(
+    file,
+    JSON.stringify({
+      id: 'stale',
+      pid: deadPid,
+      host: os.hostname(),
+      planHash: base.planHash,
+      acquiredAt: 'then',
+    }),
+  );
   const recovered = await acquireLock(file, { planHash: base.planHash });
   assert.equal(recovered.recovered.pid, deadPid);
   await recovered.release();
 
-  await writeFile(file, JSON.stringify({ id: 'remote', pid: deadPid, host: 'another-host', planHash: base.planHash, acquiredAt: 'then' }));
-  await assert.rejects(acquireLock(file, { planHash: base.planHash }), /held by pid .* on another-host/);
+  await writeFile(
+    file,
+    JSON.stringify({
+      id: 'remote',
+      pid: deadPid,
+      host: 'another-host',
+      planHash: base.planHash,
+      acquiredAt: 'then',
+    }),
+  );
+  await assert.rejects(
+    acquireLock(file, { planHash: base.planHash }),
+    /held by pid .* on another-host/,
+  );
   await writeFile(file, '');
   await assert.rejects(acquireLock(file, { planHash: base.planHash }), /unreadable/);
 });
@@ -144,7 +287,10 @@ test('the writer lock excludes a live holder and recovers only a dead holder on 
 test('a lock release removes only its own lock file', async () => {
   const file = path.join(await directory(), 'state.json.lock');
   const lock = await acquireLock(file, { planHash: base.planHash });
-  await writeFile(file, JSON.stringify({ id: 'someone-else', pid: process.pid, host: os.hostname() }));
+  await writeFile(
+    file,
+    JSON.stringify({ id: 'someone-else', pid: process.pid, host: os.hostname() }),
+  );
   await lock.release();
   assert.equal(JSON.parse(await readFile(file, 'utf8')).id, 'someone-else');
 });

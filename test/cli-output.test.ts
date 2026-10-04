@@ -17,8 +17,17 @@ const state = {
     'external:token': { address: token, transactions: [] },
     'call:configure': { address: registry, transactions: [] },
     'contract:registry': {
-      address: registry, artifactHash: hash, initcodeHash: null, inputs: [], inputsHash: hash,
-      priorInputs: null, priorInputsHash: null, salt: null, codeHash: hash, proofHash: hash, transactions: [],
+      address: registry,
+      artifactHash: hash,
+      initcodeHash: null,
+      inputs: [],
+      inputsHash: hash,
+      priorInputs: null,
+      priorInputsHash: null,
+      salt: null,
+      codeHash: hash,
+      proofHash: hash,
+      transactions: [],
     },
   },
 };
@@ -65,16 +74,25 @@ test('output reads validated local state without an RPC and prints JSON for all 
     assert.equal(workspace.status, 0, workspace.stderr);
     assert.deepEqual(JSON.parse(workspace.stdout).addresses, { 'contract:registry': token });
 
-    await writeFile(path.join(directory, 'main.ethpconfig'), 'defaults {\n  state = "deploy/state.json"\n}\n');
+    await writeFile(
+      path.join(directory, 'main.ethpconfig'),
+      'defaults {\n  state = "deploy/state.json"\n}\n',
+    );
     await mkdir(path.join(directory, 'deploy/blue'), { recursive: true });
     await writeFile(path.join(directory, 'deploy/blue/state.json'), JSON.stringify(blue));
     const configured = cli(directory, 'output', '--workspace', 'blue');
     assert.equal(configured.status, 0, configured.stderr);
-    assert.deepEqual(JSON.parse(configured.stdout).addresses, { 'contract:registry': token, 'external:token': token });
+    assert.deepEqual(JSON.parse(configured.stdout).addresses, {
+      'contract:registry': token,
+      'external:token': token,
+    });
 
     const defaultEthp = cli(directory, 'output', '--workspace', 'blue');
     assert.equal(defaultEthp.status, 0, defaultEthp.stderr);
-    assert.deepEqual(JSON.parse(defaultEthp.stdout).addresses, JSON.parse(configured.stdout).addresses);
+    assert.deepEqual(
+      JSON.parse(defaultEthp.stdout).addresses,
+      JSON.parse(configured.stdout).addresses,
+    );
     const withoutSpec = cli(directory, 'output', '--state', stateFile, '--id', 'external:token');
     assert.equal(withoutSpec.status, 0, withoutSpec.stderr);
     assert.deepEqual(JSON.parse(withoutSpec.stdout), {

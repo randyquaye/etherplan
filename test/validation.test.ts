@@ -25,27 +25,56 @@ function prepared(spec, artifactMap = artifacts) {
 test('checks require view or pure ABI functions in contracts, externals, and calls', () => {
   for (const stateMutability of ['nonpayable', 'payable']) {
     const artifact = structuredClone(artifacts.get('stateFixture'));
-    artifact.abi.find(item => item.name === 'BENEFICIARY').stateMutability = stateMutability;
-    assert.throws(() => prepared(base, new Map([['stateFixture', artifact]])), /contract:stateFixture check BENEFICIARY.*view or pure/);
+    artifact.abi.find((item) => item.name === 'BENEFICIARY').stateMutability = stateMutability;
+    assert.throws(
+      () => prepared(base, new Map([['stateFixture', artifact]])),
+      /contract:stateFixture check BENEFICIARY.*view or pure/,
+    );
 
     const external = structuredClone(base);
-    external.externals = { feed: { address: ADDRESS, abi: [{ type: 'function', name: 'answer', inputs: [], outputs: [{ type: 'uint256' }], stateMutability }], checks: { answer: '1' } } };
+    external.externals = {
+      feed: {
+        address: ADDRESS,
+        abi: [
+          {
+            type: 'function',
+            name: 'answer',
+            inputs: [],
+            outputs: [{ type: 'uint256' }],
+            stateMutability,
+          },
+        ],
+        checks: { answer: '1' },
+      },
+    };
     assert.throws(() => prepared(external), /external:feed check answer.*view or pure/);
 
     const callArtifact = structuredClone(artifacts.get('stateFixture'));
-    callArtifact.abi.find(item => item.name === 'binding').stateMutability = stateMutability;
-    assert.throws(() => prepared(base, new Map([['stateFixture', callArtifact]])), /call:bind check binding after.*view or pure/);
+    callArtifact.abi.find((item) => item.name === 'binding').stateMutability = stateMutability;
+    assert.throws(
+      () => prepared(base, new Map([['stateFixture', callArtifact]])),
+      /call:bind check binding after.*view or pure/,
+    );
 
     const resources = prepared(base).resources;
-    const call = resources.find(item => item.kind === 'call');
+    const call = resources.find((item) => item.kind === 'call');
     call.abi = structuredClone(call.abi);
-    call.abi.push({ type: 'function', name: 'mutatingCheck', inputs: [], outputs: [{ type: 'address' }], stateMutability });
+    call.abi.push({
+      type: 'function',
+      name: 'mutatingCheck',
+      inputs: [],
+      outputs: [{ type: 'address' }],
+      stateMutability,
+    });
     call.before.functionName = 'mutatingCheck';
-    assert.throws(() => validateResources(resources), /call:bind check binding before.*view or pure/);
+    assert.throws(
+      () => validateResources(resources),
+      /call:bind check binding before.*view or pure/,
+    );
   }
 
   const artifact = structuredClone(artifacts.get('stateFixture'));
-  artifact.abi.find(item => item.name === 'BENEFICIARY').stateMutability = 'pure';
+  artifact.abi.find((item) => item.name === 'BENEFICIARY').stateMutability = 'pure';
   assert.doesNotThrow(() => prepared(base, new Map([['stateFixture', artifact]])));
 });
 
@@ -53,24 +82,51 @@ test('offline validation checks getters on absent contracts and externals', () =
   const wrongName = structuredClone(base);
   wrongName.contracts[0].checks.BENEFICIARY_TYPO = wrongName.contracts[0].checks.BENEFICIARY;
   delete wrongName.contracts[0].checks.BENEFICIARY;
-  assert.throws(() => prepared(wrongName), /contract:stateFixture check BENEFICIARY_TYPO.*no ABI function/);
+  assert.throws(
+    () => prepared(wrongName),
+    /contract:stateFixture check BENEFICIARY_TYPO.*no ABI function/,
+  );
 
   const wrongOutput = structuredClone(base);
   wrongOutput.contracts[0].checks.BENEFICIARY = 'not an address';
-  assert.throws(() => prepared(wrongOutput), /contract:stateFixture check BENEFICIARY.*valid address/);
+  assert.throws(
+    () => prepared(wrongOutput),
+    /contract:stateFixture check BENEFICIARY.*valid address/,
+  );
 
   const extraTupleField = structuredClone(base);
   extraTupleField.contracts[0].checks.details = { owner: ADDRESS, unexpected: ADDRESS };
   const withTuple = structuredClone(artifacts.get('stateFixture'));
-  withTuple.abi.push({ type: 'function', name: 'details', inputs: [], outputs: [{ type: 'tuple', components: [{ name: 'owner', type: 'address' }] }], stateMutability: 'view' });
-  assert.throws(() => prepared(extraTupleField, new Map([['stateFixture', withTuple]])), /contract:stateFixture check details.*valid tuple/);
+  withTuple.abi.push({
+    type: 'function',
+    name: 'details',
+    inputs: [],
+    outputs: [{ type: 'tuple', components: [{ name: 'owner', type: 'address' }] }],
+    stateMutability: 'view',
+  });
+  assert.throws(
+    () => prepared(extraTupleField, new Map([['stateFixture', withTuple]])),
+    /contract:stateFixture check details.*valid tuple/,
+  );
 
   const external = structuredClone(base);
   external.externals = { feed: { address: ADDRESS, checks: { answer: '1' } } };
   assert.throws(() => prepared(external), /external:feed check answer.*needs an ABI/);
   external.externals.feed.abi = [
-    { type: 'function', name: 'answer', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
-    { type: 'function', name: 'answer', inputs: [], outputs: [{ type: 'uint256' }], stateMutability: 'view' },
+    {
+      type: 'function',
+      name: 'answer',
+      inputs: [],
+      outputs: [{ type: 'uint256' }],
+      stateMutability: 'view',
+    },
+    {
+      type: 'function',
+      name: 'answer',
+      inputs: [],
+      outputs: [{ type: 'uint256' }],
+      stateMutability: 'view',
+    },
   ];
   assert.throws(() => prepared(external), /external:feed check answer.*more than one ABI function/);
   external.externals.feed.abi.pop();
@@ -90,8 +146,11 @@ test('offline validation checks dormant call methods, arguments, and predicates'
   const shortArray = structuredClone(base);
   shortArray.calls[0].args = [[ADDRESS]];
   const withArrayMethod = structuredClone(artifacts.get('stateFixture'));
-  withArrayMethod.abi.find(item => item.name === 'setBinding').inputs[0].type = 'address[2]';
-  assert.throws(() => prepared(shortArray, new Map([['stateFixture', withArrayMethod]])), /call:bind method setBinding.*valid address\[2\]/);
+  withArrayMethod.abi.find((item) => item.name === 'setBinding').inputs[0].type = 'address[2]';
+  assert.throws(
+    () => prepared(shortArray, new Map([['stateFixture', withArrayMethod]])),
+    /call:bind method setBinding.*valid address\[2\]/,
+  );
 
   const wrongGetter = structuredClone(base);
   wrongGetter.calls[0].check.function = 'bindng';
@@ -105,12 +164,24 @@ test('offline validation checks dormant call methods, arguments, and predicates'
   badCheckArgs.calls[0].check.function = 'byOwner';
   badCheckArgs.calls[0].check.args = ['not an address'];
   const withGetter = structuredClone(artifacts.get('stateFixture'));
-  withGetter.abi.push({ type: 'function', name: 'byOwner', inputs: [{ name: 'owner', type: 'address' }], outputs: [{ type: 'address' }], stateMutability: 'view' });
-  assert.throws(() => prepared(badCheckArgs, new Map([['stateFixture', withGetter]])), /call:bind check byOwner after.*valid address/);
+  withGetter.abi.push({
+    type: 'function',
+    name: 'byOwner',
+    inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [{ type: 'address' }],
+    stateMutability: 'view',
+  });
+  assert.throws(
+    () => prepared(badCheckArgs, new Map([['stateFixture', withGetter]])),
+    /call:bind check byOwner after.*valid address/,
+  );
 
   const overloaded = structuredClone(artifacts.get('stateFixture'));
-  overloaded.abi.push(structuredClone(overloaded.abi.find(item => item.name === 'setBinding')));
-  assert.throws(() => prepared(base, new Map([['stateFixture', overloaded]])), /call:bind method setBinding.*more than one ABI function/);
+  overloaded.abi.push(structuredClone(overloaded.abi.find((item) => item.name === 'setBinding')));
+  assert.throws(
+    () => prepared(base, new Map([['stateFixture', overloaded]])),
+    /call:bind method setBinding.*more than one ABI function/,
+  );
 });
 
 test('offline validation checks constructor inputs and all declared libraries', () => {
@@ -120,7 +191,10 @@ test('offline validation checks constructor inputs and all declared libraries', 
 
   const unknownLibrary = structuredClone(base);
   unknownLibrary.contracts[0].libraries = { 'Other.sol:Missing': ADDRESS };
-  assert.throws(() => prepared(unknownLibrary), /contract:stateFixture libraries.*Unknown linked library Other.sol:Missing/);
+  assert.throws(
+    () => prepared(unknownLibrary),
+    /contract:stateFixture libraries.*Unknown linked library Other.sol:Missing/,
+  );
 
   const imported = structuredClone(base);
   imported.contracts[0].address = ADDRESS;
@@ -142,14 +216,29 @@ test('apply preflight rejects an old invalid plan without invoking a signer or b
     plan.planHash = hashJson(fields);
     const signer = {
       address: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
-      async signTransaction() { signatures++; throw new Error('Signer should not be called.'); },
+      async signTransaction() {
+        signatures++;
+        throw new Error('Signer should not be called.');
+      },
     };
-    const client = { async request() { broadcasts++; throw new Error('Broadcast should not be called.'); } };
-    await assert.rejects(applyPlan({
-      plan, spec, artifacts: new Map([['example', normalizedArtifact]]), client,
-      signers: { deployer: [signer] },
-      stateFile: path.join(directory, 'state.json'), journalFile: path.join(directory, 'journal.jsonl'),
-    }), /contract:example check misspelled.*no ABI function/);
+    const client = {
+      async request() {
+        broadcasts++;
+        throw new Error('Broadcast should not be called.');
+      },
+    };
+    await assert.rejects(
+      applyPlan({
+        plan,
+        spec,
+        artifacts: new Map([['example', normalizedArtifact]]),
+        client,
+        signers: { deployer: [signer] },
+        stateFile: path.join(directory, 'state.json'),
+        journalFile: path.join(directory, 'journal.jsonl'),
+      }),
+      /contract:example check misspelled.*no ABI function/,
+    );
     assert.equal(signatures, 0);
     assert.equal(broadcasts, 0);
   } finally {

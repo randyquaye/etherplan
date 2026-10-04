@@ -2,13 +2,35 @@ import type { Address, Hash } from '../types.ts';
 
 export type CommandName = keyof typeof COMMANDS;
 export type CliOptions = {
-  value?: string; out?: string; plan?: string; state?: string; journal?: string; backend?: string;
-  'signer-module'?: string; id?: string; 'creation-tx'?: Hash; deployers?: string; owner?: Address;
-  'max-spend-wei'?: string; 'max-fee-per-gas'?: string; 'priority-fee-per-gas'?: string; 'gas-multiplier'?: string;
-  'replace-max-fee-per-gas'?: string; 'replace-priority-fee-per-gas'?: string; 'replace-max-cost-wei'?: string;
-  parallel?: boolean; pipeline?: boolean; rebaseline?: boolean; reconfigure?: boolean;
-  'receipt-timeout-ms'?: string; 'verification-timeout-ms'?: string; quiet?: boolean; json?: boolean;
-  var?: string[]; 'var-file'?: string[]; workspace?: string;
+  value?: string;
+  out?: string;
+  plan?: string;
+  state?: string;
+  journal?: string;
+  backend?: string;
+  'signer-module'?: string;
+  id?: string;
+  'creation-tx'?: Hash;
+  deployers?: string;
+  owner?: Address;
+  'max-spend-wei'?: string;
+  'max-fee-per-gas'?: string;
+  'priority-fee-per-gas'?: string;
+  'gas-multiplier'?: string;
+  'replace-max-fee-per-gas'?: string;
+  'replace-priority-fee-per-gas'?: string;
+  'replace-max-cost-wei'?: string;
+  parallel?: boolean;
+  pipeline?: boolean;
+  rebaseline?: boolean;
+  reconfigure?: boolean;
+  'receipt-timeout-ms'?: string;
+  'verification-timeout-ms'?: string;
+  quiet?: boolean;
+  json?: boolean;
+  var?: string[];
+  'var-file'?: string[];
+  workspace?: string;
 };
 export function isCommand(value: string | undefined): value is CommandName {
   return value !== undefined && Object.hasOwn(COMMANDS, value);
@@ -16,19 +38,87 @@ export function isCommand(value: string | undefined): value is CommandName {
 // Options that choose the spec's variable values and state. Every command that reads a spec takes them.
 const INPUTS = ['var', 'var-file', 'workspace'];
 export const COMMANDS = {
-  init: { description: 'Initialize and check the configured AWS state backend.', options: ['backend', 'state', 'journal', 'reconfigure', ...INPUTS] },
-  validate: { description: 'Check the project and artifacts without an RPC connection.', options: [...INPUTS] },
-  compile: { description: 'Print the project\'s canonical JSON spec.', options: [...INPUTS] },
-  graph: { description: 'Show resource dependencies without loading artifacts.', options: [...INPUTS] },
-  impact: { description: 'Show resources affected by a named value.', options: ['value', ...INPUTS] },
-  plan: { description: 'Inspect the chain and save a reviewable plan.', options: ['out', 'state', 'journal', 'backend', 'signer-module', 'pipeline', 'deployers', 'owner', 'parallel', 'max-spend-wei', ...INPUTS] },
-  apply: { description: 'Create and approve a fresh plan, or apply one supplied with --plan.', options: ['plan', 'state', 'journal', 'backend', 'signer-module', 'parallel', 'pipeline', 'quiet', 'json', 'max-spend-wei', 'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'receipt-timeout-ms', 'verification-timeout-ms', ...INPUTS] },
-  verify: { description: 'Verify desired state against the chain.', options: ['state', 'backend', 'json', ...INPUTS] },
-  schedule: { description: 'Preview signer assignments and execution waves.', options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS] },
-  import: { description: 'Record a verified existing contract in local state.', options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS] },
-  output: { description: 'Print recorded contract and external addresses as JSON.', options: ['state', 'backend', 'id', 'workspace'] },
-  adapters: { description: 'Generate optional TypeScript artifact adapters.', options: ['out', ...INPUTS] },
-  status: { description: 'Inspect a deployment in the production backend.', options: ['plan', 'backend'] },
+  init: {
+    description: 'Initialize and check the configured AWS state backend.',
+    options: ['backend', 'state', 'journal', 'reconfigure', ...INPUTS],
+  },
+  validate: {
+    description: 'Check the project and artifacts without an RPC connection.',
+    options: [...INPUTS],
+  },
+  compile: { description: "Print the project's canonical JSON spec.", options: [...INPUTS] },
+  graph: {
+    description: 'Show resource dependencies without loading artifacts.',
+    options: [...INPUTS],
+  },
+  impact: {
+    description: 'Show resources affected by a named value.',
+    options: ['value', ...INPUTS],
+  },
+  plan: {
+    description: 'Inspect the chain and save a reviewable plan.',
+    options: [
+      'out',
+      'state',
+      'journal',
+      'backend',
+      'signer-module',
+      'pipeline',
+      'deployers',
+      'owner',
+      'parallel',
+      'max-spend-wei',
+      ...INPUTS,
+    ],
+  },
+  apply: {
+    description: 'Create and approve a fresh plan, or apply one supplied with --plan.',
+    options: [
+      'plan',
+      'state',
+      'journal',
+      'backend',
+      'signer-module',
+      'parallel',
+      'pipeline',
+      'quiet',
+      'json',
+      'max-spend-wei',
+      'max-fee-per-gas',
+      'priority-fee-per-gas',
+      'gas-multiplier',
+      'replace-max-fee-per-gas',
+      'replace-priority-fee-per-gas',
+      'replace-max-cost-wei',
+      'receipt-timeout-ms',
+      'verification-timeout-ms',
+      ...INPUTS,
+    ],
+  },
+  verify: {
+    description: 'Verify desired state against the chain.',
+    options: ['state', 'backend', 'json', ...INPUTS],
+  },
+  schedule: {
+    description: 'Preview signer assignments and execution waves.',
+    options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS],
+  },
+  import: {
+    description: 'Record a verified existing contract in local state.',
+    options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS],
+  },
+  output: {
+    description: 'Print recorded contract and external addresses as JSON.',
+    options: ['state', 'backend', 'id', 'workspace'],
+  },
+  adapters: {
+    description: 'Generate optional TypeScript artifact adapters.',
+    options: ['out', ...INPUTS],
+  },
+  status: {
+    description: 'Inspect a deployment in the production backend.',
+    options: ['plan', 'backend'],
+  },
 };
 const OPTION_HELP = {
   value: 'Value name for impact',
@@ -46,45 +136,104 @@ const OPTION_HELP = {
   owner: 'Owner signer address for planning or scheduling',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
   'max-fee-per-gas': 'Maximum fee per gas in wei for new transactions (default: RPC estimate)',
-  'priority-fee-per-gas': 'Priority fee per gas in wei for new transactions (default: RPC estimate)',
+  'priority-fee-per-gas':
+    'Priority fee per gas in wei for new transactions (default: RPC estimate)',
   'gas-multiplier': 'Gas limit as a multiple of the RPC gas estimate, at least 1 (default: 1.2)',
   'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
-  'receipt-timeout-ms': 'Time to wait for each transaction receipt before stopping (default: 120000 ms)',
-  'verification-timeout-ms': 'Time to retry provider errors after a successful deployment (default: 300000 ms)',
-  quiet: 'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
+  'receipt-timeout-ms':
+    'Time to wait for each transaction receipt before stopping (default: 120000 ms)',
+  'verification-timeout-ms':
+    'Time to retry provider errors after a successful deployment (default: 300000 ms)',
+  quiet:
+    'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
   json: 'Print the structured result as JSON for scripts',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
   'var-file': 'Read variable values from an .ethpvars file; repeatable, later files win',
-  workspace: 'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
+  workspace:
+    'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
-const VALUE_OPTIONS = new Set(['value', 'out', 'plan', 'state', 'journal', 'backend', 'signer-module', 'id', 'creation-tx', 'deployers', 'owner', 'max-spend-wei', 'max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'replace-max-fee-per-gas', 'replace-priority-fee-per-gas', 'replace-max-cost-wei', 'receipt-timeout-ms', 'verification-timeout-ms', 'workspace']);
+const VALUE_OPTIONS = new Set([
+  'value',
+  'out',
+  'plan',
+  'state',
+  'journal',
+  'backend',
+  'signer-module',
+  'id',
+  'creation-tx',
+  'deployers',
+  'owner',
+  'max-spend-wei',
+  'max-fee-per-gas',
+  'priority-fee-per-gas',
+  'gas-multiplier',
+  'replace-max-fee-per-gas',
+  'replace-priority-fee-per-gas',
+  'replace-max-cost-wei',
+  'receipt-timeout-ms',
+  'verification-timeout-ms',
+  'workspace',
+]);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
-const BOOLEAN_OPTIONS = new Set(['parallel', 'pipeline', 'quiet', 'json', 'rebaseline', 'reconfigure']);
-export const SPEC_COMMANDS = Object.fromEntries(Object.entries(COMMANDS).filter(([name]) => name !== 'status').map(([name, details]) => [name, details.options]));
+const BOOLEAN_OPTIONS = new Set([
+  'parallel',
+  'pipeline',
+  'quiet',
+  'json',
+  'rebaseline',
+  'reconfigure',
+]);
+export const SPEC_COMMANDS = Object.fromEntries(
+  Object.entries(COMMANDS)
+    .filter(([name]) => name !== 'status')
+    .map(([name, details]) => [name, details.options]),
+);
 
 export class UsageError extends Error {}
 
 export function usage(command?: CommandName): string {
   if (!command) {
-    return `Usage: etherplan <command> [options]\n\nRun project commands from a directory containing main.ethp.\n\nCommands:\n${Object.entries(COMMANDS).map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`).join('\n')}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
+    return `Usage: etherplan <command> [options]\n\nRun project commands from a directory containing main.ethp.\n\nCommands:\n${Object.entries(
+      COMMANDS,
+    )
+      .map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`)
+      .join(
+        '\n',
+      )}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
   }
   const details = COMMANDS[command];
-  const describe = (name: keyof typeof OPTION_HELP) => name === 'out' && command === 'plan' ? 'Local plan file (default: ./plan.json; - skips the local file)'
-    : name === 'out' ? 'Adapter directory (default: ./generated)'
-      : name === 'plan' && command === 'apply' ? 'Saved plan file; omit to create and approve a fresh plan'
-        : name === 'plan' && command === 'status' ? 'Saved plan file (default: ./plan.json)'
-          : OPTION_HELP[name];
-  const environment = command === 'apply' ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-    : ['init', 'plan', 'verify', 'schedule', 'import'].includes(command)
-      ? '\n\nRequires ETH_RPC_URL.' : command === 'output' ? '\n\n--backend requires ETH_RPC_URL.' : '';
-  const signers = command === 'apply'
-    ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.' : '';
-  const project = command === 'status' ? '' : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
-  return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map(name => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
+  const describe = (name: keyof typeof OPTION_HELP) =>
+    name === 'out' && command === 'plan'
+      ? 'Local plan file (default: ./plan.json; - skips the local file)'
+      : name === 'out'
+        ? 'Adapter directory (default: ./generated)'
+        : name === 'plan' && command === 'apply'
+          ? 'Saved plan file; omit to create and approve a fresh plan'
+          : name === 'plan' && command === 'status'
+            ? 'Saved plan file (default: ./plan.json)'
+            : OPTION_HELP[name];
+  const environment =
+    command === 'apply'
+      ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
+      : ['init', 'plan', 'verify', 'schedule', 'import'].includes(command)
+        ? '\n\nRequires ETH_RPC_URL.'
+        : command === 'output'
+          ? '\n\n--backend requires ETH_RPC_URL.'
+          : '';
+  const signers =
+    command === 'apply'
+      ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.'
+      : '';
+  const project =
+    command === 'status'
+      ? ''
+      : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
+  return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map((name) => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 
 export function parseOptions(args: string[]): CliOptions {
@@ -119,12 +268,17 @@ export function validateOptions(command: CommandName, options: CliOptions): void
   }
   if (command === 'impact' && !options.value) throw new UsageError('impact needs --value <name>.');
   for (const assignment of options.var ?? []) {
-    if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment)) throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);
+    if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment))
+      throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);
   }
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
   }
-  if (command === 'output' && options.id && !/^(contract|external):[a-z][a-zA-Z0-9_]*$/.test(options.id)) {
+  if (
+    command === 'output' &&
+    options.id &&
+    !/^(contract|external):[a-z][a-zA-Z0-9_]*$/.test(options.id)
+  ) {
     throw new UsageError('output --id needs contract:<name> or external:<name>.');
   }
 }
@@ -132,13 +286,25 @@ export function validateOptions(command: CommandName, options: CliOptions): void
 // Checks option combinations after .ethpconfig options are merged in.
 export function validateCombination(command: CommandName, options: CliOptions): void {
   if (command === 'plan') {
-    if (options['signer-module'] && (options.deployers || options.owner)) throw new UsageError('plan --signer-module supplies signer addresses; omit --deployers and --owner.');
-    if (options.pipeline && !options.deployers && !options['signer-module']) throw new UsageError('A pipeline plan needs --deployers <address,address> or --signer-module.');
-    if (options.parallel && !options.deployers && !options['signer-module']) throw new UsageError('plan --parallel needs --deployers <address,address> or --signer-module.');
-    if (options.owner && !options.deployers) throw new UsageError('plan --owner needs --deployers <address,address>.');
+    if (options['signer-module'] && (options.deployers || options.owner))
+      throw new UsageError(
+        'plan --signer-module supplies signer addresses; omit --deployers and --owner.',
+      );
+    if (options.pipeline && !options.deployers && !options['signer-module'])
+      throw new UsageError(
+        'A pipeline plan needs --deployers <address,address> or --signer-module.',
+      );
+    if (options.parallel && !options.deployers && !options['signer-module'])
+      throw new UsageError(
+        'plan --parallel needs --deployers <address,address> or --signer-module.',
+      );
+    if (options.owner && !options.deployers)
+      throw new UsageError('plan --owner needs --deployers <address,address>.');
   }
   if (command === 'apply' && options.pipeline && options.parallel) {
-    throw new UsageError('A pipeline apply reads the parallel setting from its saved plan; omit --parallel.');
+    throw new UsageError(
+      'A pipeline apply reads the parallel setting from its saved plan; omit --parallel.',
+    );
   }
   if (command === 'apply') validateApplyValues(options);
 }
@@ -147,19 +313,37 @@ const WHOLE = /^[0-9]+$/;
 
 // Config can supply these, so the checks run on the merged options.
 function validateApplyValues(options: CliOptions): void {
-  for (const name of ['max-fee-per-gas', 'priority-fee-per-gas', 'receipt-timeout-ms', 'verification-timeout-ms'] as const) {
+  for (const name of [
+    'max-fee-per-gas',
+    'priority-fee-per-gas',
+    'receipt-timeout-ms',
+    'verification-timeout-ms',
+  ] as const) {
     const value = options[name];
-    if (value !== undefined && (!WHOLE.test(value) || (name.endsWith('-ms') && !Number.isSafeInteger(Number(value))))) {
-      throw new UsageError(`--${name} must be a whole number of ${name.endsWith('-ms') ? 'milliseconds' : 'wei'}.`);
+    if (
+      value !== undefined &&
+      (!WHOLE.test(value) || (name.endsWith('-ms') && !Number.isSafeInteger(Number(value))))
+    ) {
+      throw new UsageError(
+        `--${name} must be a whole number of ${name.endsWith('-ms') ? 'milliseconds' : 'wei'}.`,
+      );
     }
   }
   const maxFee = options['max-fee-per-gas'];
   const priorityFee = options['priority-fee-per-gas'];
-  if ((maxFee === undefined) !== (priorityFee === undefined)) throw new UsageError('--max-fee-per-gas and --priority-fee-per-gas go together; give both or neither.');
-  if (maxFee !== undefined && BigInt(maxFee) === 0n) throw new UsageError('--max-fee-per-gas must be positive.');
-  if (maxFee !== undefined && BigInt(priorityFee!) > BigInt(maxFee)) throw new UsageError('--priority-fee-per-gas cannot exceed --max-fee-per-gas.');
+  if ((maxFee === undefined) !== (priorityFee === undefined))
+    throw new UsageError(
+      '--max-fee-per-gas and --priority-fee-per-gas go together; give both or neither.',
+    );
+  if (maxFee !== undefined && BigInt(maxFee) === 0n)
+    throw new UsageError('--max-fee-per-gas must be positive.');
+  if (maxFee !== undefined && BigInt(priorityFee!) > BigInt(maxFee))
+    throw new UsageError('--priority-fee-per-gas cannot exceed --max-fee-per-gas.');
   const multiplier = options['gas-multiplier'];
-  if (multiplier !== undefined && (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)) {
+  if (
+    multiplier !== undefined &&
+    (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)
+  ) {
     throw new UsageError('--gas-multiplier must be a decimal number no less than 1, such as 1.5.');
   }
 }

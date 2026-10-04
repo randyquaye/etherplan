@@ -1,5 +1,15 @@
 // Shapes of a parsed specification and its dependency graph. Source of truth: parseSpec and graph in index.ts.
-import type { Abi, Address, CallId, ContractId, ExternalId, Hash, JsonPrimitive, JsonValue, ResourceId } from '../types.ts';
+import type {
+  Abi,
+  Address,
+  CallId,
+  ContractId,
+  ExternalId,
+  Hash,
+  JsonPrimitive,
+  JsonValue,
+  ResourceId,
+} from '../types.ts';
 
 /** A spec before parseSpec: JSON from disk or a compiled .ethp document. */
 export type RawSpec = unknown;

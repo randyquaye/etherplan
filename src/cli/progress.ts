@@ -16,7 +16,9 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
     start(): void {
       started = Date.now();
       const resources = Array.isArray(plan.resources) ? plan.resources.length : 0;
-      write(`Applying plan ${plan.planHash} (chain ${plan.chain?.id ?? '?'}, ${resources} resource${resources === 1 ? '' : 's'})...`);
+      write(
+        `Applying plan ${plan.planHash} (chain ${plan.chain?.id ?? '?'}, ${resources} resource${resources === 1 ? '' : 's'})...`,
+      );
       timer = setInterval(() => {
         if (Date.now() - lastLine >= STILL_APPLYING_MS) {
           write(`Still applying (${Math.floor((Date.now() - started) / 1000)}s elapsed)...`);
@@ -33,7 +35,9 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
           write(`  ${event.actionId}: resuming transaction ${event.transactionHash}`);
           break;
         case 'intent':
-          write(`  ${event.actionId}: preparing transaction${event.nonce === undefined ? '' : ` (nonce ${event.nonce})`}...`);
+          write(
+            `  ${event.actionId}: preparing transaction${event.nonce === undefined ? '' : ` (nonce ${event.nonce})`}...`,
+          );
           break;
         case 'signed':
           write(`  ${event.actionId}: signed ${event.transactionHash}`);
@@ -42,7 +46,9 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
           write(`  ${event.actionId}: broadcasting ${event.transactionHash}...`);
           break;
         case 'broadcast':
-          write(`  ${event.actionId}: ${event.rebroadcast ? 'rebroadcast' : 'submitted'}; waiting for receipt...`);
+          write(
+            `  ${event.actionId}: ${event.rebroadcast ? 'rebroadcast' : 'submitted'}; waiting for receipt...`,
+          );
           break;
         case 'receipt':
           write(`  ${event.actionId}: receipt recorded; confirming and verifying...`);
@@ -63,7 +69,9 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
     complete(result: ApplyResult): void {
       const resources = result.resources.length;
       const transactions = result.transactionsSigned;
-      write(`Apply complete: ${resources} resource${resources === 1 ? '' : 's'}, ${transactions} transaction${transactions === 1 ? '' : 's'} signed.`);
+      write(
+        `Apply complete: ${resources} resource${resources === 1 ? '' : 's'}, ${transactions} transaction${transactions === 1 ? '' : 's'} signed.`,
+      );
     },
     stop(): void {
       if (timer) clearInterval(timer);

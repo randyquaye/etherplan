@@ -31,7 +31,8 @@ export type DecimalString = string;
  * The read-only chain client the planner, verifier, and executor call. Enumerated from call sites so a
  * fake in tests needs only these methods. `client.send` in kms-signer.ts is the AWS KMS client, not this.
  */
-export type Client = Pick<PublicClient,
+export type Client = Pick<
+  PublicClient,
   | 'getBlock'
   | 'getCode'
   | 'getTransactionCount'
@@ -43,18 +44,22 @@ export type Client = Pick<PublicClient,
   | 'readContract'
   | 'estimateGas'
   | 'estimateFeesPerGas'
-  | 'request'>;
+  | 'request'
+>;
 
 /**
  * What jsonSafe (execution/preflight.ts) returns for a value: bigint becomes a decimal string, undefined
  * properties are dropped, and everything else keeps its shape. Hex is lowercased at run time; the type cannot say so.
  */
-export type JsonSafe<T> =
-  T extends bigint ? DecimalString :
-  T extends string | number | boolean | null ? T :
-  T extends readonly (infer U)[] ? JsonSafe<U>[] :
-  T extends object ? { [K in keyof T]: JsonSafe<Exclude<T[K], undefined>> } :
-  T;
+export type JsonSafe<T> = T extends bigint
+  ? DecimalString
+  : T extends string | number | boolean | null
+    ? T
+    : T extends readonly (infer U)[]
+      ? JsonSafe<U>[]
+      : T extends object
+        ? { [K in keyof T]: JsonSafe<Exclude<T[K], undefined>> }
+        : T;
 
 /** `Omit` that distributes over a union instead of collapsing it to the shared keys. */
 export type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

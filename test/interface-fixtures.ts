@@ -13,7 +13,12 @@ const artifactFields = {
   abi: [],
   bytecode: { object: initcode, linkReferences: {} },
   deployedBytecode: { object: runtime, linkReferences: {}, immutableReferences: {} },
-  buildIdentity: { compiler: 'solc', version: '0.8.30', sourceHash: `0x${'22'.repeat(32)}`, settingsHash: `0x${'33'.repeat(32)}` },
+  buildIdentity: {
+    compiler: 'solc',
+    version: '0.8.30',
+    sourceHash: `0x${'22'.repeat(32)}`,
+    settingsHash: `0x${'33'.repeat(32)}`,
+  },
 };
 
 export const normalizedArtifact = { ...artifactFields, artifactHash: hashJson(artifactFields) };
@@ -51,7 +56,9 @@ export const verificationResult = {
   address,
   codeHash: keccak256(runtime),
   codeComparison: { mode: 'exact', matched: true },
-  proofs: [{ name: 'runtime', method: 'exact-runtime', expected: runtime, actual: runtime, matched: true }],
+  proofs: [
+    { name: 'runtime', method: 'exact-runtime', expected: runtime, actual: runtime, matched: true },
+  ],
   missingProofs: [],
   bindingChecks: [],
   status: 'verified',
@@ -64,23 +71,31 @@ const planFields = {
   stateHash: hashJson(null),
   specHash: hashJson(exampleSpec),
   artifactHashes: { 'contract:example': normalizedArtifact.artifactHash },
-  resources: [{
-    id: preparedResource.id,
-    kind: preparedResource.kind,
-    dependencies: [],
-    address,
-    artifactHash: preparedResource.artifactHash,
-    initcodeHash: preparedResource.initcodeHash,
-    inputsHash: preparedResource.inputsHash,
-    salt,
-    factory,
-    checks: [],
-    signerRole: 'deployer',
-    senderIndependent: true,
-    action: 'deploy',
-    observation: { ...verificationResult, codeHash: null, codeComparison: { mode: 'absent', matched: false }, proofs: [], status: 'conflict' },
-    tx: { to: factory.address, data: concatHex([salt, initcode]), value: '0' },
-  }],
+  resources: [
+    {
+      id: preparedResource.id,
+      kind: preparedResource.kind,
+      dependencies: [],
+      address,
+      artifactHash: preparedResource.artifactHash,
+      initcodeHash: preparedResource.initcodeHash,
+      inputsHash: preparedResource.inputsHash,
+      salt,
+      factory,
+      checks: [],
+      signerRole: 'deployer',
+      senderIndependent: true,
+      action: 'deploy',
+      observation: {
+        ...verificationResult,
+        codeHash: null,
+        codeComparison: { mode: 'absent', matched: false },
+        proofs: [],
+        status: 'conflict',
+      },
+      tx: { to: factory.address, data: concatHex([salt, initcode]), value: '0' },
+    },
+  ],
 };
 
 export const plan = { ...planFields, planHash: hashJson(planFields) };

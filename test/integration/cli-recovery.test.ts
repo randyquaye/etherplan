@@ -38,8 +38,12 @@ function runAsync(arguments_, rpcUrl) {
   });
   let stdout = '';
   let stderr = '';
-  child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.on('data', chunk => { stderr += chunk; });
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
   return { child, output: () => ({ stdout, stderr }) };
 }
 
@@ -56,9 +60,14 @@ async function waitForPhase(file, child, phase) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const records = await readJournal(file);
-    if (records.some(record => record.actionId === 'contract:stateFixture' && record.phase === phase)) return records;
+    if (
+      records.some(
+        (record) => record.actionId === 'contract:stateFixture' && record.phase === phase,
+      )
+    )
+      return records;
     if (child.exitCode !== null) throw new Error(`Apply exited before ${phase}.`);
-    await new Promise(resolve => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
   throw new Error(`Apply did not record ${phase} within 10 seconds.`);
 }
@@ -74,11 +83,11 @@ async function startRpcGate(target, stopAfter) {
     const body = Buffer.concat(chunks).toString('utf8');
     const payload = JSON.parse(body);
     const method = Array.isArray(payload) ? null : payload.method;
-    const shouldStall = !pass && (
-      (stopAfter === 'signed' && method === 'eth_sendRawTransaction') ||
-      (stopAfter === 'broadcast' && transactionSent && method === 'eth_getTransactionReceipt') ||
-      (stopAfter === 'receipt' && receiptReturned && method === 'eth_getBlockByNumber')
-    );
+    const shouldStall =
+      !pass &&
+      ((stopAfter === 'signed' && method === 'eth_sendRawTransaction') ||
+        (stopAfter === 'broadcast' && transactionSent && method === 'eth_getTransactionReceipt') ||
+        (stopAfter === 'receipt' && receiptReturned && method === 'eth_getBlockByNumber'));
     if (shouldStall) {
       stalled.add(response);
       response.on('close', () => stalled.delete(response));
@@ -97,7 +106,13 @@ async function startRpcGate(target, stopAfter) {
       response.end(text);
     } catch (error) {
       response.writeHead(502, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id ?? null, error: { code: -32000, message: error.message } }));
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: payload.id ?? null,
+          error: { code: -32000, message: error.message },
+        }),
+      );
     }
   });
   await new Promise((resolve, reject) => {
@@ -114,7 +129,7 @@ async function startRpcGate(target, stopAfter) {
     },
     async close() {
       this.release();
-      await new Promise(resolve => server.close(resolve));
+      await new Promise((resolve) => server.close(resolve));
     },
   };
 }
@@ -128,34 +143,98 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
     const journalFile = path.join(directory, 'journal.jsonl');
     let gate;
     try {
-      const planned = runSync(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
-        '--deployers', owner, '--owner', owner, '--max-spend-wei', '100000000000000000000'], anvil.rpcUrl);
+      const planned = runSync(
+        [
+          'plan',
+          '--fixture',
+          specFile,
+          '--out',
+          planFile,
+          '--state',
+          stateFile,
+          '--deployers',
+          owner,
+          '--owner',
+          owner,
+          '--max-spend-wei',
+          '100000000000000000000',
+        ],
+        anvil.rpcUrl,
+      );
       assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
       gate = await startRpcGate(anvil.rpcUrl, phase);
-      const running = runAsync([
-        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
-      ], gate.url);
+      const running = runAsync(
+        [
+          'apply',
+          '--json',
+          '--fixture',
+          specFile,
+          '--plan',
+          planFile,
+          '--state',
+          stateFile,
+          '--journal',
+          journalFile,
+        ],
+        gate.url,
+      );
       await waitForPhase(journalFile, running.child, phase);
       assert.equal(running.child.kill('SIGKILL'), true);
-      await new Promise(resolve => running.child.once('exit', resolve));
+      await new Promise((resolve) => running.child.once('exit', resolve));
       gate.release();
 
-      const resumed = runSync([
-        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
-      ], anvil.rpcUrl, true);
-      assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}\n${JSON.stringify(running.output())}`);
+      const resumed = runSync(
+        [
+          'apply',
+          '--json',
+          '--fixture',
+          specFile,
+          '--plan',
+          planFile,
+          '--state',
+          stateFile,
+          '--journal',
+          journalFile,
+        ],
+        anvil.rpcUrl,
+        true,
+      );
+      assert.equal(
+        resumed.status,
+        0,
+        `${resumed.stderr}\n${resumed.stdout}\n${JSON.stringify(running.output())}`,
+      );
       const result = JSON.parse(resumed.stdout);
       assert.equal(result.status, 'applied');
       assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), '0x2');
 
       const journalText = await readFile(journalFile, 'utf8');
       const journal = journalText.trim().split('\n').map(JSON.parse);
-      assert.equal(journal.filter(record => record.actionId === 'contract:stateFixture' && record.phase === 'signed').length, 1);
-      assert.equal(journal.filter(record => record.actionId === 'call:bind' && record.phase === 'signed').length, 1);
-      assert.equal(new Set(journal.filter(record => record.phase === 'signed').map(record => record.transactionHash)).size, 2);
+      assert.equal(
+        journal.filter(
+          (record) => record.actionId === 'contract:stateFixture' && record.phase === 'signed',
+        ).length,
+        1,
+      );
+      assert.equal(
+        journal.filter((record) => record.actionId === 'call:bind' && record.phase === 'signed')
+          .length,
+        1,
+      );
+      assert.equal(
+        new Set(
+          journal
+            .filter((record) => record.phase === 'signed')
+            .map((record) => record.transactionHash),
+        ).size,
+        2,
+      );
       assert.doesNotMatch(journalText, new RegExp(ownerKey.slice(2), 'i'));
 
-      const verified = runSync(['verify', '--fixture', specFile, '--state', stateFile], anvil.rpcUrl);
+      const verified = runSync(
+        ['verify', '--fixture', specFile, '--state', stateFile],
+        anvil.rpcUrl,
+      );
       assert.equal(verified.status, 0, `${verified.stderr}\n${verified.stdout}`);
     } finally {
       await gate?.close();

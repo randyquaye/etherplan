@@ -15,7 +15,8 @@ export interface Located {
 
 export type Punctuation = '=' | ':' | ',' | '.' | '{' | '}' | '[' | ']' | '(' | ')' | '-';
 
-export type TokenType = 'newline' | 'string' | 'number' | 'ident' | 'operator' | 'eof' | Punctuation;
+export type TokenType =
+  'newline' | 'string' | 'number' | 'ident' | 'operator' | 'eof' | Punctuation;
 
 export interface HclToken extends Located {
   type: TokenType;
@@ -81,7 +82,8 @@ export interface HclCall extends Located {
   args: HclExpression[];
 }
 
-export type HclExpression = HclLiteral | HclReference | HclList | HclObject | HclConditional | HclBinary | HclNot | HclCall;
+export type HclExpression =
+  HclLiteral | HclReference | HclList | HclObject | HclConditional | HclBinary | HclNot | HclCall;
 
 export interface HclAttribute extends Located {
   kind: 'attribute';
