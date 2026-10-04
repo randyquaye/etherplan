@@ -1,0 +1,9 @@
+# Fees and pending transactions
+
+Part of [Deploy contracts](index.md).
+
+By default, apply prices each new transaction from the RPC's fee estimate and sets its gas limit to 1.2 times the RPC's gas estimate. `--max-fee-per-gas` and `--priority-fee-per-gas` (together, in wei) set the fee caps instead; EIP-1559 charges the block's base fee plus the priority fee, never more than the maximum fee per gas, and a transaction waits while the base fee is above its cap. `--gas-multiplier` sets the gas-limit multiple, at least 1. `--receipt-timeout-ms` (default 120000) sets how long apply waits for each receipt before it stops with a retryable `receipt-timeout`. These settings choose fees only for transactions that apply has not yet signed; a rerun resends signed transactions unchanged, and only the replacement flags below raise their fees. Apply still checks every transaction's gas limit times maximum fee, plus value, against the plan's `maxSpendWei` before signing.
+
+If a signed transaction remains unmined because its fee cap is too low, rerun the saved plan with `--replace-max-fee-per-gas`, `--replace-priority-fee-per-gas`, and `--replace-max-cost-wei` (all in wei). The two fee caps must each rise by at least 10%; the cost ceiling is the maximum gas cost plus value allowed for each replacement. For example: `etherplan apply --plan plan.json --replace-max-fee-per-gas 20000000000 --replace-priority-fee-per-gas 4000000000 --replace-max-cost-wei 2000000000000000`. Apply checks the old transaction's receipt and nonce before signing at the same nonce, saves the replacement link before broadcast, and accepts a receipt from either signed variant. Rerunning with the same fees resends the saved replacement. Review the fee caps and ceiling against the plan's gas and payload before applying.
+
+[Previous: State and recovery](../recovery/journals-and-resume.md) · [Next: Parallel deployers](parallel.md)

@@ -6,7 +6,7 @@
   "type": "module",
   "files": [
     "dist/",
-    "docs/*.md"
+    "docs/"
   ],
   "repository": {
     "type": "git",

@@ -1,12 +1,14 @@
 # Local signer history after a chain reorg
 
+Part of [Working on Etherplan](index.md).
+
 Status: fixed for `0.0.3-beta`. The local file backend retains signer journal history across completed applies, and the shared backend checks the current plan's signer index as well as older plans. Both stop a new signature when an earlier one lacks a canonical receipt at the configured confirmation depth.
 
 ## Failure
 
 A local apply can finish after one confirmation. It then removes its journal path from the signer's local registry. If that block is later reorganized out, a second apply using the same signer can read the freed nonce and sign a different transaction. The first signed transaction remains valid and may be rebroadcast. Reusing the same journal does not close the gap, because the local signer-history check skips that journal and current-plan recovery examines only its own completed actions and live records.
 
-The path is [`run` in lifecycle.ts](../src/execution/lifecycle.ts), [`retireLocalSignerHistory` and `assertSignerHistory` in settlement.ts](../src/execution/settlement.ts), and [`retireLocalSignerJournal` in local-signer.ts](../src/execution/local-signer.ts). An Anvil reproduction demonstrated both journal layouts:
+The path is [`run` in lifecycle.ts](../../src/execution/lifecycle.ts), [`retireLocalSignerHistory` and `assertSignerHistory` in settlement.ts](../../src/execution/settlement.ts), and [`retireLocalSignerJournal` in local-signer.ts](../../src/execution/local-signer.ts). An Anvil reproduction demonstrated both journal layouts:
 
 1. Save an `evm_snapshot`, then apply contract `alpha` with a local state file and journal. Its transaction is signed at nonce `0` and the apply reports success.
 2. Call `evm_revert` on the snapshot without clearing Etherplan's signer registry. The `alpha` receipt disappears, but its signed bytes remain in the journal.
@@ -43,3 +45,5 @@ No migration or compatibility path is needed for prior local registry contents. 
 - Confirm that replacement variants are checked as one nonce group and that another signer or chain is unaffected.
 
 These tests should use an Anvil reorg without clearing the local signer registry. The fix detects a reorg visible when history is checked; it cannot guarantee that an unfinalized block will never reorganize later.
+
+[Durable records and types](records-and-types.md)
