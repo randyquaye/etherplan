@@ -2,7 +2,15 @@
 // verifyCall, and verifyCreation in index.ts; compareRuntime in bytecode.ts; validateCreationProof in creation-proof.ts.
 import type { ByteRange } from '../artifacts/types.ts';
 import type { Factory } from '../spec/types.ts';
-import type { Address, ChainIdentity, DecimalString, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
+import type {
+  Address,
+  ChainIdentity,
+  DecimalString,
+  Hash,
+  Hex,
+  JsonValue,
+  ResourceId,
+} from '../types.ts';
 
 /**
  * The status rule, from `finish`: any `reasons` entry makes the resource `conflict`; otherwise any `missingProofs`
@@ -62,7 +70,13 @@ export type RuntimeDifference =
   | { reason: 'content'; offset: number; region: 'code' | 'library-guard' }
   | { reason: 'content'; offset: number; region: 'library'; library: string }
   | { reason: 'content'; offset: number; region: 'immutable'; immutable: string }
-  | { reason: 'content'; offset: number; region: 'metadata'; expectedMetadataHash: Hex | null; liveMetadataHash: Hex | null };
+  | {
+      reason: 'content';
+      offset: number;
+      region: 'metadata';
+      expectedMetadataHash: Hex | null;
+      liveMetadataHash: Hex | null;
+    };
 
 /** The live word at one immutable's ranges; `consistent` when every range holds the same word. */
 export interface ImmutableWord {
@@ -94,7 +108,11 @@ export interface ImmutableEvidence {
 
 export type SimulationEvidence =
   | { error: string }
-  | { runtimeHash: Hash; sameOutsideImmutables: boolean; differingImmutables: { id: string; simulated: Hex }[] };
+  | {
+      runtimeHash: Hash;
+      sameOutsideImmutables: boolean;
+      differingImmutables: { id: string; simulated: Hex }[];
+    };
 
 interface CreationProofBase {
   chain: ChainIdentity;
@@ -112,7 +130,15 @@ interface CreationProofBase {
 export type CreationProof =
   | (CreationProofBase & { kind: 'create' })
   | (CreationProofBase & { kind: 'create2'; factory: Factory; salt: Hash; method?: never })
-  | (CreationProofBase & { kind: 'create2'; factory: Factory; salt: Hash; method: 'pinned-runtime'; originPlanHash: Hash; intentCommitment: Hash; createdCode: PinnedCreatedCode[] });
+  | (CreationProofBase & {
+      kind: 'create2';
+      factory: Factory;
+      salt: Hash;
+      method: 'pinned-runtime';
+      originPlanHash: Hash;
+      intentCommitment: Hash;
+      createdCode: PinnedCreatedCode[];
+    });
 
 export interface PinnedCreatedCode {
   getter: string;

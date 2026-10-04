@@ -42,22 +42,26 @@ function runCli(arguments_) {
 }
 
 function runImport(specFile, stateFile, transactionHash) {
-  return spawnSync(process.execPath, [
-    'dist/cli.js',
-    'import',
-    '--fixture',
-    specFile,
-    '--id',
-    'contract:stateFixture',
-    '--state',
-    stateFile,
-    '--creation-tx',
-    transactionHash,
-  ], {
-    cwd: projectDirectory,
-    encoding: 'utf8',
-    env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
-  });
+  return spawnSync(
+    process.execPath,
+    [
+      'dist/cli.js',
+      'import',
+      '--fixture',
+      specFile,
+      '--id',
+      'contract:stateFixture',
+      '--state',
+      stateFile,
+      '--creation-tx',
+      transactionHash,
+    ],
+    {
+      cwd: projectDirectory,
+      encoding: 'utf8',
+      env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
+    },
+  );
 }
 
 function importedSpec(expectedBeneficiary, withBinding = false) {
@@ -70,27 +74,33 @@ function importedSpec(expectedBeneficiary, withBinding = false) {
       zeroAddress: '0x0000000000000000000000000000000000000000',
       desiredBinding,
     },
-    contracts: [{
-      id: 'stateFixture',
-      source: 'test/fixtures/StateFixture.sol',
-      name: 'StateFixture',
-      artifact: artifactFile,
-      address,
-      args: [{ ref: 'values.beneficiary' }, { ref: 'values.owner' }],
-      checks: {
-        BENEFICIARY: { ref: 'values.beneficiary' },
-        owner: { ref: 'values.owner' },
+    contracts: [
+      {
+        id: 'stateFixture',
+        source: 'test/fixtures/StateFixture.sol',
+        name: 'StateFixture',
+        artifact: artifactFile,
+        address,
+        args: [{ ref: 'values.beneficiary' }, { ref: 'values.owner' }],
+        checks: {
+          BENEFICIARY: { ref: 'values.beneficiary' },
+          owner: { ref: 'values.owner' },
+        },
       },
-    }],
-    calls: withBinding ? [{
-      id: 'bind',
-      target: 'stateFixture',
-      method: 'setBinding',
-      args: [{ ref: 'values.desiredBinding' }],
-      check: { function: 'binding', equals: { ref: 'values.desiredBinding' } },
-      before: { equals: { ref: 'values.zeroAddress' } },
-      signerRole: 'owner',
-    }] : [],
+    ],
+    calls: withBinding
+      ? [
+          {
+            id: 'bind',
+            target: 'stateFixture',
+            method: 'setBinding',
+            args: [{ ref: 'values.desiredBinding' }],
+            check: { function: 'binding', equals: { ref: 'values.desiredBinding' } },
+            before: { equals: { ref: 'values.zeroAddress' } },
+            signerRole: 'owner',
+          },
+        ]
+      : [],
   };
 }
 
@@ -161,7 +171,10 @@ test('import rejects wrong immutable evidence and records a verified existing de
 
   const stateText = await readFile(stateFile, 'utf8');
   const state = JSON.parse(stateText);
-  assert.equal(state.resources['contract:stateFixture'].address.toLowerCase(), address.toLowerCase());
+  assert.equal(
+    state.resources['contract:stateFixture'].address.toLowerCase(),
+    address.toLowerCase(),
+  );
   assert.equal(state.resources['contract:stateFixture'].transactions.length, 0);
   assert.deepEqual(state.resources['contract:stateFixture'].provenance, {
     kind: 'import',
@@ -210,29 +223,65 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
   raw.metadata.settings.remappings = ['forge-std/=lib/forge-std/src/'];
   const rebuiltFile = path.join(directory, 'StateFixture.rebuilt.json');
   await writeFile(rebuiltFile, JSON.stringify(raw));
-  const rebuiltSpec = expectedBeneficiary => {
+  const rebuiltSpec = (expectedBeneficiary) => {
     const spec = importedSpec(expectedBeneficiary);
     spec.contracts[0].artifact = rebuiltFile;
     return spec;
   };
   const specFile = await saveSpec('rebuilt.json', rebuiltSpec(beneficiary));
-  const importArguments = ['import', '--fixture', specFile, '--id', 'contract:stateFixture', '--state', stateFile];
+  const importArguments = [
+    'import',
+    '--fixture',
+    specFile,
+    '--id',
+    'contract:stateFixture',
+    '--state',
+    stateFile,
+  ];
 
-  const planned = runCli(['plan', '--fixture', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
+  const planned = runCli([
+    'plan',
+    '--fixture',
+    specFile,
+    '--state',
+    stateFile,
+    '--deployers',
+    owner.address,
+    '--owner',
+    owner.address,
+    '--max-spend-wei',
+    '100000000000000000000',
+  ]);
   assert.equal(planned.status, 1);
   const [blocked] = JSON.parse(planned.stdout).resources;
   assert.equal(blocked.action, 'conflict');
-  assert.match(blocked.observation.stateComparison.artifactDrift.reasons.join(' '), /import --id contract:stateFixture --rebaseline/);
+  assert.match(
+    blocked.observation.stateComparison.artifactDrift.reasons.join(' '),
+    /import --id contract:stateFixture --rebaseline/,
+  );
 
   const plain = runCli(importArguments);
   assert.equal(plain.status, 1);
   assert.match(plain.stderr, /different artifact identity\. Use import --rebaseline/);
   const wrongFile = await saveSpec('rebuilt-wrong.json', rebuiltSpec(wrongBeneficiary));
-  const wrong = runCli(['import', '--fixture', wrongFile, '--id', 'contract:stateFixture', '--state', stateFile, '--rebaseline']);
+  const wrong = runCli([
+    'import',
+    '--fixture',
+    wrongFile,
+    '--id',
+    'contract:stateFixture',
+    '--state',
+    stateFile,
+    '--rebaseline',
+  ]);
   assert.equal(wrong.status, 1);
   assert.match(wrong.stderr, /conflict/);
   assert.deepEqual(JSON.parse(await readFile(stateFile, 'utf8')), before);
-  const missing = runCli([...importArguments.slice(0, -1), path.join(directory, 'missing-state.json'), '--rebaseline']);
+  const missing = runCli([
+    ...importArguments.slice(0, -1),
+    path.join(directory, 'missing-state.json'),
+    '--rebaseline',
+  ]);
   assert.equal(missing.status, 1);
   assert.match(missing.stderr, /no state record to rebaseline/);
   const misused = runCli(['verify', '--fixture', specFile, '--rebaseline']);
@@ -248,12 +297,44 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
   const record = JSON.parse(await readFile(stateFile, 'utf8')).resources['contract:stateFixture'];
   assert.equal(record.artifactHash, result.artifactHash);
   assert.deepEqual(record.provenance, { kind: 'import', creationTransactionHash: creationHash });
-  assert.deepEqual(record.artifactRevisions, [{ artifactHash: prior.artifactHash, sourceHash: prior.sourceHash, proofHash: prior.proofHash, codeHash: prior.codeHash }]);
-  for (const key of ['address', 'priorAddress', 'initcodeHash', 'inputs', 'inputsHash', 'priorInputs', 'priorInputsHash', 'salt', 'codeHash', 'priorCodeHash', 'priorProofHash', 'transactions']) {
+  assert.deepEqual(record.artifactRevisions, [
+    {
+      artifactHash: prior.artifactHash,
+      sourceHash: prior.sourceHash,
+      proofHash: prior.proofHash,
+      codeHash: prior.codeHash,
+    },
+  ]);
+  for (const key of [
+    'address',
+    'priorAddress',
+    'initcodeHash',
+    'inputs',
+    'inputsHash',
+    'priorInputs',
+    'priorInputsHash',
+    'salt',
+    'codeHash',
+    'priorCodeHash',
+    'priorProofHash',
+    'transactions',
+  ]) {
     assert.deepEqual(record[key], prior[key], key);
   }
 
-  const replanned = runCli(['plan', '--fixture', specFile, '--state', stateFile, '--deployers', owner.address, '--owner', owner.address, '--max-spend-wei', '100000000000000000000']);
+  const replanned = runCli([
+    'plan',
+    '--fixture',
+    specFile,
+    '--state',
+    stateFile,
+    '--deployers',
+    owner.address,
+    '--owner',
+    owner.address,
+    '--max-spend-wei',
+    '100000000000000000000',
+  ]);
   assert.equal(replanned.status, 0, `${replanned.stderr}\n${replanned.stdout}`);
   const [reused] = JSON.parse(replanned.stdout).resources;
   assert.equal(reused.action, 'reuse');

@@ -14,12 +14,17 @@ export function defaultJournalFile(stateFile: string): string {
 
 export async function approvePlan(plan: Plan): Promise<void> {
   process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
-  const blocked = plan.resources.filter(resource => !['reuse', 'deploy', 'call'].includes(resource.action));
-  if (blocked.length) throw new Error(`Plan cannot be applied: ${blocked.map(resource => `${resource.id} (${resource.action})`).join(', ')}.`);
+  const blocked = plan.resources.filter(
+    (resource) => !['reuse', 'deploy', 'call'].includes(resource.action),
+  );
+  if (blocked.length)
+    throw new Error(
+      `Plan cannot be applied: ${blocked.map((resource) => `${resource.id} (${resource.action})`).join(', ')}.`,
+    );
   process.stderr.write("Apply this plan? Only 'yes' will be accepted: ");
-  const answer = await new Promise<string | null>(resolve => {
+  const answer = await new Promise<string | null>((resolve) => {
     const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
-    input.once('line', line => {
+    input.once('line', (line) => {
       resolve(line);
       input.close();
     });
@@ -31,7 +36,10 @@ export async function approvePlan(plan: Plan): Promise<void> {
 export async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   const directory = path.dirname(file);
   await mkdir(directory, { recursive: true });
-  const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(file)}.${process.pid}.${randomUUID()}.tmp`,
+  );
   let handle;
   try {
     handle = await open(temporary, 'wx', 0o600);
@@ -41,7 +49,11 @@ export async function writeJsonAtomic(file: string, value: unknown): Promise<voi
     handle = null;
     await rename(temporary, file);
     const directoryHandle = await open(directory, 'r');
-    try { await directoryHandle.sync(); } finally { await directoryHandle.close(); }
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
   } catch (error) {
     await handle?.close().catch(() => {});
     await unlink(temporary).catch(() => {});

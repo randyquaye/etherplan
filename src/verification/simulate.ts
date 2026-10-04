@@ -1,4 +1,11 @@
-import { concatHex, getContractAddress, getCreate2Address, keccak256, pad, stringToHex } from 'viem';
+import {
+  concatHex,
+  getContractAddress,
+  getCreate2Address,
+  keccak256,
+  pad,
+  stringToHex,
+} from 'viem';
 import type { Address, Client, Hex } from '../types.ts';
 import type { SimulateCreate2Input, SimulateCreateInput } from './types.ts';
 
@@ -8,12 +15,46 @@ import type { SimulateCreate2Input, SimulateCreateInput } from './types.ts';
  * that call fails, and otherwise returns the runtime code at the target address.
  */
 export const PROBE_CODE: Hex = `0x${[
-  '6040', '36', '03', '80', '6040', '6000', '37',
-  '6000', '6000', '82', '6000', '6000', '6000', '35', '5a', 'f1',
-  '6025', '57',
-  '3d', '6000', '6000', '3e', '3d', '6000', 'fd',
-  '5b', '50',
-  '6020', '35', '80', '3b', '90', '81', '6000', '6000', '83', '3c', '50', '6000', 'f3',
+  '6040',
+  '36',
+  '03',
+  '80',
+  '6040',
+  '6000',
+  '37',
+  '6000',
+  '6000',
+  '82',
+  '6000',
+  '6000',
+  '6000',
+  '35',
+  '5a',
+  'f1',
+  '6025',
+  '57',
+  '3d',
+  '6000',
+  '6000',
+  '3e',
+  '3d',
+  '6000',
+  'fd',
+  '5b',
+  '50',
+  '6020',
+  '35',
+  '80',
+  '3b',
+  '90',
+  '81',
+  '6000',
+  '6000',
+  '83',
+  '3c',
+  '50',
+  '6000',
+  'f3',
 ].join('')}`;
 
 export const PROBE_ADDRESS: Address = `0x${keccak256(stringToHex('etherplan.verification.create2-probe')).slice(-40)}`;
@@ -30,11 +71,21 @@ type CallRequest = Parameters<Client['call']>[0];
 export function replayProviderFailure(error: unknown): boolean {
   const seen = new Set<unknown>();
   let provider = false;
-  for (let current = error; current && typeof current === 'object' && !seen.has(current); current = (current as { cause?: unknown }).cause) {
+  for (
+    let current = error;
+    current && typeof current === 'object' && !seen.has(current);
+    current = (current as { cause?: unknown }).cause
+  ) {
     seen.add(current);
     const { name, code } = current as { name?: unknown; code?: unknown };
     if (name === 'ExecutionRevertedError' || code === 3) return false;
-    if (typeof name === 'string' && /(?:RpcError|HttpRequestError|WebSocketRequestError|TimeoutError|SocketClosedError|ConnectionError|NetworkError|TransportError|FetchError|AbortError)$/.test(name)) provider = true;
+    if (
+      typeof name === 'string' &&
+      /(?:RpcError|HttpRequestError|WebSocketRequestError|TimeoutError|SocketClosedError|ConnectionError|NetworkError|TransportError|FetchError|AbortError)$/.test(
+        name,
+      )
+    )
+      provider = true;
     if (typeof code === 'number' && code < 0) provider = true;
   }
   return provider;
@@ -60,8 +111,18 @@ export async function checkCreate2ReplayOverrides(client: Client, factory: Addre
   if (!data || data.length !== 66 || `0x${data.slice(-40)}`.toLowerCase() !== expected) {
     throw new Error('RPC did not apply the historical CREATE2 replay overrides.');
   }
-  const target = getCreate2Address({ from: factory, salt: REPLAY_PROBE_SALT, bytecodeHash: keccak256(REPLAY_PROBE_INITCODE) });
-  const runtime = await simulateCreate2(client, { factory, salt: REPLAY_PROBE_SALT, initcode: REPLAY_PROBE_INITCODE, address: target, blockNumber });
+  const target = getCreate2Address({
+    from: factory,
+    salt: REPLAY_PROBE_SALT,
+    bytecodeHash: keccak256(REPLAY_PROBE_INITCODE),
+  });
+  const runtime = await simulateCreate2(client, {
+    factory,
+    salt: REPLAY_PROBE_SALT,
+    initcode: REPLAY_PROBE_INITCODE,
+    address: target,
+    blockNumber,
+  });
   if (runtime !== '0x6000') throw new Error('RPC did not apply the CREATE2 replay overrides.');
 }
 
@@ -70,7 +131,10 @@ export async function checkCreate2ReplayOverrides(client: Client, factory: Addre
  * produces at `address`. The state override empties the target first, so the simulation also works after deployment.
  * Nothing is signed or sent.
  */
-export async function simulateCreate2(client: Client, { factory, salt, initcode, address, blockNumber, account }: SimulateCreate2Input): Promise<Hex> {
+export async function simulateCreate2(
+  client: Client,
+  { factory, salt, initcode, address, blockNumber, account }: SimulateCreate2Input,
+): Promise<Hex> {
   const request: CallRequest = {
     to: PROBE_ADDRESS,
     data: concatHex([pad(factory), pad(address), salt, initcode]),
@@ -87,7 +151,10 @@ export async function simulateCreate2(client: Client, { factory, salt, initcode,
 }
 
 /** Replays a direct CREATE transaction with `eth_call` and returns the runtime that its constructor returns. */
-export async function simulateCreate(client: Client, { from, initcode, blockNumber }: SimulateCreateInput): Promise<Hex> {
+export async function simulateCreate(
+  client: Client,
+  { from, initcode, blockNumber }: SimulateCreateInput,
+): Promise<Hex> {
   const { data } = await client.call({ account: from, data: initcode, ...at(blockNumber) });
   if (!data || data === '0x') throw new Error('Creation replay returned no runtime code.');
   return data.toLowerCase() as Hex;

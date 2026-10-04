@@ -10,16 +10,15 @@ const signer = '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266';
 let anvil;
 
 function runVerify() {
-  return spawnSync(process.execPath, [
-    'dist/cli.js',
-    'verify',
-    '--fixture',
-    'test/fixtures/minimal-create2.json',
-  ], {
-    cwd: projectDirectory,
-    encoding: 'utf8',
-    env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
-  });
+  return spawnSync(
+    process.execPath,
+    ['dist/cli.js', 'verify', '--fixture', 'test/fixtures/minimal-create2.json'],
+    {
+      cwd: projectDirectory,
+      encoding: 'utf8',
+      env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl },
+    },
+  );
 }
 
 before(async () => {

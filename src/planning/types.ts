@@ -2,9 +2,28 @@
 // planResource, decide, compareState, artifactDrift, and createPlan in index.ts.
 import type { Artifacts, NormalizedArtifact } from '../artifacts/types.ts';
 import type { ScheduleWave } from '../scheduling/types.ts';
-import type { DependencyEdge, DependencyGraphs, DependencyMode, ExecutionAssumption, Factory, SaltDerivation } from '../spec/types.ts';
+import type {
+  DependencyEdge,
+  DependencyGraphs,
+  DependencyMode,
+  ExecutionAssumption,
+  Factory,
+  SaltDerivation,
+} from '../spec/types.ts';
 import type { StateFile } from '../state/types.ts';
-import type { Address, CallId, ChainIdentity, Client, ContractId, DecimalString, ExternalId, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
+import type {
+  Address,
+  CallId,
+  ChainIdentity,
+  Client,
+  ContractId,
+  DecimalString,
+  ExternalId,
+  Hash,
+  Hex,
+  JsonValue,
+  ResourceId,
+} from '../types.ts';
 import type { VerificationResult } from '../verification/types.ts';
 import type { RecoveryRecord } from '../recovery.ts';
 
@@ -99,7 +118,8 @@ export interface PreparedCall extends PreparedBase {
 export type PreparedResource = PreparedContract | PreparedExternal | PreparedCall;
 
 /** A contract the plan can deploy: the CREATE2 fields are present together. */
-export type DeployableContract = PreparedContract & Required<Pick<PreparedContract, 'initcode' | 'initcodeHash' | 'salt' | 'factory'>>;
+export type DeployableContract = PreparedContract &
+  Required<Pick<PreparedContract, 'initcode' | 'initcodeHash' | 'salt' | 'factory'>>;
 
 export interface PreparedResources {
   resources: PreparedResource[];
@@ -257,7 +277,10 @@ export interface PlanV2 extends PlanBase {
   formatVersion: 2;
   dependencyMode: DependencyMode;
   graphs: DependencyGraphs;
-  executionWaves: { waves: ResourceId[][]; deferred: { id: ResourceId; waitingFor: ResourceId[] }[] };
+  executionWaves: {
+    waves: ResourceId[][];
+    deferred: { id: ResourceId; waitingFor: ResourceId[] }[];
+  };
   executionAssumptions: ExecutionAssumption[];
   warnings: string[];
 }

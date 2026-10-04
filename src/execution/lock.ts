@@ -39,20 +39,36 @@ async function readHolder(file: string): Promise<LocalLockHolder | null | undefi
 }
 
 function describe(file: string, holder: LocalLockHolder | null | undefined): string {
-  if (!holder) return `State lock ${file} exists but is unreadable. Remove it only after you confirm that no apply is running.`;
+  if (!holder)
+    return `State lock ${file} exists but is unreadable. Remove it only after you confirm that no apply is running.`;
   return `State lock ${file} is held by pid ${holder.pid} on ${holder.host} for plan ${holder.planHash} since ${holder.acquiredAt}.`;
 }
 
 function validHolder(holder: LocalLockHolder | null | undefined): holder is LocalLockHolder {
-  return !!holder && typeof holder.id === 'string' && Number.isSafeInteger(holder.pid) && holder.pid > 0 && typeof holder.host === 'string';
+  return (
+    !!holder &&
+    typeof holder.id === 'string' &&
+    Number.isSafeInteger(holder.pid) &&
+    holder.pid > 0 &&
+    typeof holder.host === 'string'
+  );
 }
 
 /** Each immutable entry has a unique name, so deleting a dead entry cannot delete a replacement writer's claim. */
-export async function acquireLock(file: string, { planHash }: { planHash: string | null }): Promise<LocalLock> {
+export async function acquireLock(
+  file: string,
+  { planHash }: { planHash: string | null },
+): Promise<LocalLock> {
   await mkdir(path.dirname(file), { recursive: true });
   const registry = `${file}.holders`;
   await mkdir(registry, { recursive: true, mode: 0o700 });
-  const holder: LocalLockHolder = { id: randomUUID(), pid: process.pid, host: os.hostname(), planHash, acquiredAt: new Date().toISOString() };
+  const holder: LocalLockHolder = {
+    id: randomUUID(),
+    pid: process.pid,
+    host: os.hostname(),
+    planHash,
+    acquiredAt: new Date().toISOString(),
+  };
   const entry = path.join(registry, `${holder.id}.json`);
   const pending = path.join(registry, `.pending-${holder.id}`);
   let recovered: LocalLockHolder | null = null;
@@ -75,9 +91,13 @@ export async function acquireLock(file: string, { planHash }: { planHash: string
       const otherFile = path.join(registry, name);
       const other = await readHolder(otherFile);
       if (other === undefined) continue; // A departing holder removed its own entry.
-      if (!validHolder(other) || other.host !== holder.host || alive(other.pid)) throw new LockError(describe(file, other), other);
-      try { await unlink(otherFile); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (!validHolder(other) || other.host !== holder.host || alive(other.pid))
+        throw new LockError(describe(file, other), other);
+      try {
+        await unlink(otherFile);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
       recovered ??= other;
     }
 
@@ -92,9 +112,13 @@ export async function acquireLock(file: string, { planHash }: { planHash: string
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         const existing = await readHolder(file);
         if (existing === undefined) continue;
-        if (!validHolder(existing) || existing.host !== holder.host || alive(existing.pid)) throw new LockError(describe(file, existing), existing);
-        try { await unlink(file); }
-        catch (unlinkError) { if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError; }
+        if (!validHolder(existing) || existing.host !== holder.host || alive(existing.pid))
+          throw new LockError(describe(file, existing), existing);
+        try {
+          await unlink(file);
+        } catch (unlinkError) {
+          if ((unlinkError as NodeJS.ErrnoException).code !== 'ENOENT') throw unlinkError;
+        }
         recovered ??= existing;
         continue;
       }
@@ -107,7 +131,11 @@ export async function acquireLock(file: string, { planHash }: { planHash: string
       }
       created = true;
     }
-    if (!created) throw new LockError(`Could not acquire state lock ${file}; another process changed it during recovery.`, null);
+    if (!created)
+      throw new LockError(
+        `Could not acquire state lock ${file}; another process changed it during recovery.`,
+        null,
+      );
     let released = false;
     return {
       file,
@@ -115,7 +143,8 @@ export async function acquireLock(file: string, { planHash }: { planHash: string
       recovered,
       async assertHeld() {
         const [current, claim] = await Promise.all([readHolder(file), readHolder(entry)]);
-        if (current?.id !== holder.id || claim?.id !== holder.id) throw new LockError(`State lock ${file} is no longer held by this process.`, current);
+        if (current?.id !== holder.id || claim?.id !== holder.id)
+          throw new LockError(`State lock ${file} is no longer held by this process.`, current);
       },
       async release() {
         if (released) return;
@@ -148,7 +177,8 @@ export async function canonicalLocalFile(file: string): Promise<string> {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       try {
-        if ((await lstat(ancestor)).isSymbolicLink()) throw new Error(`Cannot lock dangling symbolic link ${ancestor}.`);
+        if ((await lstat(ancestor)).isSymbolicLink())
+          throw new Error(`Cannot lock dangling symbolic link ${ancestor}.`);
       } catch (probe) {
         if ((probe as NodeJS.ErrnoException).code !== 'ENOENT') throw probe;
       }
@@ -165,20 +195,26 @@ export async function localJournalLockFile(file: string): Promise<string> {
 }
 
 /** Keep both local resources exclusive, in the same order in every process. */
-export async function acquireLocalApplyLocks(stateFile: string, journalFile: string, planHash: string | null, chain: ChainIdentity, addresses: Address[]): Promise<{ lock: LocalLock; journalLock: LocalLock }> {
+export async function acquireLocalApplyLocks(
+  stateFile: string,
+  journalFile: string,
+  planHash: string | null,
+  chain: ChainIdentity,
+  addresses: Address[],
+): Promise<{ lock: LocalLock; journalLock: LocalLock }> {
   const stateLockFile = `${await canonicalLocalFile(stateFile)}.lock`;
   const journalLockFile = await localJournalLockFile(journalFile);
   const files = [...new Set([stateLockFile, journalLockFile])].sort();
   const acquired: LocalLock[] = [];
   try {
     for (const file of files) acquired.push(await acquireLock(file, { planHash }));
-    acquired.push(...await acquireLocalSignerLocks(chain, addresses, journalFile, planHash));
+    acquired.push(...(await acquireLocalSignerLocks(chain, addresses, journalFile, planHash)));
   } catch (error) {
     for (const held of acquired.reverse()) await held.release();
     throw error;
   }
-  const stateLock = acquired.find(held => held.file === stateLockFile)!;
-  const journalLock = acquired.find(held => held.file === journalLockFile)!;
+  const stateLock = acquired.find((held) => held.file === stateLockFile)!;
+  const journalLock = acquired.find((held) => held.file === journalLockFile)!;
   let released = false;
   return {
     journalLock,
@@ -186,7 +222,9 @@ export async function acquireLocalApplyLocks(stateFile: string, journalFile: str
       file: stateLock.file,
       holder: stateLock.holder,
       recovered: stateLock.recovered ?? journalLock.recovered,
-      async assertHeld() { for (const held of acquired) await held.assertHeld(); },
+      async assertHeld() {
+        for (const held of acquired) await held.assertHeld();
+      },
       async release() {
         if (released) return;
         released = true;

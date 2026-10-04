@@ -5,12 +5,37 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { KMSClient } from '@aws-sdk/client-kms';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { Artifacts } from '../artifacts/types.ts';
-import type { Plan, PlanAction, PlannedResource, PlannedTransaction, PreparedResource, PreparedResources } from '../planning/types.ts';
+import type {
+  Plan,
+  PlanAction,
+  PlannedResource,
+  PlannedTransaction,
+  PreparedResource,
+  PreparedResources,
+} from '../planning/types.ts';
 import type { Schedule } from '../scheduling/types.ts';
 import type { OrderedNode, ParsedSpec } from '../spec/types.ts';
 import type { RecordResourceInput, StateFile } from '../state/types.ts';
-import type { Address, ChainIdentity, Client, DecimalString, DistributiveOmit, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
-import type { BindingObservation, CodeComparison, CreationProof, ProofMethod, VerificationResult, VerificationStatus, VerifyOptions } from '../verification/types.ts';
+import type {
+  Address,
+  ChainIdentity,
+  Client,
+  DecimalString,
+  DistributiveOmit,
+  Hash,
+  Hex,
+  JsonValue,
+  ResourceId,
+} from '../types.ts';
+import type {
+  BindingObservation,
+  CodeComparison,
+  CreationProof,
+  ProofMethod,
+  VerificationResult,
+  VerificationStatus,
+  VerifyOptions,
+} from '../verification/types.ts';
 
 export type { Client };
 
@@ -51,7 +76,11 @@ export interface SignerAuthorization {
 /** What a signer module exports as `signerProvider`. Etherplan never sees key material. */
 export interface SignerProvider {
   address(role: string): Promise<Address>;
-  signTransaction(role: string, request: SignTransactionRequest, authorization?: SignerAuthorization): Promise<Hex>;
+  signTransaction(
+    role: string,
+    request: SignTransactionRequest,
+    authorization?: SignerAuthorization,
+  ): Promise<Hex>;
 }
 
 /** Defaults: `deployer: ['deployer']`, `owner: 'owner'`. */
@@ -100,7 +129,12 @@ interface ChainLockScope {
 }
 
 /** A signer lease covers its address across every deployment in the shared table. */
-export type DeploymentLockScope = ChainLockScope & { kind: 'deployment'; project: string; environment: string; label: string };
+export type DeploymentLockScope = ChainLockScope & {
+  kind: 'deployment';
+  project: string;
+  environment: string;
+  label: string;
+};
 export type SignerLockScope = ChainLockScope & { kind: 'signer'; address: Address };
 export type LockScope = DeploymentLockScope | SignerLockScope;
 
@@ -196,7 +230,12 @@ export interface StoredState {
 
 export interface StateStore {
   read(scope: DeploymentScope): Promise<StoredState | null>;
-  compareAndSwap(scope: DeploymentScope, expectedVersion: unknown, state: StateFile, options: { fence: FenceEntry[] | null }): Promise<StoredState>;
+  compareAndSwap(
+    scope: DeploymentScope,
+    expectedVersion: unknown,
+    state: StateFile,
+    options: { fence: FenceEntry[] | null },
+  ): Promise<StoredState>;
 }
 
 export interface JournalHead {
@@ -225,7 +264,11 @@ export interface JournalAppendOptions {
 export interface JournalStore {
   head?(scope: DeploymentScope): Promise<JournalHead | null>;
   read(scope: DeploymentScope): AsyncIterable<StoredJournalRecord>;
-  append(scope: DeploymentScope, record: StoredJournalRecord, options: JournalAppendOptions): Promise<StoredJournalRecord>;
+  append(
+    scope: DeploymentScope,
+    record: StoredJournalRecord,
+    options: JournalAppendOptions,
+  ): Promise<StoredJournalRecord>;
   signedForSigner(scope: DeploymentScope, address: string): AsyncIterable<SignedIndexEntry>;
 }
 
@@ -295,13 +338,19 @@ export interface DeploymentStatus {
   journalHead: { sequence: number; planHash: Hash; phase: JournalPhase; at: string } | null;
   stateVersion: unknown;
   stateUpdatedAt: string | null;
-  lock: { holder: unknown; expiresAt: string | null; active: boolean; fencingToken: number | undefined } | null;
+  lock: {
+    holder: unknown;
+    expiresAt: string | null;
+    active: boolean;
+    fencingToken: number | undefined;
+  } | null;
   signerLocks: ({ address: Address } & Partial<LeaseInspection>)[];
 }
 
 // Journal
 
-export type JournalPhase = 'intent' | 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt' | 'verified' | 'failed';
+export type JournalPhase =
+  'intent' | 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt' | 'verified' | 'failed';
 
 /** A transaction in one of these phases may still change the chain or hold its signer's next nonce. */
 export type LivePhase = 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt';
@@ -343,8 +392,18 @@ export interface VerificationSummary {
   missingProofs: string[];
   reasons: string[];
   failedProofs: { name: string; method: ProofMethod }[];
-  bindingChecks: { name: ResourceId; functionName: string; observed: BindingObservation; actual: JsonValue; error?: string }[];
-  creation?: { method: 'replay' | 'pinned-runtime'; parentCodeHash: Hash; createdCode?: import('../verification/types.ts').PinnedChildEvidence[] };
+  bindingChecks: {
+    name: ResourceId;
+    functionName: string;
+    observed: BindingObservation;
+    actual: JsonValue;
+    error?: string;
+  }[];
+  creation?: {
+    method: 'replay' | 'pinned-runtime';
+    parentCodeHash: Hash;
+    createdCode?: import('../verification/types.ts').PinnedChildEvidence[];
+  };
 }
 
 /**
@@ -448,7 +507,14 @@ export interface FailedFields {
   spentWei?: DecimalString;
 }
 
-export type JournalPhaseFields = IntentFields | SignedFields | BroadcastAttemptFields | BroadcastFields | ReceiptFields | VerifiedFields | FailedFields;
+export type JournalPhaseFields =
+  | IntentFields
+  | SignedFields
+  | BroadcastAttemptFields
+  | BroadcastFields
+  | ReceiptFields
+  | VerifiedFields
+  | FailedFields;
 
 export interface JournalIdentity {
   planHash: Hash;
@@ -465,14 +531,15 @@ export type JournalRecordInput = JournalPhaseFields & JournalIdentity;
  * A record as `journal.records` holds it on either path. The local file writes format 1; the remote store holds
  * format 2 with the hash chain, and openStoredJournal restores `rawTransaction` beside the ciphertext.
  */
-export type JournalRecord = JournalPhaseFields & JournalIdentity & {
-  formatVersion: 1 | 2;
-  sequence: number;
-  at: string;
-  previousHash?: Hash | null;
-  recordHash?: Hash;
-  encryptedRawTransaction?: unknown;
-};
+export type JournalRecord = JournalPhaseFields &
+  JournalIdentity & {
+    formatVersion: 1 | 2;
+    sequence: number;
+    at: string;
+    previousHash?: Hash | null;
+    recordHash?: Hash;
+    encryptedRawTransaction?: unknown;
+  };
 
 interface StoredEnvelope {
   formatVersion: 2;
@@ -487,7 +554,9 @@ interface StoredEnvelope {
 export type StoredJournalRecord = (
   | Exclude<JournalPhaseFields, SignedFields>
   | (Omit<SignedFields, 'rawTransaction'> & { encryptedRawTransaction: unknown })
-) & Omit<JournalIdentity, 'principal'> & StoredEnvelope;
+) &
+  Omit<JournalIdentity, 'principal'> &
+  StoredEnvelope;
 
 export interface Journal {
   /** The local file, or null for a stored journal. */
@@ -586,20 +655,40 @@ interface JournalEventFields {
   journalAppendLatencyMs: number;
 }
 
-export type ReportEvent = ReportEventBase & (
-  | ({ type: 'lock-acquisition'; holder: LockHolder; fencingTokens?: number[]; lockWaitMs: number })
-  | ({ type: 'lock-renewal' })
-  | ({ type: 'lock-renewal-failure'; reason: string })
-  | ({ type: 'intent' | 'signed' | 'broadcast-attempt' | 'receipt' | 'verified' } & JournalEventFields)
-  | ({ type: 'broadcast'; rebroadcast: boolean } & JournalEventFields)
-  | ({ type: 'terminal-failure' } & JournalEventFields)
-  | ({ type: 'terminal-failure' | 'conflict'; actionId?: ResourceId; code: ApplyErrorCode; reason: string })
-  | ({ type: 'signer-result'; actionId: ResourceId; signer: Address; signerLatencyMs: number })
-  | ({ type: 'broadcast-result'; actionId: ResourceId; transactionHash: Hash; rebroadcast: boolean; accepted: boolean; broadcastLatencyMs: number })
-  | ({ type: 'receipt-observed'; actionId: ResourceId; transactionHash: Hash; receiptLatencyMs: number })
-  | ({ type: 'recovery'; actionId: ResourceId; transactionHash: Hash; reservationId?: string })
-  | ({ type: 'resource-reused' | 'resource-resumed'; actionId: ResourceId })
-);
+export type ReportEvent = ReportEventBase &
+  (
+    | { type: 'lock-acquisition'; holder: LockHolder; fencingTokens?: number[]; lockWaitMs: number }
+    | { type: 'lock-renewal' }
+    | { type: 'lock-renewal-failure'; reason: string }
+    | ({
+        type: 'intent' | 'signed' | 'broadcast-attempt' | 'receipt' | 'verified';
+      } & JournalEventFields)
+    | ({ type: 'broadcast'; rebroadcast: boolean } & JournalEventFields)
+    | ({ type: 'terminal-failure' } & JournalEventFields)
+    | {
+        type: 'terminal-failure' | 'conflict';
+        actionId?: ResourceId;
+        code: ApplyErrorCode;
+        reason: string;
+      }
+    | { type: 'signer-result'; actionId: ResourceId; signer: Address; signerLatencyMs: number }
+    | {
+        type: 'broadcast-result';
+        actionId: ResourceId;
+        transactionHash: Hash;
+        rebroadcast: boolean;
+        accepted: boolean;
+        broadcastLatencyMs: number;
+      }
+    | {
+        type: 'receipt-observed';
+        actionId: ResourceId;
+        transactionHash: Hash;
+        receiptLatencyMs: number;
+      }
+    | { type: 'recovery'; actionId: ResourceId; transactionHash: Hash; reservationId?: string }
+    | { type: 'resource-reused' | 'resource-resumed'; actionId: ResourceId }
+  );
 
 export type ReportEventType = ReportEvent['type'];
 
@@ -627,15 +716,26 @@ export interface ApplyHooks {
 export interface ApplyDependencies {
   parseSpec(raw: unknown): ParsedSpec;
   graph(spec: ParsedSpec): OrderedNode[];
-  prepareResources(spec: ParsedSpec, ordered: OrderedNode[], artifacts: Artifacts): PreparedResources;
+  prepareResources(
+    spec: ParsedSpec,
+    ordered: OrderedNode[],
+    artifacts: Artifacts,
+  ): PreparedResources;
   transactionFor?(resource: PreparedResource): PlannedTransaction;
-  verifyResource(resource: PreparedResource, client: Client, options?: VerifyOptions): Promise<VerificationResult>;
+  verifyResource(
+    resource: PreparedResource,
+    client: Client,
+    options?: VerifyOptions,
+  ): Promise<VerificationResult>;
   readState(file: string): Promise<StateFile | null>;
   writeStateAtomic(file: string, state: StateFile): Promise<void>;
   recordResource?(input: RecordResourceInput): StateFile;
 }
 
-export type PlanIdentityDependencies = Pick<ApplyDependencies, 'parseSpec' | 'graph' | 'prepareResources' | 'transactionFor'>;
+export type PlanIdentityDependencies = Pick<
+  ApplyDependencies,
+  'parseSpec' | 'graph' | 'prepareResources' | 'transactionFor'
+>;
 
 export interface ApplyOptions {
   pollIntervalMs?: number;
@@ -735,9 +835,28 @@ interface OutcomeBase {
 
 /** What `ctx.outcomes` holds per resource. */
 export type ResourceOutcome =
-  | (OutcomeBase & { outcome: 'reused'; address: Address; verification: VerificationResult; artifactDrift?: { previousArtifactHash: Hash; artifactHash: Hash } })
-  | (OutcomeBase & { outcome: VerifiedOutcome; address: Address; transactionHash?: Hash; verification: VerificationResult; resumed?: true })
-  | (OutcomeBase & { outcome: 'failed'; code: FailureCode; reason: string; retryable: boolean; signer?: Address; nonce?: DecimalString; transactionHash?: Hash });
+  | (OutcomeBase & {
+      outcome: 'reused';
+      address: Address;
+      verification: VerificationResult;
+      artifactDrift?: { previousArtifactHash: Hash; artifactHash: Hash };
+    })
+  | (OutcomeBase & {
+      outcome: VerifiedOutcome;
+      address: Address;
+      transactionHash?: Hash;
+      verification: VerificationResult;
+      resumed?: true;
+    })
+  | (OutcomeBase & {
+      outcome: 'failed';
+      code: FailureCode;
+      reason: string;
+      retryable: boolean;
+      signer?: Address;
+      nonce?: DecimalString;
+      transactionHash?: Hash;
+    });
 
 /** A ResourceOutcome with its verification summarized, or `pending` for a resource apply did not reach. */
 export type ResourceOutcomeSummary =
@@ -761,7 +880,12 @@ export interface ApplyResult {
   journal: { file: string | null; tornTailRemoved: boolean };
   state: StateWriteResult;
   /** Ordinary errors may lack an apply code and retry policy. */
-  stoppedAt?: { code?: ApplyErrorCode; actionId?: ResourceId; message: string; retryable?: boolean };
+  stoppedAt?: {
+    code?: ApplyErrorCode;
+    actionId?: ResourceId;
+    message: string;
+    retryable?: boolean;
+  };
 }
 
 /** The initialized apply context is defined beside its constructor. */
@@ -819,7 +943,11 @@ export interface FundedJob {
   cost: bigint;
 }
 export type SignedBatchJob = FundedJob & { signed: SignedRecord };
-export type PipelineBatchJob = SignedBatchJob & { intent: IntentRecord; signedIntent: IntentRecord; variants: SignedRecord[] };
+export type PipelineBatchJob = SignedBatchJob & {
+  intent: IntentRecord;
+  signedIntent: IntentRecord;
+  variants: SignedRecord[];
+};
 
 /** A pipeline job carries its saved position in the signer group's nonce sequence. */
 export type PipelineFundedJob = FundedJob & {

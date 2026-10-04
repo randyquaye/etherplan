@@ -16,27 +16,69 @@ const currentPlan = hash('c');
 const signer = deployerA.address.toLowerCase();
 
 function indexEntry(transactionHash: Hash, actionId = 'contract:alpha'): SignedIndexEntry {
-  return { project: 'test', environment: 'dev', label: 'previous', planHash: priorPlan, actionId, signer, nonce: '7', transactionHash };
+  return {
+    project: 'test',
+    environment: 'dev',
+    label: 'previous',
+    planHash: priorPlan,
+    actionId,
+    signer,
+    nonce: '7',
+    transactionHash,
+  };
 }
 
-function history(rows: SignedIndexEntry[], mined: Hash[], confirmations = 1, latestBlock = 12n, linked = true) {
-  const scope = { project: 'test', environment: 'dev', chainId: 31337, genesisHash: hash('d'), label: 'next' };
+function history(
+  rows: SignedIndexEntry[],
+  mined: Hash[],
+  confirmations = 1,
+  latestBlock = 12n,
+  linked = true,
+) {
+  const scope = {
+    project: 'test',
+    environment: 'dev',
+    chainId: 31337,
+    genesisHash: hash('d'),
+    label: 'next',
+  };
   const indexed: { label: string; address: string }[] = [];
   const journalReads: string[] = [];
   const receiptLookups: string[] = [];
   const receipts = new Set(mined);
-  const ordered = [original, replacement, otherAction].flatMap(transactionHash => rows.filter(row => row.transactionHash === transactionHash));
-  const journal = ordered.reduce((records, row, index) => {
-    const fields = { formatVersion: 2, sequence: index + 1, previousHash: records.at(-1)?.recordHash ?? null,
-      planHash: row.planHash, chain: { id: scope.chainId, genesisHash: scope.genesisHash }, actionId: row.actionId,
-      phase: 'signed', signer: row.signer, nonce: row.nonce, transactionHash: row.transactionHash,
-      ...(row.transactionHash === replacement && linked ? { replacement: true, replacesTransactionHash: original } : {}),
-      encryptedRawTransaction: { ciphertext: 'test' }, principal: 'test-runner', at: new Date().toISOString() };
-    records.push({ ...fields, recordHash: hashJson(fields) });
-    return records;
-  }, [] as { recordHash: Hash }[]);
+  const ordered = [original, replacement, otherAction].flatMap((transactionHash) =>
+    rows.filter((row) => row.transactionHash === transactionHash),
+  );
+  const journal = ordered.reduce(
+    (records, row, index) => {
+      const fields = {
+        formatVersion: 2,
+        sequence: index + 1,
+        previousHash: records.at(-1)?.recordHash ?? null,
+        planHash: row.planHash,
+        chain: { id: scope.chainId, genesisHash: scope.genesisHash },
+        actionId: row.actionId,
+        phase: 'signed',
+        signer: row.signer,
+        nonce: row.nonce,
+        transactionHash: row.transactionHash,
+        ...(row.transactionHash === replacement && linked
+          ? { replacement: true, replacesTransactionHash: original }
+          : {}),
+        encryptedRawTransaction: { ciphertext: 'test' },
+        principal: 'test-runner',
+        at: new Date().toISOString(),
+      };
+      records.push({ ...fields, recordHash: hashJson(fields) });
+      return records;
+    },
+    [] as { recordHash: Hash }[],
+  );
   const ctx = {
-    remote: true, scope, plan: { planHash: currentPlan }, config: { confirmations, receiptTimeoutMs: 20 },
+    remote: true,
+    scope,
+    plan: { planHash: currentPlan },
+    config: { confirmations, receiptTimeoutMs: 20 },
     journalStore: {
       async *signedForSigner(requestedScope: typeof scope, address: string) {
         indexed.push({ label: requestedScope.label, address });
@@ -50,11 +92,14 @@ function history(rows: SignedIndexEntry[], mined: Hash[], confirmations = 1, lat
     client: {
       async getTransactionReceipt({ hash: transactionHash }: { hash: Hash }) {
         receiptLookups.push(transactionHash);
-        if (!receipts.has(transactionHash)) throw Object.assign(new Error('no receipt'), { name: 'TransactionReceiptNotFoundError' });
+        if (!receipts.has(transactionHash))
+          throw Object.assign(new Error('no receipt'), { name: 'TransactionReceiptNotFoundError' });
         return { transactionHash, blockNumber: 12n, blockHash };
       },
       async getBlock({ blockNumber }: { blockNumber?: bigint }) {
-        return blockNumber === undefined ? { number: latestBlock, hash: blockHash } : { number: blockNumber, hash: blockHash };
+        return blockNumber === undefined
+          ? { number: latestBlock, hash: blockHash }
+          : { number: blockNumber, hash: blockHash };
       },
     },
   } as unknown as ApplyContext;
@@ -62,7 +107,7 @@ function history(rows: SignedIndexEntry[], mined: Hash[], confirmations = 1, lat
 }
 
 async function rejectsCode(ctx: ApplyContext, code: string, actionId = 'contract:alpha') {
-  await assert.rejects(assertSignerHistory(ctx, [deployerA.address]), error => {
+  await assert.rejects(assertSignerHistory(ctx, [deployerA.address]), (error) => {
     assert.equal(error.code, code, error.message);
     assert.equal(error.actionId, actionId);
     return true;
@@ -93,7 +138,11 @@ test('missing receipts and insufficient confirmations stop signer reuse', async 
 });
 
 test('a receipt for one action cannot settle another indexed action at the same nonce', async () => {
-  const rows = [indexEntry(original), indexEntry(replacement), indexEntry(otherAction, 'contract:beta')];
+  const rows = [
+    indexEntry(original),
+    indexEntry(replacement),
+    indexEntry(otherAction, 'contract:beta'),
+  ];
   await rejectsCode(history(rows, [replacement]).ctx, 'foreign-outstanding', 'contract:beta');
 });
 
@@ -103,7 +152,13 @@ test('an unlinked signed transaction at the same action and nonce is not a repla
 });
 
 test('same label and plan hash in another project still reads its source journal', async () => {
-  const row = { ...indexEntry(original), project: 'source', environment: 'prod', label: 'same', planHash: currentPlan };
+  const row = {
+    ...indexEntry(original),
+    project: 'source',
+    environment: 'prod',
+    label: 'same',
+    planHash: currentPlan,
+  };
   const { ctx, journalReads } = history([row], []);
   ctx.scope = { ...ctx.scope!, project: 'current', environment: 'dev', label: 'same' };
   await rejectsCode(ctx, 'foreign-outstanding');

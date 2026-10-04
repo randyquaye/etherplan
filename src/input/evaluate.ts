@@ -35,32 +35,52 @@ export interface EvaluationScope {
 }
 
 function kind(value: JsonValue): string {
-  return value === null ? 'null' : Array.isArray(value) ? 'list' : typeof value === 'object' ? 'object' : typeof value;
+  return value === null
+    ? 'null'
+    : Array.isArray(value)
+      ? 'list'
+      : typeof value === 'object'
+        ? 'object'
+        : typeof value;
 }
 
 /** A short description of a value for errors, such as `string "yes"`. */
 export function describeValue(value: JsonValue): string {
   const text = JSON.stringify(value);
-  return value === null ? 'null' : `${kind(value)} ${text.length > 60 ? `${text.slice(0, 57)}...` : text}`;
+  return value === null
+    ? 'null'
+    : `${kind(value)} ${text.length > 60 ? `${text.slice(0, 57)}...` : text}`;
 }
 
 // Hex strings compare without regard to case, as addresses and hashes do on chain.
 function same(left: JsonValue, right: JsonValue): boolean {
-  if (typeof left === 'string' && typeof right === 'string' && HEX.test(left) && HEX.test(right)) return left.toLowerCase() === right.toLowerCase();
-  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object') return left === right;
+  if (typeof left === 'string' && typeof right === 'string' && HEX.test(left) && HEX.test(right))
+    return left.toLowerCase() === right.toLowerCase();
+  if (left === null || right === null || typeof left !== 'object' || typeof right !== 'object')
+    return left === right;
   if (Array.isArray(left) || Array.isArray(right)) {
-    return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => same(item, right[index]!));
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => same(item, right[index]!))
+    );
   }
   const keys = Object.keys(left);
-  return keys.length === Object.keys(right).length && keys.every(key => Object.hasOwn(right, key) && same(left[key]!, right[key]!));
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && same(left[key]!, right[key]!))
+  );
 }
 
 /** Decodes a literal, list, or object with no references or expressions: var files, defaults, and config. */
 export function literal(node: HclExpression, name: string): JsonValue {
   if (node.kind === 'literal') return node.value;
-  if (node.kind === 'list') return node.items.map(item => literal(item, name));
-  if (node.kind === 'object') return Object.fromEntries(node.entries.map(entry => [entry.key, literal(entry.value, name)]));
-  if (node.kind === 'reference') fail(node, `${name} must be a literal; it cannot reference ${node.parts.join('.')}.`);
+  if (node.kind === 'list') return node.items.map((item) => literal(item, name));
+  if (node.kind === 'object')
+    return Object.fromEntries(node.entries.map((entry) => [entry.key, literal(entry.value, name)]));
+  if (node.kind === 'reference')
+    fail(node, `${name} must be a literal; it cannot reference ${node.parts.join('.')}.`);
   if (node.kind === 'call') fail(node, `Function calls are not supported (${node.name}).`);
   fail(node, `${name} must be a literal, not an expression.`);
 }
@@ -78,10 +98,15 @@ export class DerivedSalt {
 
 /** `derive` or `derive("label")`, or null for any other expression. */
 function deriveNode(node: HclExpression): { label?: HclExpression } | null {
-  if (node.kind === 'reference') return node.parts.length === 1 && node.parts[0] === 'derive' ? {} : null;
+  if (node.kind === 'reference')
+    return node.parts.length === 1 && node.parts[0] === 'derive' ? {} : null;
   if (node.kind !== 'call' || node.name !== 'derive') return null;
   const [label] = node.args;
-  if (node.args.length !== 1 || label === undefined) fail(node, 'derive takes one label, such as derive("second-instance"). Write derive alone for the default salt.');
+  if (node.args.length !== 1 || label === undefined)
+    fail(
+      node,
+      'derive takes one label, such as derive("second-instance"). Write derive alone for the default salt.',
+    );
   return { label };
 }
 
@@ -91,7 +116,13 @@ function deriveNode(node: HclExpression): { label?: HclExpression } | null {
  * given for a salt field, where derive is valid; it is called for each derive. Calls `use` for each
  * var.<name> and local.<name>, which drives the unused checks and local cycle detection.
  */
-export function checkReferences(node: HclExpression, what: string, scope: NameScope, use: (root: 'var' | 'local', name: string) => void, salt?: (node: Located) => void): void {
+export function checkReferences(
+  node: HclExpression,
+  what: string,
+  scope: NameScope,
+  use: (root: 'var' | 'local', name: string) => void,
+  salt?: (node: Located) => void,
+): void {
   switch (node.kind) {
     case 'literal':
       return;
@@ -129,19 +160,25 @@ export function checkReferences(node: HclExpression, what: string, scope: NameSc
   }
   const [root, name, field] = node.parts;
   const text = node.parts.join('.');
-  const unsupported: () => never = () => fail(node, `${what} has unsupported reference ${text}. Use var.<name>, local.<name>, contracts.<name>.address, or externals.<name>.address.`);
+  const unsupported: () => never = () =>
+    fail(
+      node,
+      `${what} has unsupported reference ${text}. Use var.<name>, local.<name>, contracts.<name>.address, or externals.<name>.address.`,
+    );
   if (name === undefined) unsupported();
   if (root === 'var' || root === 'local') {
     if (node.parts.length !== 2) unsupported();
     if (root === 'var') scope.variable(name, node, what);
-    else if (!scope.locals.has(name)) fail(node, `${what} uses undefined local.${name}. Define it in a locals block.`);
+    else if (!scope.locals.has(name))
+      fail(node, `${what} uses undefined local.${name}. Define it in a locals block.`);
     use(root, name);
     return;
   }
   if (!RESOURCE_ROOTS.has(root!)) unsupported();
   const addressable = root !== 'calls' && node.parts.length === 3 && field === 'address';
   if (node.parts.length !== 2 && !addressable) unsupported();
-  if (!scope.declared(root as Root, name)) fail(node, `${what} references unknown ${root}.${name}.`);
+  if (!scope.declared(root as Root, name))
+    fail(node, `${what} references unknown ${root}.${name}.`);
 }
 
 /** Evaluates expressions that checkReferences has accepted. */
@@ -165,14 +202,17 @@ export class Evaluator {
 
   /** The salt field: a constant, or derive / derive("label") where evaluation reaches one. */
   salt(node: HclExpression, what: string): JsonValue | DerivedSalt {
-    if (node.kind === 'conditional') return this.salt(this.condition(node.condition, what) ? node.then : node.otherwise, what);
+    if (node.kind === 'conditional')
+      return this.salt(this.condition(node.condition, what) ? node.then : node.otherwise, what);
     const derive = deriveNode(node);
     if (!derive) return this.evaluate(node, what, 'constant');
     const { mixer } = this;
-    if (mixer === null) fail(node, `${what} uses derive, so the spec needs a top-level mixer attribute.`);
+    if (mixer === null)
+      fail(node, `${what} uses derive, so the spec needs a top-level mixer attribute.`);
     if (!derive.label) return new DerivedSalt(deriveSalt(mixer), { mixer });
     const label = this.constant(derive.label, `${what} derive label`);
-    if (typeof label !== 'string' || !MIXER.test(label)) fail(derive.label, `derive takes one label, ${MIXER_HINT}; found ${describeValue(label)}.`);
+    if (typeof label !== 'string' || !MIXER.test(label))
+      fail(derive.label, `derive takes one label, ${MIXER_HINT}; found ${describeValue(label)}.`);
     return new DerivedSalt(deriveSalt(mixer, label), { mixer, label });
   }
 
@@ -183,11 +223,22 @@ export class Evaluator {
 
   /** A resource such as contracts.registry. Unless `live` is false, it must be enabled. */
   resource(node: HclExpression, what: string, roots: Root[], live = true): Target {
-    if (node.kind === 'conditional') return this.resource(this.condition(node.condition, what) ? node.then : node.otherwise, what, roots, live);
+    if (node.kind === 'conditional')
+      return this.resource(
+        this.condition(node.condition, what) ? node.then : node.otherwise,
+        what,
+        roots,
+        live,
+      );
     const local = this.local(node);
-    if (local) return this.resource(local.value, `${what} through local.${local.name}`, roots, live);
-    if (!(node.kind === 'reference' && node.parts.length === 2 && roots.includes(node.parts[0] as Root))) {
-      fail(node, `${what} must be ${roots.map(root => `${root}.<name>`).join(' or ')}.`);
+    if (local)
+      return this.resource(local.value, `${what} through local.${local.name}`, roots, live);
+    if (!(
+      node.kind === 'reference' &&
+      node.parts.length === 2 &&
+      roots.includes(node.parts[0] as Root)
+    )) {
+      fail(node, `${what} must be ${roots.map((root) => `${root}.<name>`).join(' or ')}.`);
     }
     const [root, name] = node.parts as [Root, string];
     if (live) this.scope.live(root, name, node, what);
@@ -196,15 +247,21 @@ export class Evaluator {
 
   /** A list of live resources, such as after. */
   resources(node: HclExpression, what: string, roots: Root[]): Target[] {
-    if (node.kind === 'conditional') return this.resources(this.condition(node.condition, what) ? node.then : node.otherwise, what, roots);
+    if (node.kind === 'conditional')
+      return this.resources(
+        this.condition(node.condition, what) ? node.then : node.otherwise,
+        what,
+        roots,
+      );
     const local = this.local(node);
     if (local) return this.resources(local.value, `${what} through local.${local.name}`, roots);
     if (node.kind !== 'list') fail(node, `${what} must be a list of resources.`);
-    return node.items.map(item => this.resource(item, what, roots));
+    return node.items.map((item) => this.resource(item, what, roots));
   }
 
   local(node: HclExpression): { name: string; value: HclExpression } | null {
-    if (node.kind !== 'reference' || node.parts[0] !== 'local' || node.parts.length !== 2) return null;
+    if (node.kind !== 'reference' || node.parts[0] !== 'local' || node.parts.length !== 2)
+      return null;
     const name = node.parts[1]!;
     return { name, value: this.scope.locals.get(name)!.value };
   }
@@ -212,7 +269,10 @@ export class Evaluator {
   condition(node: HclExpression, what: string, operator = '?'): boolean {
     const value = this.evaluate(node, what, 'condition');
     if (typeof value !== 'boolean') {
-      fail(node, `${operator === '?' ? 'The condition' : `The operand of ${operator}`} in ${what} must be true or false; found ${describeValue(value)}.`);
+      fail(
+        node,
+        `${operator === '?' ? 'The condition' : `The operand of ${operator}`} in ${what} must be true or false; found ${describeValue(value)}.`,
+      );
     }
     return value;
   }
@@ -222,11 +282,17 @@ export class Evaluator {
       case 'literal':
         return node.value;
       case 'list':
-        return node.items.map(item => this.evaluate(item, what, mode));
+        return node.items.map((item) => this.evaluate(item, what, mode));
       case 'object':
-        return Object.fromEntries(node.entries.map(entry => [entry.key, this.evaluate(entry.value, what, mode)]));
+        return Object.fromEntries(
+          node.entries.map((entry) => [entry.key, this.evaluate(entry.value, what, mode)]),
+        );
       case 'conditional':
-        return this.evaluate(this.condition(node.condition, what) ? node.then : node.otherwise, what, mode);
+        return this.evaluate(
+          this.condition(node.condition, what) ? node.then : node.otherwise,
+          what,
+          mode,
+        );
       case 'not':
         return !this.condition(node.operand, what, '!');
       case 'binary':
@@ -250,12 +316,25 @@ export class Evaluator {
     const at = { at: node.operatorAt };
     if (operator === '==' || operator === '!=') {
       if (left !== null && right !== null && kind(left) !== kind(right)) {
-        fail(at, `${operator} in ${what} compares ${describeValue(left)} with ${describeValue(right)}. Both sides must have the same type, or one must be null.`);
+        fail(
+          at,
+          `${operator} in ${what} compares ${describeValue(left)} with ${describeValue(right)}. Both sides must have the same type, or one must be null.`,
+        );
       }
       return same(left, right) === (operator === '==');
     }
-    if (typeof left !== 'number' || typeof right !== 'number') fail(at, `${operator} in ${what} compares numbers; found ${describeValue(left)} and ${describeValue(right)}.`);
-    return operator === '<' ? left < right : operator === '<=' ? left <= right : operator === '>' ? left > right : left >= right;
+    if (typeof left !== 'number' || typeof right !== 'number')
+      fail(
+        at,
+        `${operator} in ${what} compares numbers; found ${describeValue(left)} and ${describeValue(right)}.`,
+      );
+    return operator === '<'
+      ? left < right
+      : operator === '<='
+        ? left <= right
+        : operator === '>'
+          ? left > right
+          : left >= right;
   }
 
   reference(node: HclReference, what: string, mode: Mode): JsonValue {
@@ -268,13 +347,33 @@ export class Evaluator {
       this.referenced.add(name);
       return { ref: `values.${name}` };
     }
-    if (root === 'local') return this.evaluate(this.scope.locals.get(name)!.value, `${what} through local.${name}`, mode);
-    if (mode === 'condition') fail(node, `${what} uses ${text} in a condition or comparison. Those can use only literals, var.<name>, and local.<name>.`);
-    if (mode === 'constant') fail(node, `${what} must be a constant, so it cannot reference ${text}. Use a literal, var.<name>, or local.<name>.`);
+    if (root === 'local')
+      return this.evaluate(
+        this.scope.locals.get(name)!.value,
+        `${what} through local.${name}`,
+        mode,
+      );
+    if (mode === 'condition')
+      fail(
+        node,
+        `${what} uses ${text} in a condition or comparison. Those can use only literals, var.<name>, and local.<name>.`,
+      );
+    if (mode === 'constant')
+      fail(
+        node,
+        `${what} must be a constant, so it cannot reference ${text}. Use a literal, var.<name>, or local.<name>.`,
+      );
     if (node.parts.length === 2 && root !== 'calls') {
-      fail(node, `${what} references the resource ${text}. Use ${text}.address for its address, or list it in after for an execution barrier.`);
+      fail(
+        node,
+        `${what} references the resource ${text}. Use ${text}.address for its address, or list it in after for an execution barrier.`,
+      );
     }
-    if (root === 'calls') fail(node, `${what} has unsupported reference ${text}. Use var.<name>, local.<name>, contracts.<name>.address, or externals.<name>.address.`);
+    if (root === 'calls')
+      fail(
+        node,
+        `${what} has unsupported reference ${text}. Use var.<name>, local.<name>, contracts.<name>.address, or externals.<name>.address.`,
+      );
     this.scope.live(root as Root, name, node, what);
     return { ref: text };
   }

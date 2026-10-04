@@ -10,7 +10,9 @@ import { prepareResources } from '../src/planning/index.ts';
 import { linkBytecode, linkPlaceholder } from '../src/verification/index.ts';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const fixture = JSON.parse(await readFile(path.join(here, 'verification-fixtures/sample-build.json'), 'utf8'));
+const fixture = JSON.parse(
+  await readFile(path.join(here, 'verification-fixtures/sample-build.json'), 'utf8'),
+);
 const LIBRARY = '0x00000000000000000000000000000000000000aa';
 
 function foundry(name, { ast = true } = {}) {
@@ -27,8 +29,15 @@ function compilerOutput(name) {
     abi: artifact.abi,
     metadata: artifact.rawMetadata,
     evm: {
-      bytecode: { object: strip(artifact.bytecode.object), linkReferences: artifact.bytecode.linkReferences },
-      deployedBytecode: { object: strip(artifact.deployedBytecode.object), linkReferences: artifact.deployedBytecode.linkReferences, immutableReferences: artifact.deployedBytecode.immutableReferences ?? {} },
+      bytecode: {
+        object: strip(artifact.bytecode.object),
+        linkReferences: artifact.bytecode.linkReferences,
+      },
+      deployedBytecode: {
+        object: strip(artifact.deployedBytecode.object),
+        linkReferences: artifact.deployedBytecode.linkReferences,
+        immutableReferences: artifact.deployedBytecode.immutableReferences ?? {},
+      },
     },
   };
 }
@@ -54,7 +63,9 @@ function buildInfo(names, ast = fixture.ast) {
     solcLongVersion: fixture.toolchain.solc,
     input: { language: 'Solidity', sources: {}, settings: {} },
     output: {
-      contracts: { [fixture.sourceName]: Object.fromEntries(names.map(name => [name, compilerOutput(name)])) },
+      contracts: {
+        [fixture.sourceName]: Object.fromEntries(names.map((name) => [name, compilerOutput(name)])),
+      },
       sources: { [fixture.sourceName]: { id: 0, ast } },
     },
   };
@@ -85,11 +96,14 @@ test('a Foundry artifact normalizes to plain JSON with named immutables and a ve
   assert.notEqual(artifactHash, hashJson(rest));
   assert.equal(artifact.contractName, 'Sample');
   assert.equal(artifact.sourceName, 'src/Sample.sol');
-  assert.deepEqual(artifact.immutables.map(({ name, visibility, getter }) => ({ name, visibility, getter })), [
-    { name: 'UPSTREAM', visibility: 'public', getter: 'UPSTREAM' },
-    { name: 'LABEL', visibility: 'public', getter: 'LABEL' },
-    { name: 'SELF', visibility: 'private', getter: undefined },
-  ]);
+  assert.deepEqual(
+    artifact.immutables.map(({ name, visibility, getter }) => ({ name, visibility, getter })),
+    [
+      { name: 'UPSTREAM', visibility: 'public', getter: 'UPSTREAM' },
+      { name: 'LABEL', visibility: 'public', getter: 'LABEL' },
+      { name: 'SELF', visibility: 'private', getter: undefined },
+    ],
+  );
   assert.equal(artifact.buildIdentity.compiler, 'solc');
   assert.equal(artifact.buildIdentity.version, fixture.toolchain.solc);
   assert.equal(artifact.buildIdentity.metadataVerified, true);
@@ -112,17 +126,32 @@ test('top-level ABI order preserves the original ABI and deployment identity', (
   assert.equal(second.artifactHash, first.artifactHash);
 
   const withoutOutputs = foundry('Sample');
-  delete withoutOutputs.abi.find(item => item.name === 'bind').outputs;
-  assert.equal(normalizeArtifact(withoutOutputs, 'No empty outputs').artifactHash, first.artifactHash);
+  delete withoutOutputs.abi.find((item) => item.name === 'bind').outputs;
+  assert.equal(
+    normalizeArtifact(withoutOutputs, 'No empty outputs').artifactHash,
+    first.artifactHash,
+  );
 
   const spec = {
     schema: 1,
     chainId: 31337,
-    factory: { address: '0x4e59b44847b379578588920cA78FbF26c0B4956C', codeHash: `0x${'11'.repeat(32)}` },
-    contracts: [{ id: 'sample', artifact: 'Sample.json', salt: `0x${'22'.repeat(32)}`, args: ['0x0000000000000000000000000000000000000001', `0x${'33'.repeat(32)}`] }],
+    factory: {
+      address: '0x4e59b44847b379578588920cA78FbF26c0B4956C',
+      codeHash: `0x${'11'.repeat(32)}`,
+    },
+    contracts: [
+      {
+        id: 'sample',
+        artifact: 'Sample.json',
+        salt: `0x${'22'.repeat(32)}`,
+        args: ['0x0000000000000000000000000000000000000001', `0x${'33'.repeat(32)}`],
+      },
+    ],
   };
-  const originalResource = prepareResources(spec, undefined, new Map([['sample', first]])).resources[0];
-  const reorderedResource = prepareResources(spec, undefined, new Map([['sample', second]])).resources[0];
+  const originalResource = prepareResources(spec, undefined, new Map([['sample', first]]))
+    .resources[0];
+  const reorderedResource = prepareResources(spec, undefined, new Map([['sample', second]]))
+    .resources[0];
   assert.equal(reorderedResource.initcode, originalResource.initcode);
   assert.equal(reorderedResource.address, originalResource.address);
 });
@@ -131,20 +160,33 @@ test('metadata and build-info compare ABI entries without relaxing parameter or 
   const raw = foundry('Sample');
   raw.abi.reverse();
   const compiler = compilerOutput('Sample');
-  assert.doesNotThrow(() => normalizeArtifact(raw, 'Metadata and build-info', { compilerOutput: compiler }));
+  assert.doesNotThrow(() =>
+    normalizeArtifact(raw, 'Metadata and build-info', { compilerOutput: compiler }),
+  );
 
   const hardhat = hardhat2('Sample');
   hardhat.abi.reverse();
   assert.doesNotThrow(() => normalizeArtifact(hardhat, 'Build-info', { compilerOutput: compiler }));
   const wrongBuildInfo = structuredClone(hardhat);
-  wrongBuildInfo.abi.find(item => item.type === 'constructor').inputs[0].type = 'uint256';
-  assert.throws(() => normalizeArtifact(wrongBuildInfo, 'Wrong build-info', { compilerOutput: compiler }), /ABI differs from its build-info compiler output/);
+  wrongBuildInfo.abi.find((item) => item.type === 'constructor').inputs[0].type = 'uint256';
+  assert.throws(
+    () => normalizeArtifact(wrongBuildInfo, 'Wrong build-info', { compilerOutput: compiler }),
+    /ABI differs from its build-info compiler output/,
+  );
 
   const changes = [
-    abi => { abi.find(item => item.type === 'constructor').inputs[0].type = 'uint256'; },
-    abi => { abi.find(item => item.type === 'constructor').inputs.reverse(); },
-    abi => { abi.pop(); },
-    abi => { abi.push(structuredClone(abi.find(item => item.type === 'function'))); },
+    (abi) => {
+      abi.find((item) => item.type === 'constructor').inputs[0].type = 'uint256';
+    },
+    (abi) => {
+      abi.find((item) => item.type === 'constructor').inputs.reverse();
+    },
+    (abi) => {
+      abi.pop();
+    },
+    (abi) => {
+      abi.push(structuredClone(abi.find((item) => item.type === 'function')));
+    },
   ];
   const noMetadata = foundry('Sample');
   delete noMetadata.rawMetadata;
@@ -153,10 +195,16 @@ test('metadata and build-info compare ABI entries without relaxing parameter or 
   for (const change of changes) {
     const edited = structuredClone(raw);
     change(edited.abi);
-    assert.throws(() => normalizeArtifact(edited, 'Edited'), /ABI differs from its compiler metadata/);
+    assert.throws(
+      () => normalizeArtifact(edited, 'Edited'),
+      /ABI differs from its compiler metadata/,
+    );
     delete edited.rawMetadata;
     delete edited.metadata;
-    assert.notEqual(normalizeArtifact(edited, 'Edited without metadata').artifactHash, baselineHash);
+    assert.notEqual(
+      normalizeArtifact(edited, 'Edited without metadata').artifactHash,
+      baselineHash,
+    );
   }
 });
 
@@ -164,10 +212,27 @@ test('tuple component order remains part of ABI identity', () => {
   const raw = foundry('Sample');
   delete raw.rawMetadata;
   delete raw.metadata;
-  raw.abi.push({ type: 'function', name: 'tupleValue', inputs: [{ name: 'value', type: 'tuple', components: [{ name: 'first', type: 'address' }, { name: 'second', type: 'uint256' }] }], outputs: [] });
+  raw.abi.push({
+    type: 'function',
+    name: 'tupleValue',
+    inputs: [
+      {
+        name: 'value',
+        type: 'tuple',
+        components: [
+          { name: 'first', type: 'address' },
+          { name: 'second', type: 'uint256' },
+        ],
+      },
+    ],
+    outputs: [],
+  });
   const changed = structuredClone(raw);
   changed.abi.at(-1).inputs[0].components.reverse();
-  assert.notEqual(normalizeArtifact(raw, 'Tuple').artifactHash, normalizeArtifact(changed, 'Reordered tuple').artifactHash);
+  assert.notEqual(
+    normalizeArtifact(raw, 'Tuple').artifactHash,
+    normalizeArtifact(changed, 'Reordered tuple').artifactHash,
+  );
 });
 
 test('Foundry, Hardhat 3, solc, and Hardhat 2 with build-info normalize to the same bytecode model', () => {
@@ -177,9 +242,20 @@ test('Foundry, Hardhat 3, solc, and Hardhat 2 with build-info normalize to the s
   flat.immutableReferences = fixture.contracts.Sample.deployedBytecode.immutableReferences;
   flat.rawMetadata = fixture.contracts.Sample.rawMetadata;
   const hardhat3 = { ...flat, _format: 'hh3-artifact-1', inputSourceName: fixture.sourceName };
-  const solc = { abi: fixture.contracts.Sample.abi, metadata: fixture.contracts.Sample.rawMetadata, evm: compilerOutput('Sample').evm };
-  const withBuildInfo = normalizeArtifact(hardhat2('Sample'), 'Hardhat 2', { compilerOutput: compilerOutput('Sample') });
-  for (const artifact of [normalizeArtifact(flat, 'flat'), normalizeArtifact(hardhat3, 'Hardhat 3'), normalizeArtifact(solc, 'solc'), withBuildInfo]) {
+  const solc = {
+    abi: fixture.contracts.Sample.abi,
+    metadata: fixture.contracts.Sample.rawMetadata,
+    evm: compilerOutput('Sample').evm,
+  };
+  const withBuildInfo = normalizeArtifact(hardhat2('Sample'), 'Hardhat 2', {
+    compilerOutput: compilerOutput('Sample'),
+  });
+  for (const artifact of [
+    normalizeArtifact(flat, 'flat'),
+    normalizeArtifact(hardhat3, 'Hardhat 3'),
+    normalizeArtifact(solc, 'solc'),
+    withBuildInfo,
+  ]) {
     assert.deepEqual(artifact.bytecode, reference.bytecode);
     assert.deepEqual(artifact.deployedBytecode, reference.deployedBytecode);
     assert.deepEqual(artifact.buildIdentity, reference.buildIdentity);
@@ -187,8 +263,14 @@ test('Foundry, Hardhat 3, solc, and Hardhat 2 with build-info normalize to the s
 });
 
 test('an artifact with no immutable references or no bytecode is incomplete', () => {
-  assert.throws(() => normalizeArtifact(hardhat2('Sample'), 'Hardhat 2'), /no immutable references. Supply its build-info/);
-  assert.throws(() => normalizeArtifact({ ...foundry('Sample'), abi: undefined }, 'NoAbi'), /no ABI/);
+  assert.throws(
+    () => normalizeArtifact(hardhat2('Sample'), 'Hardhat 2'),
+    /no immutable references. Supply its build-info/,
+  );
+  assert.throws(
+    () => normalizeArtifact({ ...foundry('Sample'), abi: undefined }, 'NoAbi'),
+    /no ABI/,
+  );
   const empty = foundry('Sample');
   empty.bytecode.object = '0x';
   assert.throws(() => normalizeArtifact(empty, 'Interface'), /no creation bytecode/);
@@ -201,20 +283,37 @@ test('link placeholders are allowed only where a link reference covers them', ()
   const linked = normalizeArtifact(foundry('Linked'), 'Linked');
   const key = `${fixture.sourceName}:Doubler`;
   assert.ok(linked.bytecode.object.includes(linkPlaceholder(key)));
-  const initcode = linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, { [key]: LIBRARY });
+  const initcode = linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, {
+    [key]: LIBRARY,
+  });
   assert.match(initcode, /^0x[0-9a-f]+$/);
   assert.ok(initcode.includes(strip(LIBRARY)));
-  assert.throws(() => linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, {}), /Missing linked library/);
-  assert.throws(() => linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, { [key]: LIBRARY, 'Other.sol:Lib': LIBRARY }), /Unknown linked library/);
+  assert.throws(
+    () => linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, {}),
+    /Missing linked library/,
+  );
+  assert.throws(
+    () =>
+      linkBytecode(linked.bytecode.object, linked.bytecode.linkReferences, {
+        [key]: LIBRARY,
+        'Other.sol:Lib': LIBRARY,
+      }),
+    /Unknown linked library/,
+  );
 
   const stray = foundry('Linked');
   stray.bytecode.linkReferences = {};
   assert.throws(() => normalizeArtifact(stray, 'Stray'), /unresolved link placeholder/);
   const shifted = foundry('Linked');
   shifted.bytecode.linkReferences[fixture.sourceName].Doubler[0].start += 1;
-  assert.throws(() => normalizeArtifact(shifted, 'Shifted'), /does not cover its placeholder|unresolved link placeholder/);
+  assert.throws(
+    () => normalizeArtifact(shifted, 'Shifted'),
+    /does not cover its placeholder|unresolved link placeholder/,
+  );
   const renamed = foundry('Linked');
-  renamed.deployedBytecode.linkReferences = { 'Other.sol': { Doubler: renamed.deployedBytecode.linkReferences[fixture.sourceName].Doubler } };
+  renamed.deployedBytecode.linkReferences = {
+    'Other.sol': { Doubler: renamed.deployedBytecode.linkReferences[fixture.sourceName].Doubler },
+  };
   assert.throws(() => normalizeArtifact(renamed, 'Renamed'), /does not cover its placeholder/);
 });
 
@@ -235,10 +334,19 @@ test('immutable ranges must be zero-filled, in range, and clear of link referenc
 test('metadata that does not match the bytecode is a build mismatch', () => {
   const edited = foundry('Sample');
   edited.rawMetadata = edited.rawMetadata.replace('"runs":200', '"runs":201');
-  assert.throws(() => normalizeArtifact(edited, 'Edited'), /does not match the metadata hash in its bytecode/);
+  assert.throws(
+    () => normalizeArtifact(edited, 'Edited'),
+    /does not match the metadata hash in its bytecode/,
+  );
   const compiler = foundry('Sample');
-  compiler.rawMetadata = compiler.rawMetadata.replace(fixture.toolchain.solc, '0.8.29+commit.ab55807c');
-  assert.throws(() => normalizeArtifact(compiler, 'Compiler'), /names compiler 0.8.29\+commit.ab55807c, but its bytecode was built by solc 0.8.30/);
+  compiler.rawMetadata = compiler.rawMetadata.replace(
+    fixture.toolchain.solc,
+    '0.8.29+commit.ab55807c',
+  );
+  assert.throws(
+    () => normalizeArtifact(compiler, 'Compiler'),
+    /names compiler 0.8.29\+commit.ab55807c, but its bytecode was built by solc 0.8.30/,
+  );
   const unverifiable = foundry('Sample');
   delete unverifiable.rawMetadata;
   const identity = normalizeArtifact(unverifiable, 'ObjectOnly').buildIdentity;
@@ -248,8 +356,14 @@ test('metadata that does not match the bytecode is a build mismatch', () => {
 
 test('an AST from another compilation is rejected, and a missing AST leaves immutables unnamed', () => {
   const unnamed = normalizeArtifact(foundry('Sample', { ast: false }), 'Unnamed');
-  assert.deepEqual(unnamed.immutables.map(item => item.name), [undefined, undefined, undefined]);
-  assert.throws(() => normalizeArtifact(foundry('Sample', { ast: false }), 'Stale', { sources: [staleAst()] }), /AST node 16 is not immutable/);
+  assert.deepEqual(
+    unnamed.immutables.map((item) => item.name),
+    [undefined, undefined, undefined],
+  );
+  assert.throws(
+    () => normalizeArtifact(foundry('Sample', { ast: false }), 'Stale', { sources: [staleAst()] }),
+    /AST node 16 is not immutable/,
+  );
 });
 
 test('loadArtifacts reads Foundry build-info from the same compilation and ignores stale build-info', async () => {
@@ -257,18 +371,45 @@ test('loadArtifacts reads Foundry build-info from the same compilation and ignor
   try {
     await mkdir(path.join(root, 'out/Sample.sol'), { recursive: true });
     await mkdir(path.join(root, 'out/build-info'), { recursive: true });
-    await writeFile(path.join(root, 'out/Sample.sol/Sample.json'), JSON.stringify(foundry('Sample', { ast: false })));
+    await writeFile(
+      path.join(root, 'out/Sample.sol/Sample.json'),
+      JSON.stringify(foundry('Sample', { ast: false })),
+    );
     const stale = buildInfo(['Sample']);
-    stale.output.contracts[fixture.sourceName].Sample.evm.deployedBytecode.object = strip(fixture.contracts.Stamped.deployedBytecode.object);
+    stale.output.contracts[fixture.sourceName].Sample.evm.deployedBytecode.object = strip(
+      fixture.contracts.Stamped.deployedBytecode.object,
+    );
     await writeFile(path.join(root, 'out/build-info/0-stale.json'), JSON.stringify(stale));
-    await writeFile(path.join(root, 'out/build-info/1-minimal.json'), JSON.stringify({ id: 'x', source_id_to_path: {}, language: 'Solidity' }));
-    await writeFile(path.join(root, 'out/build-info/2-match.json'), JSON.stringify(buildInfo(['Sample'])));
-    const spec = { contracts: [{ id: 'first', name: 'Sample', artifact: '../out/Sample.sol/Sample.json' }, { id: 'second', artifact: '../out/Sample.sol/Sample.json' }] };
+    await writeFile(
+      path.join(root, 'out/build-info/1-minimal.json'),
+      JSON.stringify({ id: 'x', source_id_to_path: {}, language: 'Solidity' }),
+    );
+    await writeFile(
+      path.join(root, 'out/build-info/2-match.json'),
+      JSON.stringify(buildInfo(['Sample'])),
+    );
+    const spec = {
+      contracts: [
+        { id: 'first', name: 'Sample', artifact: '../out/Sample.sol/Sample.json' },
+        { id: 'second', artifact: '../out/Sample.sol/Sample.json' },
+      ],
+    };
     const artifacts = await loadArtifacts(spec, path.join(root, 'specs/spec.json'));
     assert.deepEqual([...artifacts.keys()], ['first', 'second']);
     assert.equal(artifacts.get('first'), artifacts.get('second'));
-    assert.deepEqual(artifacts.get('first').immutables.map(item => item.getter ?? null), ['UPSTREAM', 'LABEL', null]);
-    await assert.rejects(loadArtifacts({ contracts: [{ id: 'wrong', name: 'Stamped', artifact: '../out/Sample.sol/Sample.json' }] }, path.join(root, 'specs/spec.json')), /expects Stamped, but .* holds Sample/);
+    assert.deepEqual(
+      artifacts.get('first').immutables.map((item) => item.getter ?? null),
+      ['UPSTREAM', 'LABEL', null],
+    );
+    await assert.rejects(
+      loadArtifacts(
+        {
+          contracts: [{ id: 'wrong', name: 'Stamped', artifact: '../out/Sample.sol/Sample.json' }],
+        },
+        path.join(root, 'specs/spec.json'),
+      ),
+      /expects Stamped, but .* holds Sample/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -279,14 +420,32 @@ test('loadArtifacts reads Hardhat 2 immutable references and ASTs through the de
   try {
     await mkdir(path.join(root, 'artifacts/contracts/Sample.sol'), { recursive: true });
     await mkdir(path.join(root, 'artifacts/build-info'), { recursive: true });
-    await writeFile(path.join(root, 'artifacts/contracts/Sample.sol/Stamped.json'), JSON.stringify(hardhat2('Stamped')));
-    await writeFile(path.join(root, 'artifacts/contracts/Sample.sol/Stamped.dbg.json'), JSON.stringify({ _format: 'hh-sol-dbg-1', buildInfo: '../../build-info/abc.json' }));
-    await writeFile(path.join(root, 'artifacts/build-info/abc.json'), JSON.stringify(buildInfo(['Stamped'])));
-    const artifacts = await loadArtifacts({ contracts: [{ id: 'stamped', artifact: 'artifacts/contracts/Sample.sol/Stamped.json' }] }, path.join(root, 'spec.json'));
+    await writeFile(
+      path.join(root, 'artifacts/contracts/Sample.sol/Stamped.json'),
+      JSON.stringify(hardhat2('Stamped')),
+    );
+    await writeFile(
+      path.join(root, 'artifacts/contracts/Sample.sol/Stamped.dbg.json'),
+      JSON.stringify({ _format: 'hh-sol-dbg-1', buildInfo: '../../build-info/abc.json' }),
+    );
+    await writeFile(
+      path.join(root, 'artifacts/build-info/abc.json'),
+      JSON.stringify(buildInfo(['Stamped'])),
+    );
+    const artifacts = await loadArtifacts(
+      { contracts: [{ id: 'stamped', artifact: 'artifacts/contracts/Sample.sol/Stamped.json' }] },
+      path.join(root, 'spec.json'),
+    );
     const stamped = artifacts.get('stamped');
-    assert.deepEqual(stamped.immutables.map(item => item.getter), ['CREATED_AT', 'SEED']);
+    assert.deepEqual(
+      stamped.immutables.map((item) => item.getter),
+      ['CREATED_AT', 'SEED'],
+    );
     assert.equal(stamped.buildIdentity.metadataVerified, true);
-    assert.deepEqual(stamped.deployedBytecode, normalizeArtifact(foundry('Stamped'), 'Stamped').deployedBytecode);
+    assert.deepEqual(
+      stamped.deployedBytecode,
+      normalizeArtifact(foundry('Stamped'), 'Stamped').deployedBytecode,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -300,10 +459,16 @@ test('adapters are deterministic, typed, and refuse unsafe file names', async ()
     const first = await readFile(path.join(root, 'sample.ts'), 'utf8');
     await generateAdapters(artifacts, root);
     assert.equal(await readFile(path.join(root, 'sample.ts'), 'utf8'), first);
-    assert.match(first, new RegExp(`artifactHash = "${artifacts.get('sample').artifactHash}" as const`));
+    assert.match(
+      first,
+      new RegExp(`artifactHash = "${artifacts.get('sample').artifactHash}" as const`),
+    );
     assert.match(first, /export const immutables = /);
     assert.match(first, /export function at\(address: Address, client: PublicClient\)/);
-    await assert.rejects(generateAdapters(new Map([['../escape', artifacts.get('sample')]]), root), /not a safe file name/);
+    await assert.rejects(
+      generateAdapters(new Map([['../escape', artifacts.get('sample')]]), root),
+      /not a safe file name/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

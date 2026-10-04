@@ -15,24 +15,30 @@ let anvil;
 let rpcUrl;
 
 function runSchedule(deployers, spec = 'test/fixtures/parallel-lab.json', parallel = false) {
-  return spawnSync(process.execPath, [
-    'dist/cli.js',
-    'schedule',
-    '--fixture',
-    spec,
-    '--deployers',
-    deployers.join(','),
-    ...(parallel ? ['--parallel'] : []),
-  ], {
-    cwd: projectDirectory,
-    encoding: 'utf8',
-    env: { ...process.env, ETH_RPC_URL: rpcUrl },
-  });
+  return spawnSync(
+    process.execPath,
+    [
+      'dist/cli.js',
+      'schedule',
+      '--fixture',
+      spec,
+      '--deployers',
+      deployers.join(','),
+      ...(parallel ? ['--parallel'] : []),
+    ],
+    {
+      cwd: projectDirectory,
+      encoding: 'utf8',
+      env: { ...process.env, ETH_RPC_URL: rpcUrl },
+    },
+  );
 }
 
 function runCli(...arguments_) {
   return spawnSync(process.execPath, ['dist/cli.js', ...arguments_], {
-    cwd: projectDirectory, encoding: 'utf8', env: { ...process.env, ETH_RPC_URL: rpcUrl },
+    cwd: projectDirectory,
+    encoding: 'utf8',
+    env: { ...process.env, ETH_RPC_URL: rpcUrl },
   });
 }
 
@@ -57,19 +63,31 @@ test('schedule defaults to the primary deployer and uses both only with --parall
   const first = JSON.parse(forward.stdout);
   const second = JSON.parse(reverse.stdout);
   assert.equal(defaultSchedule.parallel, false);
-  assert.deepEqual(defaultSchedule.waves[0].batches.flat().map(item => item.deployer), [primary, primary]);
+  assert.deepEqual(
+    defaultSchedule.waves[0].batches.flat().map((item) => item.deployer),
+    [primary, primary],
+  );
   assert.equal(first.parallel, true);
   const firstWave = first.waves[0].batches.flat();
-  assert.deepEqual(firstWave.map(item => item.id), [
-    'contract:alpha',
-    'contract:beta',
-  ]);
-  assert.deepEqual(firstWave.map(item => item.deployer), [primary, secondary]);
-  assert.deepEqual(first.waves[1].batches.flat().map(item => item.id), ['contract:gamma']);
+  assert.deepEqual(
+    firstWave.map((item) => item.id),
+    ['contract:alpha', 'contract:beta'],
+  );
+  assert.deepEqual(
+    firstWave.map((item) => item.deployer),
+    [primary, secondary],
+  );
+  assert.deepEqual(
+    first.waves[1].batches.flat().map((item) => item.id),
+    ['contract:gamma'],
+  );
   assert.deepEqual(first.deferred, []);
   assert.deepEqual(first.ownerActions, []);
 
-  const addresses = schedule => Object.fromEntries(schedule.waves.flatMap(wave => wave.batches.flat()).map(item => [item.id, item.address]));
+  const addresses = (schedule) =>
+    Object.fromEntries(
+      schedule.waves.flatMap((wave) => wave.batches.flat()).map((item) => [item.id, item.address]),
+    );
   assert.deepEqual(addresses(second), addresses(first));
   assert.match(runCli('schedule', '--help').stdout, /default: serial/);
 });
@@ -80,9 +98,18 @@ test('schema 2 schedules a stored address in the same wave and explains each exe
   const schedule = JSON.parse(result.stdout);
   assert.equal(schedule.waves.length, 1);
   const entries = schedule.waves[0].batches.flat();
-  assert.deepEqual(entries.map(item => item.id).sort(), ['contract:alpha', 'contract:beta', 'contract:gamma']);
-  assert.ok(entries.every(item => Array.isArray(item.after) && item.after.length === 0));
-  assert.deepEqual(schedule.graphs.resolution.find(node => node.id === 'contract:gamma').needs.map(edge => edge.id), ['contract:alpha']);
+  assert.deepEqual(entries.map((item) => item.id).sort(), [
+    'contract:alpha',
+    'contract:beta',
+    'contract:gamma',
+  ]);
+  assert.ok(entries.every((item) => Array.isArray(item.after) && item.after.length === 0));
+  assert.deepEqual(
+    schedule.graphs.resolution
+      .find((node) => node.id === 'contract:gamma')
+      .needs.map((edge) => edge.id),
+    ['contract:alpha'],
+  );
   assert.equal(schedule.warnings.length, 1);
 });
 
@@ -102,16 +129,27 @@ test('saved schedules validate identity before funding and keep blocked plans in
   const artifactFile = path.join(directory, 'Minimal.json');
   const planFile = path.join(directory, 'plan.json');
   const source = path.join(projectDirectory, 'test/fixtures');
-  const schedule = (...args) => runCli('schedule', '--fixture', specFile, '--plan', planFile, ...args);
-  const save = async plan => writeFile(planFile, JSON.stringify(plan));
-  const rehash = plan => {
+  const schedule = (...args) =>
+    runCli('schedule', '--fixture', specFile, '--plan', planFile, ...args);
+  const save = async (plan) => writeFile(planFile, JSON.stringify(plan));
+  const rehash = (plan) => {
     const { planHash, ...fields } = plan;
     return { ...fields, planHash: hashJson(fields) };
   };
   try {
     await copyFile(path.join(source, 'minimal-create2.json'), specFile);
     await copyFile(path.join(source, 'Minimal.json'), artifactFile);
-    const planned = runCli('plan', '--fixture', specFile, '--out', planFile, '--deployers', primary, '--max-spend-wei', '100000000000000000000');
+    const planned = runCli(
+      'plan',
+      '--fixture',
+      specFile,
+      '--out',
+      planFile,
+      '--deployers',
+      primary,
+      '--max-spend-wei',
+      '100000000000000000000',
+    );
     assert.equal(planned.status, 0, planned.stderr);
     const original = JSON.parse(planned.stdout);
     const valid = schedule('--deployers', primary);
@@ -122,7 +160,18 @@ test('saved schedules validate identity before funding and keep blocked plans in
     assert.equal(preview.waves[0].batches[0][0].id, 'contract:minimal');
     assert.equal(preview.deployers[0].address, primary);
 
-    const pipelineArgs = ['plan', '--fixture', specFile, '--out', planFile, '--pipeline', '--deployers', `${primary},${secondary}`, '--max-spend-wei', '100000000000000000000'];
+    const pipelineArgs = [
+      'plan',
+      '--fixture',
+      specFile,
+      '--out',
+      planFile,
+      '--pipeline',
+      '--deployers',
+      `${primary},${secondary}`,
+      '--max-spend-wei',
+      '100000000000000000000',
+    ];
     assert.equal(runCli(...pipelineArgs).status, 0);
     const pinnedSerial = schedule();
     assert.equal(pinnedSerial.status, 0, pinnedSerial.stderr);
@@ -154,22 +203,46 @@ test('saved schedules validate identity before funding and keep blocked plans in
     expectStale('stale-artifact');
     await copyFile(path.join(source, 'Minimal.json'), artifactFile);
 
-    await save(rehash({ ...original, artifactHashes: { ...original.artifactHashes, 'contract:extra': `0x${'11'.repeat(32)}` } }));
+    await save(
+      rehash({
+        ...original,
+        artifactHashes: { ...original.artifactHashes, 'contract:extra': `0x${'11'.repeat(32)}` },
+      }),
+    );
     expectStale('stale-artifact');
     await save(rehash({ ...original, chain: { ...original.chain, id: 1 } }));
     expectStale('wrong-chain');
-    await save(rehash({ ...original, observed: { ...original.observed, blockHash: `0x${'33'.repeat(32)}` } }));
+    await save(
+      rehash({
+        ...original,
+        observed: { ...original.observed, blockHash: `0x${'33'.repeat(32)}` },
+      }),
+    );
     expectStale('stale-observation');
 
     await copyFile(path.join(source, 'minimal-absent-external.json'), specFile);
-    const blockedPlan = runCli('plan', '--fixture', specFile, '--out', planFile, '--deployers', primary, '--max-spend-wei', '100000000000000000000');
+    const blockedPlan = runCli(
+      'plan',
+      '--fixture',
+      specFile,
+      '--out',
+      planFile,
+      '--deployers',
+      primary,
+      '--max-spend-wei',
+      '100000000000000000000',
+    );
     assert.equal(blockedPlan.status, 1);
     const blocked = schedule();
     assert.equal(blocked.status, 0, blocked.stderr);
     const blockedPreview = JSON.parse(blocked.stdout);
     assert.equal(blockedPreview.applicable, false);
     assert.equal(blockedPreview.snapshot, 'plan-observed');
-    assert.ok(blockedPreview.resources.some(resource => resource.action === 'conflict' && resource.observation));
+    assert.ok(
+      blockedPreview.resources.some(
+        (resource) => resource.action === 'conflict' && resource.observation,
+      ),
+    );
     assert.equal(blockedPreview.deployers, undefined);
     assert.equal(blockedPreview.waves, undefined);
   } finally {

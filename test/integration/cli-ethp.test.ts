@@ -34,7 +34,7 @@ function succeeded(result) {
   return JSON.parse(result.stdout);
 }
 
-const file = name => path.join(directory, name);
+const file = (name) => path.join(directory, name);
 const nonce = () => anvil.rpc('eth_getTransactionCount', [owner, 'latest']);
 
 before(async () => {
@@ -52,33 +52,73 @@ after(async () => {
 });
 
 test('the project compiles to its JSON lowering and plans its resources', async () => {
-  assert.deepEqual(succeeded(runCli(['compile'])), parseSpec(JSON.parse(await readFile(file('lab.json'), 'utf8'))));
+  assert.deepEqual(
+    succeeded(runCli(['compile'])),
+    parseSpec(JSON.parse(await readFile(file('lab.json'), 'utf8'))),
+  );
   succeeded(runCli(['validate']));
 
-  const ethp = succeeded(runCli(['plan', '--out', '-', '--deployers', owner, '--owner', owner, '--max-spend-wei', maxSpend]));
-  assert.deepEqual(ethp.resources.map(resource => [resource.id, resource.action]), [
-    ['external:create2Factory', 'reuse'],
-    ['contract:alpha', 'deploy'],
-    ['contract:beta', 'deploy'],
-    ['contract:doubler', 'deploy'],
-    ['contract:gamma', 'deploy'],
-    ['contract:linked', 'deploy'],
-    ['call:bind', 'call'],
-  ]);
+  const ethp = succeeded(
+    runCli([
+      'plan',
+      '--out',
+      '-',
+      '--deployers',
+      owner,
+      '--owner',
+      owner,
+      '--max-spend-wei',
+      maxSpend,
+    ]),
+  );
+  assert.deepEqual(
+    ethp.resources.map((resource) => [resource.id, resource.action]),
+    [
+      ['external:create2Factory', 'reuse'],
+      ['contract:alpha', 'deploy'],
+      ['contract:beta', 'deploy'],
+      ['contract:doubler', 'deploy'],
+      ['contract:gamma', 'deploy'],
+      ['contract:linked', 'deploy'],
+      ['call:bind', 'call'],
+    ],
+  );
   assert.deepEqual(ethp.warnings, []);
 });
 
 test('editing .ethpvars after planning stops a saved-plan apply at stale-spec before signing', async () => {
   const planFile = file('stale-plan.json');
-  succeeded(runCli(['plan', '--out', planFile, '--state', file('stale-state.json'),
-    '--deployers', owner, '--owner', owner, '--max-spend-wei', maxSpend]));
+  succeeded(
+    runCli([
+      'plan',
+      '--out',
+      planFile,
+      '--state',
+      file('stale-state.json'),
+      '--deployers',
+      owner,
+      '--owner',
+      owner,
+      '--max-spend-wei',
+      maxSpend,
+    ]),
+  );
   const vars = await readFile(file('main.ethpvars'), 'utf8');
-  await writeFile(file('main.ethpvars'), vars.replace('0x70997970C51812dc3A010C7d01b50e0d17dc79C8', '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC'));
+  await writeFile(
+    file('main.ethpvars'),
+    vars.replace(
+      '0x70997970C51812dc3A010C7d01b50e0d17dc79C8',
+      '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC',
+    ),
+  );
   try {
     const nonceBefore = await nonce();
     const stale = runCli(['apply', '--plan', planFile, '--state', file('stale-state.json')], true);
     assert.equal(stale.status, 1, stale.stdout);
-    assert.match(`${stale.stdout}\n${stale.stderr}`, /stale-spec\): The spec changed after the plan was created/);
+    assert.match(
+      `${stale.stdout}\n${stale.stderr}`,
+      /stale-spec\): The spec changed after the plan was created/,
+    );
     assert.equal(await nonce(), nonceBefore);
   } finally {
     await writeFile(file('main.ethpvars'), vars);
@@ -96,14 +136,36 @@ test('plan bundles split files and saved-plan apply rejects an edit to a split f
   try {
     assert.deepEqual(succeeded(runCli(['compile'])), before);
     const planFile = file('split-plan.json');
-    const plan = succeeded(runCli(['plan', '--out', planFile, '--state', file('split-state.json'),
-      '--deployers', owner, '--owner', owner, '--max-spend-wei', maxSpend]));
-    assert.ok(plan.resources.some(resource => resource.id === 'external:create2Factory'));
-    await writeFile(splitFile, external[0].replace('0x4e59b44847b379578588920cA78FbF26c0B4956C', '0x0000000000000000000000000000000000000001'));
+    const plan = succeeded(
+      runCli([
+        'plan',
+        '--out',
+        planFile,
+        '--state',
+        file('split-state.json'),
+        '--deployers',
+        owner,
+        '--owner',
+        owner,
+        '--max-spend-wei',
+        maxSpend,
+      ]),
+    );
+    assert.ok(plan.resources.some((resource) => resource.id === 'external:create2Factory'));
+    await writeFile(
+      splitFile,
+      external[0].replace(
+        '0x4e59b44847b379578588920cA78FbF26c0B4956C',
+        '0x0000000000000000000000000000000000000001',
+      ),
+    );
     const nonceBefore = await nonce();
     const stale = runCli(['apply', '--plan', planFile, '--state', file('split-state.json')], true);
     assert.equal(stale.status, 1, stale.stdout);
-    assert.match(`${stale.stdout}\n${stale.stderr}`, /stale-spec\): The spec changed after the plan was created/);
+    assert.match(
+      `${stale.stdout}\n${stale.stderr}`,
+      /stale-spec\): The spec changed after the plan was created/,
+    );
     assert.equal(await nonce(), nonceBefore);
   } finally {
     await writeFile(file('main.ethp'), main);
@@ -112,7 +174,9 @@ test('plan bundles split files and saved-plan apply rejects an edit to a split f
 });
 
 test('.ethpconfig supplies plan and fee options, and apply sends the compiled call and verifies its check', async () => {
-  await writeFile(file('main.ethpconfig'), `defaults {
+  await writeFile(
+    file('main.ethpconfig'),
+    `defaults {
   state = "deploy/state.json"
 }
 
@@ -127,35 +191,56 @@ command "apply" {
   priority-fee-per-gas = "1500000000"
   gas-multiplier       = "1.5"
 }
-`);
+`,
+  );
   const planned = runCli(['plan', '--max-spend-wei', maxSpend]);
   const plan = succeeded(planned);
-  assert.match(planned.stderr, /Using --deployers, --out, --owner, --state from .*main\.ethpconfig\./);
+  assert.match(
+    planned.stderr,
+    /Using --deployers, --out, --owner, --state from .*main\.ethpconfig\./,
+  );
   assert.deepEqual(JSON.parse(await readFile(file('deploy/plan.json'), 'utf8')), plan);
 
   const nonceBefore = await nonce();
   const appliedRun = runCli(['apply', '--json', '--plan', file('deploy/plan.json')], true);
   const applied = succeeded(appliedRun);
-  assert.match(appliedRun.stderr, /Using --gas-multiplier, --max-fee-per-gas, --priority-fee-per-gas, --state from .*main\.ethpconfig\./);
+  assert.match(
+    appliedRun.stderr,
+    /Using --gas-multiplier, --max-fee-per-gas, --priority-fee-per-gas, --state from .*main\.ethpconfig\./,
+  );
   assert.equal(applied.status, 'applied');
   assert.equal(applied.transactionsSigned, 6);
   assert.equal(BigInt(await nonce()) - BigInt(nonceBefore), 6n);
   const state = JSON.parse(await readFile(file('deploy/default/state.json'), 'utf8'));
   assert.ok(state.resources['call:bind']);
-  const journal = (await readFile(file('deploy/default/state.json.journal.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  const hashes = journal.filter(record => record.phase === 'signed').map(record => record.transactionHash);
+  const journal = (await readFile(file('deploy/default/state.json.journal.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  const hashes = journal
+    .filter((record) => record.phase === 'signed')
+    .map((record) => record.transactionHash);
   assert.equal(hashes.length, 6);
   for (const hash of hashes) {
-    const [transaction, receipt] = await Promise.all([anvil.rpc('eth_getTransactionByHash', [hash]), anvil.rpc('eth_getTransactionReceipt', [hash])]);
+    const [transaction, receipt] = await Promise.all([
+      anvil.rpc('eth_getTransactionByHash', [hash]),
+      anvil.rpc('eth_getTransactionReceipt', [hash]),
+    ]);
     assert.equal(BigInt(transaction.maxFeePerGas), 50_000_000_000n);
     assert.equal(BigInt(transaction.maxPriorityFeePerGas), 1_500_000_000n);
     // The limit is 1.5 times the estimate, and a successful transaction uses no more than its estimate.
-    assert.ok(BigInt(transaction.gas) * 2n >= BigInt(receipt.gasUsed) * 3n, `${hash} gas ${BigInt(transaction.gas)} used ${BigInt(receipt.gasUsed)}`);
+    assert.ok(
+      BigInt(transaction.gas) * 2n >= BigInt(receipt.gasUsed) * 3n,
+      `${hash} gas ${BigInt(transaction.gas)} used ${BigInt(receipt.gasUsed)}`,
+    );
   }
 
   const verified = succeeded(runCli(['verify', '--json']));
   assert.equal(verified.status, 'verified');
-  assert.deepEqual(verified.resources.find(resource => resource.id === 'call:bind').action, 'reuse');
+  assert.deepEqual(
+    verified.resources.find((resource) => resource.id === 'call:bind').action,
+    'reuse',
+  );
 });
 
 test('a workspace reads its vars overlay from main.ethp and keeps separate state', async () => {
@@ -164,7 +249,9 @@ test('a workspace reads its vars overlay from main.ethp and keeps separate state
   await copyFile(file('Doubler.json'), path.join(project, 'Doubler.json'));
   const blue = `0x${'b1'.repeat(32)}`;
   const green = `0x${'9e'.repeat(32)}`;
-  await writeFile(path.join(project, 'main.ethp'), `variable "salt" {
+  await writeFile(
+    path.join(project, 'main.ethp'),
+    `variable "salt" {
   type = bytes32
 }
 
@@ -175,29 +262,54 @@ resource "contract" "doubler" {
   salt     = var.salt
   args     = []
 }
-`);
+`,
+  );
   await writeFile(path.join(project, 'main.blue.ethpvars'), `salt = "${blue}"\n`);
   const planFile = path.join(project, 'blue-plan.json');
   const write = ['--deployers', owner, '--max-spend-wei', maxSpend];
   const run = (args, signed = false, env = {}) => runCli(args, signed, env, project);
   const planned = run(['plan', '--workspace', 'blue', '--out', planFile, ...write]);
-  assert.deepEqual(succeeded(planned).resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);
+  assert.deepEqual(
+    succeeded(planned).resources.map((resource) => [resource.id, resource.action]),
+    [['contract:doubler', 'deploy']],
+  );
   assert.match(planned.stderr, /Using workspace blue\./);
   assert.match(planned.stderr, /main\.blue\.ethpvars/);
 
   const nonceBefore = await nonce();
-  const drifted = run(['apply', '--workspace', 'blue', '--plan', planFile, '--var', `salt=${green}`], true);
+  const drifted = run(
+    ['apply', '--workspace', 'blue', '--plan', planFile, '--var', `salt=${green}`],
+    true,
+  );
   assert.equal(drifted.status, 1, drifted.stdout);
-  assert.match(`${drifted.stdout}\n${drifted.stderr}`, /stale-spec\): The spec changed after the plan was created/);
+  assert.match(
+    `${drifted.stdout}\n${drifted.stderr}`,
+    /stale-spec\): The spec changed after the plan was created/,
+  );
   assert.equal(await nonce(), nonceBefore);
 
-  assert.equal(succeeded(run(['apply', '--json', '--workspace', 'blue', '--plan', planFile], true)).status, 'applied');
-  assert.ok(JSON.parse(await readFile(path.join(project, '.etherplan/blue/state.json'), 'utf8')).resources['contract:doubler']);
-  await assert.rejects(readFile(path.join(project, '.etherplan/default/state.json')), { code: 'ENOENT' });
-  assert.equal(succeeded(run(['verify', '--json'], false, { ETHP_WORKSPACE: 'blue' })).status, 'verified');
+  assert.equal(
+    succeeded(run(['apply', '--json', '--workspace', 'blue', '--plan', planFile], true)).status,
+    'applied',
+  );
+  assert.ok(
+    JSON.parse(await readFile(path.join(project, '.etherplan/blue/state.json'), 'utf8')).resources[
+      'contract:doubler'
+    ],
+  );
+  await assert.rejects(readFile(path.join(project, '.etherplan/default/state.json')), {
+    code: 'ENOENT',
+  });
+  assert.equal(
+    succeeded(run(['verify', '--json'], false, { ETHP_WORKSPACE: 'blue' })).status,
+    'verified',
+  );
 
   const other = succeeded(run(['plan', '--out', '-', ...write], false, { ETHP_VAR_salt: green }));
-  assert.deepEqual(other.resources.map(resource => [resource.id, resource.action]), [['contract:doubler', 'deploy']]);
+  assert.deepEqual(
+    other.resources.map((resource) => [resource.id, resource.action]),
+    [['contract:doubler', 'deploy']],
+  );
   assert.notEqual(other.specHash, JSON.parse(await readFile(planFile, 'utf8')).specHash);
 });
 
@@ -214,11 +326,27 @@ test('salt = derive hashes the project mixer, and compile and plan pin the deriv
       assert.deepEqual(contract.saltDerivation, { mixer: 'etherplan/lab' });
     }
     succeeded(runCli(['validate']));
-    const plan = succeeded(runCli(['plan', '--workspace', 'derive', '--out', '-', '--deployers', owner, '--owner', owner, '--max-spend-wei', maxSpend]));
-    const contracts = plan.resources.filter(resource => resource.kind === 'contract');
-    assert.deepEqual(contracts.map(resource => [resource.action, resource.salt, resource.saltDerivation]),
-      contracts.map(() => ['deploy', deriveSalt('etherplan/lab'), { mixer: 'etherplan/lab' }]));
-    assert.equal(new Set(contracts.map(resource => resource.address)).size, 5);
+    const plan = succeeded(
+      runCli([
+        'plan',
+        '--workspace',
+        'derive',
+        '--out',
+        '-',
+        '--deployers',
+        owner,
+        '--owner',
+        owner,
+        '--max-spend-wei',
+        maxSpend,
+      ]),
+    );
+    const contracts = plan.resources.filter((resource) => resource.kind === 'contract');
+    assert.deepEqual(
+      contracts.map((resource) => [resource.action, resource.salt, resource.saltDerivation]),
+      contracts.map(() => ['deploy', deriveSalt('etherplan/lab'), { mixer: 'etherplan/lab' }]),
+    );
+    assert.equal(new Set(contracts.map((resource) => resource.address)).size, 5);
   } finally {
     await writeFile(file('main.ethp'), main);
   }

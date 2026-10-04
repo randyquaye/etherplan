@@ -6,15 +6,29 @@ import { keccak256, toHex } from 'viem';
 import { startAnvil, stopAnvil } from './anvil.ts';
 
 const projectDirectory = fileURLToPath(new URL('../..', import.meta.url));
-const planArgs = ['--deployers', '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', '--max-spend-wei', '100000000000000000000'];
+const planArgs = [
+  '--deployers',
+  '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
+  '--max-spend-wei',
+  '100000000000000000000',
+];
 let anvil;
 let rpcUrl;
 let rpc;
 
 function canonicalJson(value) {
-  if (value === null || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return JSON.stringify(value);
+  if (
+    value === null ||
+    typeof value === 'boolean' ||
+    typeof value === 'number' ||
+    typeof value === 'string'
+  )
+    return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  return `{${Object.keys(value)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`)
+    .join(',')}}`;
 }
 
 function runCli(...arguments_) {
@@ -36,11 +50,17 @@ after(async () => {
 
 test('plan is read-only, complete, and deterministic at one observation block', async () => {
   const blockBefore = await rpc('eth_blockNumber');
-  const nonceBefore = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
+  const nonceBefore = await rpc('eth_getTransactionCount', [
+    '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
+    'latest',
+  ]);
   const first = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
   const second = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
   const blockAfter = await rpc('eth_blockNumber');
-  const nonceAfter = await rpc('eth_getTransactionCount', ['0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266', 'latest']);
+  const nonceAfter = await rpc('eth_getTransactionCount', [
+    '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
+    'latest',
+  ]);
 
   assert.equal(first.status, 0, first.stderr);
   assert.equal(first.stderr, '');
@@ -65,7 +85,10 @@ test('plan is read-only, complete, and deterministic at one observation block', 
   assert.deepEqual(Object.keys(plan.resources[0].tx).sort(), ['data', 'to', 'value']);
   const { planHash, ...hashedFields } = plan;
   assert.equal(planHash, keccak256(toHex(canonicalJson(hashedFields))));
-  assert.doesNotMatch(first.stdout, /private.?key|secret|ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80/i);
+  assert.doesNotMatch(
+    first.stdout,
+    /private.?key|secret|ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80/i,
+  );
 });
 
 test('plan fails closed on the wrong chain', () => {

@@ -6,7 +6,7 @@
   "type": "module",
   "files": [
     "dist/",
-    "docs/*.md"
+    "docs/"
   ],
   "repository": {
     "type": "git",
@@ -34,7 +34,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 test/*.test.ts test/integration/*.test.ts",
     "prepare": "npm run build",
-    "lint": "eslint src test",
+    "lint": "eslint src test && npm run format:check",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "release:beta": "npm publish --tag beta"
   },
   "dependencies": {
@@ -49,6 +51,7 @@
     "@types/node": "^22.20.4",
     "@typescript/native": "npm:typescript@7.0.2",
     "eslint": "10.11.0",
+    "prettier": "^3.9.9",
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.70.1"
   }

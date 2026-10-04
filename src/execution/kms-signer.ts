@@ -1,7 +1,14 @@
 import { createPublicKey } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import { GetPublicKeyCommand, KMSClient, SignCommand } from '@aws-sdk/client-kms';
-import { getAddress, hexToBytes, keccak256, recoverAddress, serializeTransaction, toHex } from 'viem';
+import {
+  getAddress,
+  hexToBytes,
+  keccak256,
+  recoverAddress,
+  serializeTransaction,
+  toHex,
+} from 'viem';
 import type { Address, Hex } from '../types.ts';
 import type { KmsSignerOptions, SignerProvider } from './types.ts';
 
@@ -24,19 +31,25 @@ function addressFromPublicKey(bytes: Uint8Array): Address {
     throw new Error('KMS public key is not secp256k1.');
   }
   const { x, y } = key.export({ format: 'jwk' });
-  const coordinates = Buffer.concat([Buffer.from(x ?? '', 'base64url'), Buffer.from(y ?? '', 'base64url')]);
-  if (coordinates.length !== 64) throw new Error('KMS public key has invalid secp256k1 coordinates.');
+  const coordinates = Buffer.concat([
+    Buffer.from(x ?? '', 'base64url'),
+    Buffer.from(y ?? '', 'base64url'),
+  ]);
+  if (coordinates.length !== 64)
+    throw new Error('KMS public key has invalid secp256k1 coordinates.');
   return getAddress(`0x${keccak256(coordinates).slice(-40)}`);
 }
 
 function derSignature(bytes: Uint8Array): { r: Hex; s: Hex } {
   const der = Buffer.from(bytes);
-  if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2) throw new Error('KMS returned an invalid DER signature.');
+  if (der.length < 8 || der[0] !== 0x30 || der[1] !== der.length - 2)
+    throw new Error('KMS returned an invalid DER signature.');
   let offset = 2;
   function integer(): bigint {
     if (der[offset++] !== 0x02) throw new Error('KMS returned an invalid DER signature.');
     const length = der[offset++];
-    if (!length || offset + length > der.length) throw new Error('KMS returned an invalid DER signature.');
+    if (!length || offset + length > der.length)
+      throw new Error('KMS returned an invalid DER signature.');
     const value = der.subarray(offset, offset + length);
     offset += length;
     const first = value[0] ?? 0;
@@ -47,7 +60,8 @@ function derSignature(bytes: Uint8Array): { r: Hex; s: Hex } {
     const positive = first === 0 ? value.subarray(1) : value;
     if (positive.length > 32) throw new Error('KMS returned an out-of-range DER signature.');
     const number = BigInt(`0x${positive.toString('hex') || '0'}`);
-    if (number <= 0n || number >= CURVE_ORDER) throw new Error('KMS returned an out-of-range DER signature.');
+    if (number <= 0n || number >= CURVE_ORDER)
+      throw new Error('KMS returned an out-of-range DER signature.');
     return number;
   }
   const r = integer();
@@ -58,12 +72,29 @@ function derSignature(bytes: Uint8Array): { r: Hex; s: Hex } {
 }
 
 /** Create a signer provider for role-to-KMS-key mappings. Keys must share one AWS region. */
-export async function createKmsSignerProvider({ keys, region, kms }: KmsSignerOptions): Promise<SignerProvider> {
-  if (!keys || Array.isArray(keys) || typeof keys !== 'object' || Object.keys(keys).length === 0 ||
-    Object.entries(keys).some(([role, keyId]) => !role || typeof keyId !== 'string' || !keyId.trim())) {
+export async function createKmsSignerProvider({
+  keys,
+  region,
+  kms,
+}: KmsSignerOptions): Promise<SignerProvider> {
+  if (
+    !keys ||
+    Array.isArray(keys) ||
+    typeof keys !== 'object' ||
+    Object.keys(keys).length === 0 ||
+    Object.entries(keys).some(
+      ([role, keyId]) => !role || typeof keyId !== 'string' || !keyId.trim(),
+    )
+  ) {
     throw new Error('KMS signer needs a nonempty keys mapping from roles to KMS key IDs or ARNs.');
   }
-  const regions = [...new Set(Object.values(keys).map(regionOf).filter(value => value !== null))];
+  const regions = [
+    ...new Set(
+      Object.values(keys)
+        .map(regionOf)
+        .filter((value) => value !== null),
+    ),
+  ];
   if (regions.length > 1 || (region && regions.length && region !== regions[0])) {
     throw new Error('KMS signer keys and configured region must agree on one AWS region.');
   }
@@ -72,11 +103,21 @@ export async function createKmsSignerProvider({ keys, region, kms }: KmsSignerOp
   const accounts = new Map<string, { keyId: string; address: Address }>();
   for (const [role, requestedKeyId] of Object.entries(keys)) {
     const publicKey = await client.send(new GetPublicKeyCommand({ KeyId: requestedKeyId }));
-    if (publicKey.KeySpec !== 'ECC_SECG_P256K1' || publicKey.KeyUsage !== 'SIGN_VERIFY' ||
-      !publicKey.SigningAlgorithms?.includes(SIGNING_ALGORITHM) || !publicKey.PublicKey || !publicKey.KeyId) {
-      throw new Error(`KMS key for ${role} must have ECC_SECG_P256K1, SIGN_VERIFY, ECDSA_SHA_256, and a public key.`);
+    if (
+      publicKey.KeySpec !== 'ECC_SECG_P256K1' ||
+      publicKey.KeyUsage !== 'SIGN_VERIFY' ||
+      !publicKey.SigningAlgorithms?.includes(SIGNING_ALGORITHM) ||
+      !publicKey.PublicKey ||
+      !publicKey.KeyId
+    ) {
+      throw new Error(
+        `KMS key for ${role} must have ECC_SECG_P256K1, SIGN_VERIFY, ECDSA_SHA_256, and a public key.`,
+      );
     }
-    accounts.set(role, { keyId: publicKey.KeyId, address: addressFromPublicKey(publicKey.PublicKey) });
+    accounts.set(role, {
+      keyId: publicKey.KeyId,
+      address: addressFromPublicKey(publicKey.PublicKey),
+    });
   }
 
   function accountFor(role: string): { keyId: string; address: Address } {
@@ -86,16 +127,27 @@ export async function createKmsSignerProvider({ keys, region, kms }: KmsSignerOp
   }
 
   return {
-    async address(role) { return accountFor(role).address; },
+    async address(role) {
+      return accountFor(role).address;
+    },
     async signTransaction(role, transaction) {
       const { keyId, address } = accountFor(role);
-      if (transaction?.type !== 'eip1559') throw new Error('KMS signer requires an EIP-1559 transaction.');
+      if (transaction?.type !== 'eip1559')
+        throw new Error('KMS signer requires an EIP-1559 transaction.');
       const digest = keccak256(serializeTransaction(transaction));
-      const result = await client.send(new SignCommand({
-        KeyId: keyId, Message: hexToBytes(digest), MessageType: 'DIGEST', SigningAlgorithm: SIGNING_ALGORITHM,
-      }));
-      if (!result.Signature || (result.KeyId && result.KeyId !== keyId) ||
-        (result.SigningAlgorithm && result.SigningAlgorithm !== SIGNING_ALGORITHM)) {
+      const result = await client.send(
+        new SignCommand({
+          KeyId: keyId,
+          Message: hexToBytes(digest),
+          MessageType: 'DIGEST',
+          SigningAlgorithm: SIGNING_ALGORITHM,
+        }),
+      );
+      if (
+        !result.Signature ||
+        (result.KeyId && result.KeyId !== keyId) ||
+        (result.SigningAlgorithm && result.SigningAlgorithm !== SIGNING_ALGORITHM)
+      ) {
         throw new Error(`KMS returned no valid signature for ${role}.`);
       }
       const { r, s } = derSignature(result.Signature);

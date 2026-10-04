@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { UsageError, validateCombination } from '../src/cli/options.ts';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+const packageVersion = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 
 function cli(...args) {
   return spawnSync(process.execPath, ['dist/cli.js', ...args], {
@@ -23,7 +25,21 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
 
   const overview = cli('--help');
   assert.equal(overview.status, 0, overview.stderr);
-  for (const command of ['init', 'validate', 'compile', 'graph', 'impact', 'plan', 'apply', 'verify', 'schedule', 'import', 'output', 'adapters', 'status']) {
+  for (const command of [
+    'init',
+    'validate',
+    'compile',
+    'graph',
+    'impact',
+    'plan',
+    'apply',
+    'verify',
+    'schedule',
+    'import',
+    'output',
+    'adapters',
+    'status',
+  ]) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(command, '--help');
     assert.equal(help.status, 0, help.stderr);
@@ -34,7 +50,12 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('apply', '--help').stdout, /--signer-module/);
   assert.match(cli('apply', '--help').stdout, /--json/);
   assert.match(cli('verify', '--help').stdout, /--json/);
-  for (const flag of ['max-fee-per-gas', 'priority-fee-per-gas', 'gas-multiplier', 'receipt-timeout-ms']) {
+  for (const flag of [
+    'max-fee-per-gas',
+    'priority-fee-per-gas',
+    'gas-multiplier',
+    'receipt-timeout-ms',
+  ]) {
     assert.match(cli('apply', '--help').stdout, new RegExp(`--${flag}`));
   }
   assert.match(cli('status', '--help').stdout, /--backend/);
@@ -43,17 +64,31 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);
 });
 
-test('the built bin is executable through its shebang', { skip: process.platform === 'win32' }, () => {
-  const version = spawnSync(fileURLToPath(new URL('../dist/cli.js', import.meta.url)), ['--version'], { cwd: root, encoding: 'utf8' });
-  assert.equal(version.status, 0, version.error?.message ?? version.stderr);
-  assert.equal(version.stdout.trim(), packageVersion);
-});
+test(
+  'the built bin is executable through its shebang',
+  { skip: process.platform === 'win32' },
+  () => {
+    const version = spawnSync(
+      fileURLToPath(new URL('../dist/cli.js', import.meta.url)),
+      ['--version'],
+      { cwd: root, encoding: 'utf8' },
+    );
+    assert.equal(version.status, 0, version.error?.message ?? version.stderr);
+    assert.equal(version.stdout.trim(), packageVersion);
+  },
+);
 
 test('invalid and unrelated options fail before a spec or RPC is opened', () => {
   for (const args of [
-    [], ['missing'], ['graph', '--value', 'owner'], ['compile', '--out', 'spec.json'], ['impact'],
-    ['import'], ['import', '--id', 'external:registry'],
-    ['validate', '--spec'], ['validate', '--spec', 'a'],
+    [],
+    ['missing'],
+    ['graph', '--value', 'owner'],
+    ['compile', '--out', 'spec.json'],
+    ['impact'],
+    ['import'],
+    ['import', '--id', 'external:registry'],
+    ['validate', '--spec'],
+    ['validate', '--spec', 'a'],
   ]) {
     const result = cli(...args);
     assert.equal(result.status, 2, `${args.join(' ')}: ${result.stderr}`);
@@ -63,20 +98,38 @@ test('invalid and unrelated options fail before a spec or RPC is opened', () => 
 });
 
 test('apply fee, gas, and timeout values are checked after config is merged', () => {
-  validateCombination('apply', { 'max-fee-per-gas': '30000000000', 'priority-fee-per-gas': '0', 'gas-multiplier': '1.5', 'receipt-timeout-ms': '0' });
+  validateCombination('apply', {
+    'max-fee-per-gas': '30000000000',
+    'priority-fee-per-gas': '0',
+    'gas-multiplier': '1.5',
+    'receipt-timeout-ms': '0',
+  });
   const cases = [
     [{ 'max-fee-per-gas': '30000000000' }, /go together/],
     [{ 'priority-fee-per-gas': '1' }, /go together/],
     [{ 'max-fee-per-gas': '0', 'priority-fee-per-gas': '0' }, /--max-fee-per-gas must be positive/],
-    [{ 'max-fee-per-gas': '1', 'priority-fee-per-gas': '2' }, /--priority-fee-per-gas cannot exceed --max-fee-per-gas/],
-    [{ 'max-fee-per-gas': '30gwei', 'priority-fee-per-gas': '1' }, /--max-fee-per-gas must be a whole number of wei/],
+    [
+      { 'max-fee-per-gas': '1', 'priority-fee-per-gas': '2' },
+      /--priority-fee-per-gas cannot exceed --max-fee-per-gas/,
+    ],
+    [
+      { 'max-fee-per-gas': '30gwei', 'priority-fee-per-gas': '1' },
+      /--max-fee-per-gas must be a whole number of wei/,
+    ],
     [{ 'gas-multiplier': '0.9' }, /--gas-multiplier must be a decimal number no less than 1/],
     [{ 'gas-multiplier': '1e3' }, /--gas-multiplier must be/],
     [{ 'receipt-timeout-ms': '-5' }, /--receipt-timeout-ms must be a whole number of milliseconds/],
-    [{ 'verification-timeout-ms': '99999999999999999999' }, /--verification-timeout-ms must be a whole number of milliseconds/],
+    [
+      { 'verification-timeout-ms': '99999999999999999999' },
+      /--verification-timeout-ms must be a whole number of milliseconds/,
+    ],
   ];
   for (const [options, message] of cases) {
-    assert.throws(() => validateCombination('apply', options), error => error instanceof UsageError && message.test(error.message), JSON.stringify(options));
+    assert.throws(
+      () => validateCombination('apply', options),
+      (error) => error instanceof UsageError && message.test(error.message),
+      JSON.stringify(options),
+    );
   }
 });
 

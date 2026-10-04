@@ -3,7 +3,9 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 test('the package exposes only its root library entry', async () => {
-  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')) as { exports: Record<string, unknown> };
+  const manifest = JSON.parse(
+    await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { exports: Record<string, unknown> };
   assert.deepEqual(Object.keys(manifest.exports), ['.']);
 
   const api = await import('etherplan');

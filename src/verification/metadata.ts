@@ -54,7 +54,11 @@ function combineLinks(links: IpfsLink[]): IpfsLink {
   for (const link of links) {
     size += link.size;
     blockSize += link.blockSize;
-    const pbLink = Buffer.concat([lengthDelimited(0x0a, link.hash), Buffer.from([0x12, 0x00, 0x18]), varint(link.blockSize)]);
+    const pbLink = Buffer.concat([
+      lengthDelimited(0x0a, link.hash),
+      Buffer.from([0x12, 0x00, 0x18]),
+      varint(link.blockSize),
+    ]);
     data.push(lengthDelimited(0x12, pbLink));
     lengths.push(Buffer.concat([Buffer.from([0x20]), varint(link.size)]));
   }
@@ -81,7 +85,8 @@ export function ipfsMetadataHash(text: string): Hex {
   }
   while (level.length > 1) {
     const next: IpfsLink[] = [];
-    for (let start = 0; start < level.length; start += IPFS_MAX_LINKS) next.push(combineLinks(level.slice(start, start + IPFS_MAX_LINKS)));
+    for (let start = 0; start < level.length; start += IPFS_MAX_LINKS)
+      next.push(combineLinks(level.slice(start, start + IPFS_MAX_LINKS)));
     level = next;
   }
   // `count` is at least 1, so the tree has a root.
@@ -154,7 +159,8 @@ function decodeItem(bytes: Buffer, offset: number): { value: CborValue; next: nu
  */
 export function decodeMetadataTail(code: string): MetadataTail | null {
   const text = code.startsWith('0x') ? code.slice(2) : code;
-  if (text.length < 4 || text.length % 2 !== 0 || !/^[0-9a-fA-F]{4}$/.test(text.slice(-4))) return null;
+  if (text.length < 4 || text.length % 2 !== 0 || !/^[0-9a-fA-F]{4}$/.test(text.slice(-4)))
+    return null;
   const length = parseInt(text.slice(-4), 16);
   const start = text.length / 2 - 2 - length;
   if (length === 0 || start < 0) return null;
@@ -167,7 +173,13 @@ export function decodeMetadataTail(code: string): MetadataTail | null {
   } catch {
     return null;
   }
-  if (decoded.next !== length || !decoded.value || typeof decoded.value !== 'object' || Array.isArray(decoded.value)) return null;
+  if (
+    decoded.next !== length ||
+    !decoded.value ||
+    typeof decoded.value !== 'object' ||
+    Array.isArray(decoded.value)
+  )
+    return null;
   const map = decoded.value;
   const tail: MetadataTail = { start, raw: `0x${tailHex.toLowerCase()}`, map };
   for (const [kind, size] of Object.entries(HASH_KEYS) as [MetadataHashKind, number][]) {

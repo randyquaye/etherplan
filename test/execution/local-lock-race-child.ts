@@ -1,7 +1,7 @@
 import { acquireLock } from '../../src/execution/lock.ts';
 
 process.stdout.write('READY\n');
-await new Promise(resolve => process.stdin.once('data', resolve));
+await new Promise((resolve) => process.stdin.once('data', resolve));
 try {
   await acquireLock(process.argv[2]!, { planHash: 'race-test' });
   process.stdout.write('HELD\n');

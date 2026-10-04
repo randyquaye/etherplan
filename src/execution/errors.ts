@@ -11,7 +11,11 @@ export class ApplyError extends Error {
   /** Set by applyPlan before it rethrows: the apply summary at the point of failure. */
   declare result: ApplyResult | undefined;
 
-  constructor(code: ApplyErrorCode, message: string, { actionId, evidence, retryable = false }: ApplyErrorOptions = {}) {
+  constructor(
+    code: ApplyErrorCode,
+    message: string,
+    { actionId, evidence, retryable = false }: ApplyErrorOptions = {},
+  ) {
     super(actionId ? `${actionId}: ${message}` : message);
     this.name = 'ApplyError';
     this.code = code;

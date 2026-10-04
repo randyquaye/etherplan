@@ -27,20 +27,50 @@ test('CLI plans and applies parallel deployers through a signer module with loca
   const journalFile = path.join(directory, 'journal.jsonl');
   function cli(...args) {
     return spawnSync(process.execPath, [path.join(project, 'dist/cli.js'), ...args], {
-      cwd: project, encoding: 'utf8',
+      cwd: project,
+      encoding: 'utf8',
       env: {
-        ...process.env, ETH_RPC_URL: anvil.rpcUrl, TEST_DEPLOYER_KEYS: keys.join(','),
-        DEPLOYER_PRIVATE_KEY: '', DEPLOYER_PRIVATE_KEYS: '', OWNER_PRIVATE_KEY: '',
+        ...process.env,
+        ETH_RPC_URL: anvil.rpcUrl,
+        TEST_DEPLOYER_KEYS: keys.join(','),
+        DEPLOYER_PRIVATE_KEY: '',
+        DEPLOYER_PRIVATE_KEYS: '',
+        OWNER_PRIVATE_KEY: '',
       },
     });
   }
   try {
-    const planned = cli('plan', '--fixture', spec, '--out', planFile, '--state', stateFile,
-      '--signer-module', moduleFile, '--parallel', '--max-spend-wei', '100000000000000000000');
+    const planned = cli(
+      'plan',
+      '--fixture',
+      spec,
+      '--out',
+      planFile,
+      '--state',
+      stateFile,
+      '--signer-module',
+      moduleFile,
+      '--parallel',
+      '--max-spend-wei',
+      '100000000000000000000',
+    );
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     assert.deepEqual(JSON.parse(planned.stdout).signers.deployers, addresses);
-    const applied = cli('apply', '--json', '--fixture', spec, '--plan', planFile, '--state', stateFile,
-      '--journal', journalFile, '--signer-module', moduleFile, '--parallel');
+    const applied = cli(
+      'apply',
+      '--json',
+      '--fixture',
+      spec,
+      '--plan',
+      planFile,
+      '--state',
+      stateFile,
+      '--journal',
+      journalFile,
+      '--signer-module',
+      moduleFile,
+      '--parallel',
+    );
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(JSON.parse(applied.stdout).transactionsSigned, 3);
     assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[0], 'latest'])), 2n);
@@ -60,19 +90,53 @@ test('owner-role deployment with no calls works through a signer module in plan 
     const stateFile = path.join(directory, 'state.json');
     const source = JSON.parse(await readFile(spec, 'utf8'));
     source.contracts[0].signerRole = 'owner';
-    for (const contract of source.contracts) contract.artifact = path.join(project, 'test/fixtures/StateFixture.json');
+    for (const contract of source.contracts)
+      contract.artifact = path.join(project, 'test/fixtures/StateFixture.json');
     await writeFile(specFile, JSON.stringify(source));
-    const cli = (args, input) => spawnSync(process.execPath, [path.join(project, 'dist/cli.js'), ...args], {
-      cwd: project, encoding: 'utf8', input,
-      env: { ...process.env, ETH_RPC_URL: anvil.rpcUrl, TEST_DEPLOYER_KEYS: keys[0], TEST_OWNER_KEY: keys[1],
-        DEPLOYER_PRIVATE_KEY: '', DEPLOYER_PRIVATE_KEYS: '', OWNER_PRIVATE_KEY: '' },
-    });
-    const planned = cli(['plan', '--fixture', specFile, '--out', planFile, '--state', stateFile,
-      '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000']);
+    const cli = (args, input) =>
+      spawnSync(process.execPath, [path.join(project, 'dist/cli.js'), ...args], {
+        cwd: project,
+        encoding: 'utf8',
+        input,
+        env: {
+          ...process.env,
+          ETH_RPC_URL: anvil.rpcUrl,
+          TEST_DEPLOYER_KEYS: keys[0],
+          TEST_OWNER_KEY: keys[1],
+          DEPLOYER_PRIVATE_KEY: '',
+          DEPLOYER_PRIVATE_KEYS: '',
+          OWNER_PRIVATE_KEY: '',
+        },
+      });
+    const planned = cli([
+      'plan',
+      '--fixture',
+      specFile,
+      '--out',
+      planFile,
+      '--state',
+      stateFile,
+      '--signer-module',
+      moduleFile,
+      '--max-spend-wei',
+      '100000000000000000000',
+    ]);
     assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
     assert.equal(JSON.parse(planned.stdout).signers.owner, addresses[1]);
-    const applied = cli(['apply', '--fixture', specFile, '--state', stateFile,
-      '--signer-module', moduleFile, '--max-spend-wei', '100000000000000000000'], 'yes\n');
+    const applied = cli(
+      [
+        'apply',
+        '--fixture',
+        specFile,
+        '--state',
+        stateFile,
+        '--signer-module',
+        moduleFile,
+        '--max-spend-wei',
+        '100000000000000000000',
+      ],
+      'yes\n',
+    );
     assert.equal(applied.status, 0, `${applied.stderr}\n${applied.stdout}`);
     assert.equal(BigInt(await anvil.rpc('eth_getTransactionCount', [addresses[1], 'latest'])), 1n);
   } finally {

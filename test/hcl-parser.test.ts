@@ -9,10 +9,16 @@ import { labFixture } from './ethp-fixtures.ts';
 // Converts a parsed body to the JSON shape of the HCL reference parser. That parser writes strings as
 // Terraform JSON templates, so a literal ${ appears as $${ and a reference as "${...}".
 function referenceShape(body) {
-  const value = node => node.kind === 'literal' ? (typeof node.value === 'string' ? node.value.replaceAll('${', () => '$${').replaceAll('%{', '%%{') : node.value)
-    : node.kind === 'list' ? node.items.map(value)
-      : node.kind === 'object' ? Object.fromEntries(node.entries.map(entry => [entry.key, value(entry.value)]))
-        : `\${${node.parts.join('.')}}`;
+  const value = (node) =>
+    node.kind === 'literal'
+      ? typeof node.value === 'string'
+        ? node.value.replaceAll('${', () => '$${').replaceAll('%{', '%%{')
+        : node.value
+      : node.kind === 'list'
+        ? node.items.map(value)
+        : node.kind === 'object'
+          ? Object.fromEntries(node.entries.map((entry) => [entry.key, value(entry.value)]))
+          : `\${${node.parts.join('.')}}`;
   const result = {};
   for (const attribute of body.attributes.values()) result[attribute.name] = value(attribute.value);
   for (const block of body.blocks) {
@@ -80,8 +86,16 @@ test('accepted files parse exactly as the HCL reference parser reads them', asyn
     ['crlf.ethp', SYNTAX.replaceAll('\n', '\r\n')],
     ['no-final-newline.ethp', 'a = 1\nb { c = 2 }'],
     ['empty.ethp', ''],
-    ...await Promise.all(['lab.ethp', 'lab.ethpvars'].map(async name => [name, await readFile(path.join(labFixture, name), 'utf8')])),
-    ['lab.ethpconfig', 'defaults {\n  state = "deploy/state.json"\n}\n\ncommand "plan" {\n  out       = "plan.json"\n  deployers = ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]\n  pipeline  = true\n}\n'],
+    ...(await Promise.all(
+      ['lab.ethp', 'lab.ethpvars'].map(async (name) => [
+        name,
+        await readFile(path.join(labFixture, name), 'utf8'),
+      ]),
+    )),
+    [
+      'lab.ethpconfig',
+      'defaults {\n  state = "deploy/state.json"\n}\n\ncommand "plan" {\n  out       = "plan.json"\n  deployers = ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"]\n  pipeline  = true\n}\n',
+    ],
   ];
   for (const [file, text] of corpus) {
     assert.deepEqual(referenceShape(parseHcl(file, text)), await referenceParse(file, text), file);
@@ -90,17 +104,39 @@ test('accepted files parse exactly as the HCL reference parser reads them', asyn
 
 test('values keep their exact meaning', () => {
   const body = parseHcl('values.ethp', SYNTAX);
-  const value = name => body.attributes.get(name).value;
-  assert.deepEqual([value('negative').value, value('spaced').value, value('zeros').value, value('largest').value, value('smallest').value],
-    [-42, -7, 7, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER]);
+  const value = (name) => body.attributes.get(name).value;
+  assert.deepEqual(
+    [
+      value('negative').value,
+      value('spaced').value,
+      value('zeros').value,
+      value('largest').value,
+      value('smallest').value,
+    ],
+    [-42, -7, 7, Number.MAX_SAFE_INTEGER, -Number.MAX_SAFE_INTEGER],
+  );
   assert.equal(value('text').value, 'tab\tquote" slash\\ unicode é 😀 dollars $5 $$ %% 100%');
   assert.equal(value('escaped').value, '${literal} %{literal}');
-  assert.deepEqual(value('ref'), { kind: 'reference', parts: ['contracts', 'alpha', 'address'], at: { file: 'values.ethp', line: 28, column: 16 } });
-  assert.deepEqual(parseHcl('spaced.ethp', 'a = contracts . alpha . address').attributes.get('a').value.parts, ['contracts', 'alpha', 'address']);
+  assert.deepEqual(value('ref'), {
+    kind: 'reference',
+    parts: ['contracts', 'alpha', 'address'],
+    at: { file: 'values.ethp', line: 28, column: 16 },
+  });
+  assert.deepEqual(
+    parseHcl('spaced.ethp', 'a = contracts . alpha . address').attributes.get('a').value.parts,
+    ['contracts', 'alpha', 'address'],
+  );
   assert.equal(parseHcl('bom.ethp', '﻿a = 1').attributes.get('a').value.value, 1);
-  assert.deepEqual(body.blocks.map(block => [block.type, block.labels, block.at.line]), [
-    ['resource', ['contract', 'a'], 33], ['resource', ['contract', 'b'], 38], ['factory', [], 39], ['one', ['line'], 40], ['outer', ['x'], 41],
-  ]);
+  assert.deepEqual(
+    body.blocks.map((block) => [block.type, block.labels, block.at.line]),
+    [
+      ['resource', ['contract', 'a'], 33],
+      ['resource', ['contract', 'b'], 38],
+      ['factory', [], 39],
+      ['one', ['line'], 40],
+      ['outer', ['x'], 41],
+    ],
+  );
 });
 
 test('unsupported expressions and malformed input fail at their line and column', () => {
@@ -116,8 +152,14 @@ test('unsupported expressions and malformed input fail at their line and column'
     ['a = var.x ? 1 + 1 : 2', '1:15: Arithmetic is not supported.'],
     ['a = var.x ?\n 1 : 2', '1:12: Expected a value, found a new line.'],
     ['a = var.x\n ? 1 : 2', '2:2: Expected an attribute or block, found "?".'],
-    ['a = true ? 1\n : 2', '1:13: Expected : and a false result in the conditional, found a new line.'],
-    ['a = var.x ? 1', '1:14: Expected : and a false result in the conditional, found the end of the file.'],
+    [
+      'a = true ? 1\n : 2',
+      '1:13: Expected : and a false result in the conditional, found a new line.',
+    ],
+    [
+      'a = var.x ? 1',
+      '1:14: Expected : and a false result in the conditional, found the end of the file.',
+    ],
     ['a = var.x &&\n var.y', '1:13: Expected a value, found a new line.'],
     ['a = { k = var.x\n ? 1 : 2 }', '2:2: Expected an object key, found "?".'],
     ['a = (1', '1:7: Expected ) after the expression, found the end of the file.'],
@@ -131,11 +173,17 @@ test('unsupported expressions and malformed input fail at their line and column'
     ['a = var.list[*].id', '1:13: Index and splat expressions are not supported'],
     ['a = { (var.k) = 1 }', '1:7: Computed object keys are not supported'],
     ['a = { var.k = 1 }', '1:7: Object keys must be names or quoted strings'],
-    ['a = 9007199254740993', '1:5: Number 9007199254740993 is outside JavaScript\'s safe integer range. Quote it as a decimal string: "9007199254740993".'],
+    [
+      'a = 9007199254740993',
+      '1:5: Number 9007199254740993 is outside JavaScript\'s safe integer range. Quote it as a decimal string: "9007199254740993".',
+    ],
     ['a = -9007199254740992', '1:6: Number -9007199254740992 is outside'],
     ['a = 1.0000000000000001', '1:5: Number 1.0000000000000001 must be a whole number'],
     ['a = 1e3', '1:5: Number 1e3 must be a whole number'],
-    ['a = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266', '1:5: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 is not a number. Quote addresses and hex values as strings.'],
+    [
+      'a = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266',
+      '1:5: 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 is not a number. Quote addresses and hex values as strings.',
+    ],
     ['a = 1\na = 2', '2:1: a is already set on line 1.'],
     ['a = { x = 1, x = 2 }', '1:14: Duplicate object key x; it is first set on line 1.'],
     ['a = 1\na {}', '2:1: a is used both as an attribute and as a block.'],
@@ -146,7 +194,10 @@ test('unsupported expressions and malformed input fail at their line and column'
     ['a = 1 b = 2', '1:7: Expected a new line after the attribute, found "b".'],
     ['a = 1, b = 2', '1:6: Put each attribute on its own line'],
     ['a = [1 2]', '1:8: Expected a comma or ] in the list, found "2".'],
-    ['a = { x = 1 y = 2 }', '1:13: Expected a comma, new line, or } after the object value, found "y".'],
+    [
+      'a = { x = 1 y = 2 }',
+      '1:13: Expected a comma, new line, or } after the object value, found "y".',
+    ],
     ['a =', '1:4: Expected a value, found the end of the file.'],
     ['a = [1,', '1:8: Expected a value, found the end of the file.'],
     ['"a" = 1', '1:1: Attribute and block names must not be quoted.'],
@@ -154,22 +205,43 @@ test('unsupported expressions and malformed input fail at their line and column'
     ['a\n{\n}', '1:2: Expected = or { after a, found a new line.'],
     ['block {\n  x = 1\n', '1:1: This block block has no closing }.'],
     ['block { x = 1\n y = 2 }', '1:14: A block on one line can hold only one attribute.'],
-    ['block { inner {} }', '1:15: A block on one line can hold only one attribute and no nested block.'],
+    [
+      'block { inner {} }',
+      '1:15: A block on one line can hold only one attribute and no nested block.',
+    ],
     ['block {\n  x = 1 }', '2:9: Expected a new line after the attribute, found "}".'],
     ['block {} a = 1', '1:10: Expected a new line after the block, found "a".'],
     ['a = 1 /* open', '1:7: This comment has no closing */.'],
     ['a = @', '1:5: Unexpected character "@".'],
   ];
   for (const [text, expected] of cases) {
-    assert.throws(() => parseHcl('bad.ethp', text), error => {
-      assert.ok(error.message.startsWith(`bad.ethp:${expected}`), `${JSON.stringify(text)}\n  expected: bad.ethp:${expected}\n  actual:   ${error.message}`);
-      return true;
-    });
+    assert.throws(
+      () => parseHcl('bad.ethp', text),
+      (error) => {
+        assert.ok(
+          error.message.startsWith(`bad.ethp:${expected}`),
+          `${JSON.stringify(text)}\n  expected: bad.ethp:${expected}\n  actual:   ${error.message}`,
+        );
+        return true;
+      },
+    );
   }
 });
 
 test('input the HCL reference parser rejects is also rejected', async () => {
-  for (const text of ['a = [1 2]', 'a = {', 'a =', '"a" = 1', 'a = 1, b = 2', 'block { x = 1\n y = 2 }', 'block {} a = 1', 'a = "open', 'a = "\\q"', 'a b', 'a = 1\na = 2']) {
+  for (const text of [
+    'a = [1 2]',
+    'a = {',
+    'a =',
+    '"a" = 1',
+    'a = 1, b = 2',
+    'block { x = 1\n y = 2 }',
+    'block {} a = 1',
+    'a = "open',
+    'a = "\\q"',
+    'a b',
+    'a = 1\na = 2',
+  ]) {
     assert.throws(() => parseHcl('bad.ethp', text), undefined, text);
     await assert.rejects(referenceParse('bad.ethp', text), undefined, text);
   }
@@ -178,19 +250,30 @@ test('input the HCL reference parser rejects is also rejected', async () => {
 // A compact form of an expression tree: operators as prefix lists, references as dotted text.
 function tree(node) {
   switch (node.kind) {
-    case 'literal': return node.value;
-    case 'reference': return node.parts.join('.');
-    case 'list': return node.items.map(tree);
-    case 'object': return Object.fromEntries(node.entries.map(entry => [entry.key, tree(entry.value)]));
-    case 'conditional': return ['?', tree(node.condition), tree(node.then), tree(node.otherwise)];
-    case 'binary': return [node.operator, tree(node.left), tree(node.right)];
-    case 'not': return ['!', tree(node.operand)];
-    case 'call': return [`${node.name}()`, ...node.args.map(tree)];
+    case 'literal':
+      return node.value;
+    case 'reference':
+      return node.parts.join('.');
+    case 'list':
+      return node.items.map(tree);
+    case 'object':
+      return Object.fromEntries(node.entries.map((entry) => [entry.key, tree(entry.value)]));
+    case 'conditional':
+      return ['?', tree(node.condition), tree(node.then), tree(node.otherwise)];
+    case 'binary':
+      return [node.operator, tree(node.left), tree(node.right)];
+    case 'not':
+      return ['!', tree(node.operand)];
+    case 'call':
+      return [`${node.name}()`, ...node.args.map(tree)];
   }
 }
 
 const EXPRESSIONS = [
-  ['var.a == "x" && var.b != 2 || !var.c', ['||', ['&&', ['==', 'var.a', 'x'], ['!=', 'var.b', 2]], ['!', 'var.c']]],
+  [
+    'var.a == "x" && var.b != 2 || !var.c',
+    ['||', ['&&', ['==', 'var.a', 'x'], ['!=', 'var.b', 2]], ['!', 'var.c']],
+  ],
   ['var.a < 1 == true', ['==', ['<', 'var.a', 1], true]],
   ['1 == 1 == 1', ['==', ['==', 1, 1], 1]],
   ['a || b && c', ['||', 'a', ['&&', 'b', 'c']]],
@@ -215,8 +298,22 @@ test('operators follow HCL precedence and the HCL reference parser accepts the s
     await assert.doesNotReject(referenceParse('expr.ethp', source), text);
   }
   const node = parseHcl('expr.ethp', 'a = x == 1 ? y : z').attributes.get('a').value;
-  assert.deepEqual([node.at, node.condition.operatorAt], [{ file: 'expr.ethp', line: 1, column: 5 }, { file: 'expr.ethp', line: 1, column: 7 }]);
-  for (const text of ['a = var.x ?\n 1 : 2', 'a = var.x\n ? 1 : 2', 'a = true ? 1\n : 2', 'a = var.x &&\n var.y', 'a = { k = var.x\n ? 1 : 2 }', 'a = x ? 1', 'a = (1']) {
+  assert.deepEqual(
+    [node.at, node.condition.operatorAt],
+    [
+      { file: 'expr.ethp', line: 1, column: 5 },
+      { file: 'expr.ethp', line: 1, column: 7 },
+    ],
+  );
+  for (const text of [
+    'a = var.x ?\n 1 : 2',
+    'a = var.x\n ? 1 : 2',
+    'a = true ? 1\n : 2',
+    'a = var.x &&\n var.y',
+    'a = { k = var.x\n ? 1 : 2 }',
+    'a = x ? 1',
+    'a = (1',
+  ]) {
     assert.throws(() => parseHcl('bad.ethp', text), undefined, text);
     await assert.rejects(referenceParse('bad.ethp', text), undefined, text);
   }
