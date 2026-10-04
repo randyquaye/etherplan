@@ -133,7 +133,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
       gate = await startRpcGate(anvil.rpcUrl, phase);
       const running = runAsync([
-        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], gate.url);
       await waitForPhase(journalFile, running.child, phase);
       assert.equal(running.child.kill('SIGKILL'), true);
@@ -141,7 +141,7 @@ for (const phase of ['signed', 'broadcast', 'receipt']) {
       gate.release();
 
       const resumed = runSync([
-        'apply', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
+        'apply', '--json', '--fixture', specFile, '--plan', planFile, '--state', stateFile, '--journal', journalFile,
       ], anvil.rpcUrl, true);
       assert.equal(resumed.status, 0, `${resumed.stderr}\n${resumed.stdout}\n${JSON.stringify(running.output())}`);
       const result = JSON.parse(resumed.stdout);

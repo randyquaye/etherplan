@@ -175,7 +175,7 @@ function assertStateChain(state: StateFile | null, chain: ChainIdentity): void {
  * evaluates unsafe dependents in execution order, and confirms the
  * observed block is still canonical before hashing the plan. Sends no transactions.
  */
-export async function createPlan({ spec: specInput, artifacts, client, state = null, journalRecords = [], pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
+export async function createPlan({ spec: specInput, artifacts, client, state = null, journalRecords = [], onResourceCheck, pipeline = null, signers = null, maxSpendWei = null }: CreatePlanInput): Promise<Plan> {
   assert(client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function', 'Plan needs a read-only chain client.');
   const spec = parseSpec(specInput);
   const described = usesDependencyPlan(spec);
@@ -211,6 +211,7 @@ export async function createPlan({ spec: specInput, artifacts, client, state = n
     if (saved?.creationProof || recovered) options.creationProof = saved?.creationProof ?? recovered!;
     options.chain = chain;
     options.journalRecords = journalRecords;
+    onResourceCheck?.(resource.id);
     const verification = await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
     const observation: PlanObservation = stateComparison ? { ...verification, stateComparison } : verification;

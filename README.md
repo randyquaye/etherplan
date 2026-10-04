@@ -6,7 +6,7 @@ Etherplan can deploy through the canonical `0x4e59…4956` CREATE2 proxy, verify
 
 ## Install
 
-Use Node.js 22.18 or newer. Install this beta from its GitHub tag with `npm install --save-dev 'github:randyquaye/etherplan#v0.0.12-beta'`. The npm registry package is not published yet.
+Use Node.js 22.18 or newer. Install this beta from its GitHub tag with `npm install --save-dev 'github:randyquaye/etherplan#v0.1.0-beta'`. The npm registry package is not published yet.
 
 To work from a checkout instead, install it as a CLI with `npm install --global .`. The test suite also needs Foundry's `anvil` on `PATH`.
 
@@ -264,7 +264,7 @@ etherplan output --workspace sepolia
 
 Without `--plan`, `apply` gets signer addresses from the configured keys or signer module, creates a fresh plan with the required `--max-spend-wei` ceiling, shows the complete plan, and waits for you to type `yes` before applying it. A declined answer or closed input stops without signing. After approval, Etherplan saves the exact plan under `plans/<planHash>.json` beside the state file for crash recovery; use that path with `--plan` if a later run says to resume it. This mode does not read or overwrite `plan.json`, so an old file cannot silently control the run. With `--plan`, `apply` uses that saved plan and does not prompt; a stale spec, artifact, signer, or missing ceiling is rejected. `plan --signer-module` obtains the addresses from the same module, so they need not be entered separately. Pipeline applies still require an explicit saved pipeline plan.
 
-Apply streams progress to stderr as it acquires the lock, signs, broadcasts, receives receipts, and verifies resources. It prints a "Still applying" line every 30 seconds without other progress. The final JSON result remains on stdout for scripts. Pass `--quiet` to suppress progress lines; the final JSON, approval prompt, and errors still appear.
+Apply streams progress to stdout as it acquires the lock, signs, broadcasts, receives receipts, and verifies resources. It prints a "Still applying" line every 30 seconds without other progress, then a readable summary and details for transactions signed in that run. Pass `--quiet` to suppress progress lines while keeping the final report, approval prompt, and errors. Pass `--json` for the structured result on stdout; in that mode progress remains on stderr so scripts can parse stdout. Fresh apply still prints the complete plan before approval.
 
 Apply rechecks the plan and live preconditions. It takes one writer lock, signs each needed transaction, syncs signed bytes to an append-only journal, then broadcasts. On restart, it checks the journal and chain before it resends the same bytes or starts another action. State and journal default to `.etherplan/<workspace>/` beside the spec, which is `.etherplan/default/` without `--workspace`; keep them together for recovery. The journal contains signed raw transactions and is written with file mode `0600`.
 

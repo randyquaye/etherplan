@@ -4,12 +4,12 @@ import type { Plan } from '../planning/types.ts';
 const STILL_APPLYING_MS = 30_000;
 
 /** Human-readable CLI progress. Structured event consumers use applyPlan's reporter directly. */
-export function createApplyProgress(plan: Plan) {
+export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = process.stderr) {
   let started = 0;
   let lastLine = 0;
   let timer: NodeJS.Timeout | undefined;
   const write = (message: string): void => {
-    process.stderr.write(`${message}\n`);
+    output.write(`${message}\n`);
     lastLine = Date.now();
   };
   return {

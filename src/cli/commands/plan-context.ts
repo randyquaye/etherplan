@@ -5,12 +5,13 @@ import { createPlan, prepareResources, transactionFor } from '../../planning/ind
 import { graph, parseSpec } from '../../spec/index.ts';
 import { readState, validateState } from '../../state/index.ts';
 import type { StateFile } from '../../state/types.ts';
-import type { Plan } from '../../planning/types.ts';
+import type { CreatePlanInput, Plan } from '../../planning/types.ts';
 import { addressesFromModule, backendFromFile, planningJournal, signerFromModule, specNeedsOwner } from '../environment.ts';
 import type { Backend } from '../environment.ts';
 import type { ChainCommandContext } from './context.ts';
 
-export async function planFor(command: 'plan' | 'verify' | 'schedule', { options, spec, artifacts, client, stateFile }: ChainCommandContext): Promise<{ plan: Plan; backend: Backend | undefined }> {
+export async function planFor(command: 'plan' | 'verify' | 'schedule', { options, spec, artifacts, client, stateFile }: ChainCommandContext,
+  onResourceCheck?: CreatePlanInput['onResourceCheck']): Promise<{ plan: Plan; backend: Backend | undefined }> {
   let plan: Plan;
   let backend: Backend | undefined;
   if (command === 'schedule' && options.plan) {
@@ -36,7 +37,7 @@ export async function planFor(command: 'plan' | 'verify' | 'schedule', { options
       deployers, owner, parallel: options.parallel ?? false,
     } : null;
     const journalRecords = await planningJournal(stateFile, options, backend);
-    plan = await createPlan({ spec, artifacts, client, state, journalRecords, pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
+    plan = await createPlan({ spec, artifacts, client, state, journalRecords, ...(onResourceCheck ? { onResourceCheck } : {}), pipeline, signers, maxSpendWei: command === 'plan' ? options['max-spend-wei'] ?? null : null });
   }
   return { plan, backend };
 }
