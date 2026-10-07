@@ -5,7 +5,7 @@ Part of [Getting started](index.md).
 Use Node.js 22.18 or newer. Install the current beta in the Solidity project where you will run Etherplan:
 
 ```sh
-npm install --save-dev 'github:randyquaye/etherplan#v0.1.0-beta'
+npm install --save-dev 'github:randyquaye/etherplan#v0.1.1-beta'
 npx etherplan --version
 ```
 
