@@ -6,7 +6,7 @@ A project has at least one contract. Each `resource` block has a type and a name
 
 | Type | Required fields | Purpose |
 | --- | --- | --- |
-| `contract` | `artifact`; exactly one of `address` or `salt`; `args` when deploying | Adopt an address or deploy compiled code through CREATE2. |
+| `contract` | `artifact`; exactly one of `address` or `salt`; `args` when deploying; optional `generation` with a derived salt | Adopt an address or deploy compiled code through CREATE2. |
 | `external` | `address` | Verify an address managed outside Etherplan. |
 | `call` | `target`, `method`, `args`, and one check block | Run a declared method only when its before value allows it, then verify its desired result. |
 | `check` | `target` and getter expectations | Attach read-only checks to a contract, external, or call. It is folded into the target, not planned as its own resource. |

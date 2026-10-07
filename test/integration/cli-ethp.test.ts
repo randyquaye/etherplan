@@ -351,3 +351,73 @@ test('salt = derive hashes the project mixer, and compile and plan pin the deriv
     await writeFile(file('main.ethp'), main);
   }
 });
+
+test('raising a generation replaces an unchanged contract and the contracts that take its address', async () => {
+  const main = await readFile(file('main.ethp'), 'utf8');
+  const derived = `mixer = "etherplan/generation"\n\n${main.replace(/salt(\s+)= "0x[0-9a-fA-F]{64}"/g, 'salt$1= derive')}`;
+  const raised = derived.replace(
+    'resource "contract" "alpha" {\n',
+    'resource "contract" "alpha" {\n  generation = 1\n',
+  );
+  assert.notEqual(raised, derived);
+  const plan = async () => {
+    const result = runCli([
+      'plan',
+      '--workspace',
+      'generation',
+      '--out',
+      file('generation-plan.json'),
+      '--deployers',
+      owner,
+      '--owner',
+      owner,
+      '--max-spend-wei',
+      maxSpend,
+    ]);
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    return JSON.parse(await readFile(file('generation-plan.json'), 'utf8'));
+  };
+  const apply = () =>
+    succeeded(
+      runCli(
+        ['apply', '--json', '--workspace', 'generation', '--plan', file('generation-plan.json')],
+        true,
+      ),
+    );
+  const contracts = (result) =>
+    Object.fromEntries(
+      result.resources
+        .filter((resource) => resource.kind === 'contract')
+        .map((resource) => [resource.id, resource]),
+    );
+  try {
+    await writeFile(file('main.ethp'), derived);
+    const first = contracts(await plan());
+    assert.ok(Object.values(first).every((resource) => resource.action === 'deploy'));
+    apply();
+
+    await writeFile(file('main.ethp'), raised);
+    const second = contracts(await plan());
+    const alpha = second['contract:alpha'];
+    assert.equal(alpha.action, 'deploy');
+    assert.deepEqual(alpha.saltDerivation, { mixer: 'etherplan/generation', generation: 1 });
+    assert.equal(alpha.observation.stateComparison.replacement, true);
+    assert.equal(
+      alpha.observation.stateComparison.saltChange.reason,
+      'The generation rose from 0 to 1.',
+    );
+    assert.notEqual(alpha.address.toLowerCase(), first['contract:alpha'].address.toLowerCase());
+    assert.equal(second['contract:gamma'].action, 'deploy');
+    assert.equal(second['contract:gamma'].observation.stateComparison.replacement, true);
+    for (const id of ['contract:beta', 'contract:doubler', 'contract:linked'])
+      assert.equal(second[id].action, 'reuse', id);
+    apply();
+    assert.notEqual(await anvil.rpc('eth_getCode', [alpha.address, 'latest']), '0x');
+
+    const third = contracts(await plan());
+    assert.ok(Object.values(third).every((resource) => resource.action === 'reuse'));
+    assert.equal(third['contract:alpha'].address, alpha.address);
+  } finally {
+    await writeFile(file('main.ethp'), main);
+  }
+});

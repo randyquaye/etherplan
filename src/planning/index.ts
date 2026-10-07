@@ -44,6 +44,7 @@ import type {
   SaltChange,
   StateComparison,
 } from './types.ts';
+import type { SaltDerivation } from '../spec/types.ts';
 
 export { prepareResources, transactionFor } from './resources.ts';
 
@@ -188,6 +189,10 @@ function artifactDrift(
   };
 }
 
+function generationOf(derivation: SaltDerivation | null | undefined): number {
+  return derivation?.generation ?? 0;
+}
+
 function describeLabel(label: string | undefined): string {
   return label === undefined ? 'no label' : `label "${label}"`;
 }
@@ -211,7 +216,11 @@ function saltChange(
     reason =
       previous.mixer !== current.mixer
         ? `The mixer changed from "${previous.mixer}" to "${current.mixer}".`
-        : `The derive label changed from ${describeLabel(previous.label)} to ${describeLabel(current.label)}.`;
+        : previous.label !== current.label
+          ? `The derive label changed from ${describeLabel(previous.label)} to ${describeLabel(current.label)}.`
+          : generationOf(current) < generationOf(previous)
+            ? `The generation fell from ${generationOf(previous)} to ${generationOf(current)}; a generation can only rise, because an earlier address may already hold code.`
+            : `The generation rose from ${generationOf(previous)} to ${generationOf(current)}.`;
   } else if (previous)
     reason = `The salt is now explicit; the saved salt was derived from mixer "${previous.mixer}".`;
   else if (current)
@@ -220,8 +229,10 @@ function saltChange(
   return { previousSalt, salt, previousDerivation: previous, derivation: current, reason };
 }
 
-// Deployment identity is the address, initcode, and constructor inputs; the artifact hash is provenance. Both address
-// and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only change is drift.
+// Deployment identity is the address, initcode, constructor inputs, and generation; the artifact hash is provenance.
+// Both address and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only
+// change is drift. A raised generation moves the derived salt, so it replaces an unchanged contract on purpose; a
+// lowered one is a conflict, because its earlier address may already hold code.
 function compareState(
   resource: PreparedResource,
   state: StateFile | null,
@@ -231,9 +242,12 @@ function compareState(
   const record = state?.resources[resource.id];
   if (!record) return null;
   const addressMatches = lower(record.address) === lower(resource.address);
+  const previousGeneration = generationOf(record.saltDerivation);
+  const generation = generationOf(resource.saltDerivation);
   const identityMatches =
     lower(record.initcodeHash) === lower(resource.initcodeHash) &&
-    lower(record.inputsHash) === lower(resource.inputsHash);
+    lower(record.inputsHash) === lower(resource.inputsHash) &&
+    previousGeneration === generation;
   const artifactMatches = lower(record.artifactHash) === lower(resource.artifactHash);
   const comparison: StateComparison = {
     previousAddress: record.address,
@@ -241,12 +255,13 @@ function compareState(
       artifactHash: record.artifactHash,
       initcodeHash: record.initcodeHash ?? null,
       inputsHash: record.inputsHash,
+      generation: previousGeneration,
     },
     addressMatches,
     identityMatches,
     artifactMatches,
-    replacement: !addressMatches && !identityMatches,
-    conflict: addressMatches !== identityMatches,
+    replacement: !addressMatches && !identityMatches && generation >= previousGeneration,
+    conflict: addressMatches !== identityMatches || generation < previousGeneration,
     liveCodeMatchesState:
       record.codeHash === null ||
       record.codeHash === undefined ||

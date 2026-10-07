@@ -12,7 +12,7 @@ import {
   literal,
 } from './evaluate.ts';
 import { assertNotSecret, declareVariables, resolveVariables } from './variables.ts';
-import { MIXER, MIXER_HINT } from '../spec/salt.ts';
+import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
 import type { JsonObject, JsonValue } from '../types.ts';
 import type { SaltDerivation } from '../spec/types.ts';
 import type { NameScope, Root, Target } from './evaluate.ts';
@@ -57,6 +57,7 @@ const CONTRACT_FIELDS: FieldMap = {
   name: ['name', 'constant'],
   address: ['address', 'value'],
   salt: ['salt', 'salt'],
+  generation: ['generation', 'constant'],
   args: ['args', 'value'],
   libraries: ['libraries', 'value'],
   after: ['after', 'after'],
@@ -189,8 +190,12 @@ function fieldAttributes(block: HclBlock, fields: FieldMap, resource: boolean): 
   });
 }
 
-function derivationJson({ mixer, label }: SaltDerivation): JsonObject {
-  return label === undefined ? { mixer } : { mixer, label };
+function derivationJson({ mixer, label, generation }: SaltDerivation): JsonObject {
+  return {
+    mixer,
+    ...(label === undefined ? {} : { label }),
+    ...(generation === undefined ? {} : { generation }),
+  };
 }
 
 function compileBlock(
@@ -200,16 +205,37 @@ function compileBlock(
   resource = true,
 ): DraftResource {
   const item: DraftResource = {};
+  let derived: SaltDerivation | undefined;
+  let generation: { value: JsonValue; node: HclExpression } | undefined;
   for (const attribute of fieldAttributes(block, fields, resource)) {
     const [field, kind] = fields[attribute.name]!;
     const value = decoders[kind](attribute.value, attribute.name);
     if (value instanceof DerivedSalt) {
-      item.salt = value.salt;
-      item.saltDerivation = derivationJson(value.derivation);
+      derived = value.derivation;
+      continue;
+    }
+    // A contract's generation is folded into its derived salt below; it is not a separate spec field.
+    if (attribute.name === 'generation') {
+      if (value !== null) generation = { value, node: attribute.value };
       continue;
     }
     // As in Terraform, null leaves the attribute unset, so a variable can supply it in some worlds only.
     if (value !== null) item[field] = value;
+  }
+  if (generation) {
+    const { value, node } = generation;
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+      fail(
+        node,
+        `generation must be a whole number of at least 0; found ${JSON.stringify(value)}.`,
+      );
+    if (!derived)
+      fail(node, 'generation requires salt = derive or derive("label"), which it feeds.');
+    if (value > 0) derived = { ...derived, generation: value };
+  }
+  if (derived) {
+    item.salt = deriveSalt(derived.mixer, derived.label, derived.generation);
+    item.saltDerivation = derivationJson(derived);
   }
   return item;
 }

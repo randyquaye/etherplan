@@ -1,6 +1,8 @@
 // Derived CREATE2 salts. In .ethp, `salt = derive` hashes the project's mixer and `derive("label")` hashes
-// `<mixer>:<label>`, so two deployments with identical initcode can still have different addresses. The compiler
-// lowers both to a concrete salt and records the derivation beside it; parseSpec and state check that they agree.
+// `<mixer>:<label>`, so two deployments with identical initcode can still have different addresses. A contract's
+// `generation` above zero appends ` generation <n>`; the space cannot appear in a mixer or label, so no label can
+// produce the same string. The compiler lowers each to a concrete salt and records the derivation beside it;
+// parseSpec and state check that they agree.
 import { keccak256, stringToBytes } from 'viem';
 import type { Hash } from '../types.ts';
 import type { SaltDerivation } from './types.ts';
@@ -17,16 +19,28 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** The salt for a mixer, or a mixer and label: `cast keccak "<mixer>"` or `cast keccak "<mixer>:<label>"`. */
-export function deriveSalt(mixer: string, label?: string): Hash {
-  return keccak256(stringToBytes(label === undefined ? mixer : `${mixer}:${label}`));
+/**
+ * The salt for a mixer, an optional label, and an optional generation: `cast keccak "<mixer>"`,
+ * `cast keccak "<mixer>:<label>"`, or either followed by ` generation <n>` for a generation above zero.
+ */
+export function deriveSalt(mixer: string, label?: string, generation?: number): Hash {
+  const base = label === undefined ? mixer : `${mixer}:${label}`;
+  return keccak256(
+    stringToBytes(generation === undefined ? base : `${base} generation ${generation}`),
+  );
+}
+
+/** A generation is a whole number; zero is the default and is never recorded. */
+export function isGeneration(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 /** Validates a saltDerivation object from a spec or a state record. */
 export function assertSaltDerivation(value: unknown, location: string): SaltDerivation {
   assert(
-    isObject(value) && Object.keys(value).every((key) => key === 'mixer' || key === 'label'),
-    `${location} must be an object with mixer and an optional label.`,
+    isObject(value) &&
+      Object.keys(value).every((key) => key === 'mixer' || key === 'label' || key === 'generation'),
+    `${location} must be an object with mixer and an optional label and generation.`,
   );
   assert(
     typeof value.mixer === 'string' && MIXER.test(value.mixer),
@@ -36,9 +50,15 @@ export function assertSaltDerivation(value: unknown, location: string): SaltDeri
     value.label === undefined || (typeof value.label === 'string' && MIXER.test(value.label)),
     `${location} label must be ${MIXER_HINT}.`,
   );
-  return value.label === undefined
-    ? { mixer: value.mixer }
-    : { mixer: value.mixer, label: value.label };
+  assert(
+    value.generation === undefined || isGeneration(value.generation),
+    `${location} generation must be a whole number of at least 1; leave it out for generation 0.`,
+  );
+  return {
+    mixer: value.mixer,
+    ...(value.label === undefined ? {} : { label: value.label }),
+    ...(value.generation === undefined ? {} : { generation: value.generation }),
+  };
 }
 
 /** Checks that a salt is the one its derivation produces. */
@@ -49,7 +69,7 @@ export function assertDerivedSalt(
 ): void {
   assert(
     typeof salt === 'string' &&
-      salt.toLowerCase() === deriveSalt(derivation.mixer, derivation.label),
+      salt.toLowerCase() === deriveSalt(derivation.mixer, derivation.label, derivation.generation),
     `${location} salt is not the salt derived from its saltDerivation.`,
   );
 }

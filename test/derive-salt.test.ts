@@ -231,11 +231,11 @@ test('a JSON spec must keep salt and saltDerivation consistent', () => {
   const cases = [
     [
       { saltDerivation: { mixer: MIXER, extra: 1 } },
-      /contract:registry saltDerivation must be an object with mixer and an optional label\./,
+      /contract:registry saltDerivation must be an object with mixer and an optional label and generation\./,
     ],
     [
       { saltDerivation: 'x' },
-      /contract:registry saltDerivation must be an object with mixer and an optional label\./,
+      /contract:registry saltDerivation must be an object with mixer and an optional label and generation\./,
     ],
     [
       { saltDerivation: { mixer: 'has space' } },
@@ -360,7 +360,7 @@ test('state records a derived salt beside its derivation, drops it for an explic
           item.saltDerivation = { mixer: MIXER, note: 1 };
         }),
       ),
-    /contract:example saltDerivation must be an object with mixer and an optional label\./,
+    /contract:example saltDerivation must be an object with mixer and an optional label and generation\./,
   );
   assert.throws(
     () =>
@@ -443,4 +443,125 @@ test('a changed mixer or label is a conflict whose saltChange names the old and 
     derivation: null,
     reason: 'The salt is now explicit; the saved salt was derived from mixer "aztec/rollup".',
   });
+});
+
+test('generation feeds the derived salt, is left out at zero, and needs a derived salt', () => {
+  const salt = (spec, id) => spec.contracts.find((item) => item.id === id);
+  const raised = compile(project({ extra: '', registry: 'salt     = derive\n  generation = 2' }));
+  assert.equal(salt(raised, 'registry').salt, keccak256(stringToBytes(`${MIXER} generation 2`)));
+  assert.deepEqual(salt(raised, 'registry').saltDerivation, { mixer: MIXER, generation: 2 });
+  assert.equal('generation' in salt(raised, 'registry'), false);
+
+  const labelled = compile(
+    project({ portal: 'salt     = derive("second-instance")\n  generation = 1' }),
+  );
+  assert.equal(
+    salt(labelled, 'portal').salt,
+    keccak256(stringToBytes(`${MIXER}:second-instance generation 1`)),
+  );
+
+  const zero = compile(project({ registry: 'salt     = derive\n  generation = 0' }));
+  assert.deepEqual(salt(zero, 'registry').saltDerivation, { mixer: MIXER });
+  assert.equal(salt(zero, 'registry').salt, deriveSalt(MIXER));
+
+  const fromVariable = compile(
+    `variable "generation" {}\n${project({ registry: 'salt     = derive\n  generation = var.generation' })}`,
+    'generation = 3',
+  );
+  assert.deepEqual(salt(fromVariable, 'registry').saltDerivation, { mixer: MIXER, generation: 3 });
+
+  assert.throws(
+    () => compile(project({ registry: `salt     = "${SALT}"\n  generation = 1` })),
+    /generation requires salt = derive or derive\("label"\), which it feeds\./,
+  );
+  assert.throws(
+    () => compile(project({ registry: 'salt     = derive\n  generation = "1"' })),
+    /generation must be a whole number of at least 0/,
+  );
+});
+
+test('a JSON spec records generation inside saltDerivation, at least 1, matching the salt', () => {
+  const spec = (
+    saltDerivation,
+    salt = deriveSalt(MIXER, undefined, saltDerivation.generation),
+  ) => ({
+    schema: 2,
+    chainId: 1,
+    factory: { address: FACTORY, codeHash: keccak256(FACTORY_CODE) },
+    contracts: [{ id: 'registry', artifact: 'Registry.json', salt, saltDerivation, args: [] }],
+  });
+  assert.equal(
+    parseSpec(spec({ mixer: MIXER, generation: 4 })).contracts[0].saltDerivation.generation,
+    4,
+  );
+  assert.throws(
+    () => parseSpec(spec({ mixer: MIXER, generation: 0 }, deriveSalt(MIXER))),
+    /generation must be a whole number of at least 1; leave it out for generation 0\./,
+  );
+  assert.throws(
+    () => parseSpec(spec({ mixer: MIXER, generation: 2 }, deriveSalt(MIXER))),
+    /salt is not the salt derived from its saltDerivation\./,
+  );
+});
+
+test('a raised generation replaces an unchanged contract; a lowered one or a salt change at the same generation conflicts', async () => {
+  const artifacts = new Map([['vault', normalizedArtifact]]);
+  const spec = (derivation) => ({
+    schema: 2,
+    chainId: 31337,
+    factory: { address: FACTORY, codeHash: keccak256(FACTORY_CODE) },
+    contracts: [
+      {
+        id: 'vault',
+        artifact: 'Vault.json',
+        salt: deriveSalt(derivation.mixer, derivation.label, derivation.generation),
+        saltDerivation: derivation,
+        args: [],
+      },
+    ],
+  });
+  const chain = { id: 31337, genesisHash: GENESIS };
+  const recorded = (derivation) => {
+    const [resource] = prepareResources(spec(derivation), undefined, artifacts).resources;
+    const verification = {
+      id: resource.id,
+      address: resource.address,
+      codeHash: `0x${'44'.repeat(32)}`,
+      codeComparison: { mode: 'exact', matched: true },
+      proofs: [],
+      missingProofs: [],
+      bindingChecks: [],
+      status: 'verified',
+    };
+    return importResource({ resource, verification, state: null, chain });
+  };
+  const plan = (state, derivation) =>
+    createPlan({ spec: spec(derivation), artifacts, client: planningClient(), state });
+
+  // A record from before generations existed counts as generation 0.
+  const original = recorded({ mixer: MIXER });
+  const raised = await plan(original, { mixer: MIXER, generation: 1 });
+  const comparison = raised.resources[0].observation.stateComparison;
+  assert.equal(raised.resources[0].action, 'deploy');
+  assert.equal(comparison.replacement, true);
+  assert.equal(comparison.conflict, false);
+  assert.equal(comparison.previousIdentity.generation, 0);
+  assert.equal(comparison.saltChange.reason, 'The generation rose from 0 to 1.');
+
+  const second = recorded({ mixer: MIXER, generation: 2 });
+  const lowered = await plan(second, { mixer: MIXER, generation: 1 });
+  assert.equal(lowered.resources[0].action, 'conflict');
+  assert.equal(lowered.resources[0].observation.stateComparison.replacement, false);
+  assert.match(
+    lowered.resources[0].observation.stateComparison.saltChange.reason,
+    /The generation fell from 2 to 1; a generation can only rise/,
+  );
+
+  const rotated = await plan(second, { mixer: 'aztec/rollup-v2', generation: 2 });
+  assert.equal(rotated.resources[0].action, 'conflict');
+  assert.equal(rotated.resources[0].observation.stateComparison.identityMatches, true);
+  assert.equal(
+    rotated.resources[0].observation.stateComparison.saltChange.reason,
+    'The mixer changed from "aztec/rollup" to "aztec/rollup-v2".',
+  );
 });

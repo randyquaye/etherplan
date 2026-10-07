@@ -169,6 +169,8 @@ export interface StateComparison {
     artifactHash: Hash;
     initcodeHash: Hash | null;
     inputsHash: Hash;
+    /** 0 when the record has none. */
+    generation: number;
   };
   addressMatches: boolean;
   identityMatches: boolean;
