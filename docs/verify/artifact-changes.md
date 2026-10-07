@@ -2,7 +2,7 @@
 
 Part of [Verify contracts](index.md).
 
-Etherplan tracks two kinds of identity: the deployment's address, initcode hash, and constructor inputs; and the artifact's build and source hashes. A rebuild can change artifact provenance without changing deployed bytecode.
+Etherplan tracks two kinds of identity: the deployment's address, initcode hash, constructor inputs, and [generation](../project/salts.md#generations); and the artifact's build and source hashes. A rebuild can change artifact provenance without changing deployed bytecode.
 
 ## CREATE2 deployments
 
@@ -14,7 +14,7 @@ A plan can reuse an existing CREATE2 deployment after a rebuild when all of thes
 
 The plan reports the old and new hashes in `observation.stateComparison.artifactDrift` and pins the new artifact hash. Apply sends no transaction for this drift. Under its lock, it rechecks the state record and live code; a change stops with `stale-state` or `drift`. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to `artifactRevisions`. Transaction and deployment provenance stay attached to the existing deployment.
 
-If verification fails, the plan marks the contract `conflict` and puts the reasons in `artifactDrift.reasons`. A change to both address and initcode or inputs is a replacement and starts a new revision list. Changing only one is a conflict. A salt change with unchanged initcode and inputs is also a conflict; `observation.stateComparison.saltChange` explains it, including a rotated mixer or new `derive` label. To deliberately deploy the same contract at a new address, remove its old state record first.
+If verification fails, the plan marks the contract `conflict` and puts the reasons in `artifactDrift.reasons`. A change to both address and initcode or inputs is a replacement and starts a new revision list. Changing only one is a conflict. A salt change with unchanged initcode, inputs, and generation is also a conflict; `observation.stateComparison.saltChange` explains it, including a rotated mixer or new `derive` label. To deliberately deploy the same contract at a new address, raise its [generation](../project/salts.md#generations).
 
 ## Imported contracts
 

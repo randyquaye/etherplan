@@ -49,7 +49,7 @@ export interface SpecContract {
   /** Exactly one of `address` (imported) or `salt` (CREATE2 deployment) is present. */
   address?: Address | Reference;
   salt?: Hash;
-  /** Present when `salt` was derived; `salt` must equal deriveSalt(mixer, label). */
+  /** Present when `salt` was derived; `salt` must equal deriveSalt(mixer, label, generation). */
   saltDerivation?: SaltDerivation;
   /** Required when `salt` is set. */
   args?: SpecValue[];
@@ -73,10 +73,15 @@ export interface SpecExternal {
   abi?: Abi;
 }
 
-/** How a CREATE2 salt was derived: keccak256 of the mixer, or of `<mixer>:<label>`. */
+/**
+ * How a CREATE2 salt was derived: keccak256 of the mixer, or of `<mixer>:<label>`, followed by ` generation <n>`
+ * when the contract's generation is above zero. The generation is part of the contract's deployment identity.
+ */
 export interface SaltDerivation {
   mixer: string;
   label?: string;
+  /** At least 1; absent means generation 0. */
+  generation?: number;
 }
 
 export interface SpecCallCheck {
