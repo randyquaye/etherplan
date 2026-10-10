@@ -32,6 +32,6 @@ etherplan output --id contract:registry
 
 For a script, use `etherplan output --id contract:registry | jq -r '.addresses["contract:registry"]'`. These are recorded addresses; use `verify` for a live check.
 
-Apply reports lock acquisition, signing, broadcast, receipts, and verification as they happen. It prints a "Still applying" line after 30 seconds without progress. `--quiet` keeps the final report and errors while hiding progress. `--json` puts structured output on stdout and progress on stderr.
+Apply reports lock acquisition, signing, broadcast, receipts, and verification as they happen. It prints a "Still applying" line after 30 seconds without progress. `--quiet` keeps the final report and errors while hiding progress. `--json` puts structured output on stdout and progress on stderr. On a shared backend, lease renewal problems print their cause and whether apply is retrying or stopping.
 
 [Previous: Validate and plan](validate-and-plan.md) · [Next: State and recovery](../recovery/journals-and-resume.md) · [Verify live state](../verify/existing-contracts.md)

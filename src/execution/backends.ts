@@ -4,6 +4,7 @@ import { bytesToHex, hexToBytes } from 'viem';
 import { hashJson } from '../identity.ts';
 import { field } from '../json.ts';
 import { jsonSafe } from './preflight.ts';
+import { classifyLeaseFailure, safeLeaseMessage } from './rpc-error.ts';
 import { validateJournalCreationProof } from '../verification/creation-proof.ts';
 import type {
   Address,
@@ -25,6 +26,7 @@ import type {
   JournalRecord,
   JournalStore,
   Lease,
+  LeaseFailure,
   LeaseHolder,
   Leases,
   LockScope,
@@ -275,7 +277,7 @@ export async function acquireLeases({
   addresses,
   planHash,
   principal,
-  ttlMs = 30_000,
+  ttlMs = 60_000,
   onRenew,
   onRenewFailure,
 }: AcquireLeasesInput): Promise<Leases> {
@@ -292,6 +294,8 @@ export async function acquireLeases({
     acquiredAt: new Date().toISOString(),
   };
   const acquired: { scope: LockScope; lease: Lease }[] = [];
+  // Local view of the lease deadline, measured from when each successful request started.
+  let validUntil = Date.now() + ttlMs;
   try {
     for (const lockScope of lockScopes(scope, addresses))
       acquired.push({
@@ -302,21 +306,32 @@ export async function acquireLeases({
     await Promise.allSettled(acquired.reverse().map(({ lease }) => lease.release()));
     throw error;
   }
-  let lost = null as Error | null;
+  let lost: LeaseFailure | null = null;
   let closed = false;
   let renewing: Promise<void> = Promise.resolve();
   const timer = setInterval(
     () => {
       renewing = renewing.then(async () => {
         if (closed || lost) return;
+        const startedAt = Date.now();
         try {
           for (const { lease } of acquired) await lease.renew();
+          validUntil = startedAt + ttlMs;
           await onRenew?.({ holder, scopes: acquired.map(({ scope }) => scope) });
         } catch (error) {
-          const failure = error instanceof Error ? error : new Error(String(error));
-          lost = failure;
+          const cause = error instanceof Error ? error : new Error(String(error));
+          const classified = classifyLeaseFailure(cause);
+          // Only a rejected lease or a passed deadline ends the writer; transport faults retry.
+          const failure: LeaseFailure =
+            classified === 'lease-lost'
+              ? classified
+              : Date.now() >= validUntil
+                ? 'lease-expired'
+                : classified;
+          const fatal = failure === 'lease-lost' || failure === 'lease-expired';
+          if (fatal) lost = failure;
           await Promise.resolve()
-            .then(() => onRenewFailure?.({ holder, error: failure }))
+            .then(() => onRenewFailure?.({ holder, error: cause, failure, fatal }))
             .catch(() => {});
         }
       });
@@ -325,7 +340,8 @@ export async function acquireLeases({
   );
   timer.unref?.();
   function assertRenewed(): void {
-    if (lost) throw new Error('Writer lease renewal failed.');
+    if (!lost && Date.now() >= validUntil) lost = 'lease-expired';
+    if (lost) throw Object.assign(new Error(safeLeaseMessage(lost)), { code: lost });
   }
   const fence = acquired.map(({ scope: lockScope, lease }) => ({
     scope: lockScope,

@@ -1,3 +1,4 @@
+import { safeLeaseMessage } from '../execution/rpc-error.ts';
 import type { ApplyResult, ReportEvent } from '../execution/types.ts';
 import type { Plan } from '../planning/types.ts';
 
@@ -8,6 +9,7 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
   let started = 0;
   let lastLine = 0;
   let timer: NodeJS.Timeout | undefined;
+  let leaseRetrying = false;
   const write = (message: string): void => {
     output.write(`${message}\n`);
     lastLine = Date.now();
@@ -30,6 +32,20 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
       switch (event.type) {
         case 'lock-acquisition':
           write('Apply lock acquired. Checking plan and chain...');
+          break;
+        case 'lock-renewal':
+          if (leaseRetrying) {
+            leaseRetrying = false;
+            write('Writer lease renewed.');
+          }
+          break;
+        case 'lock-renewal-failure':
+          leaseRetrying = !event.fatal;
+          write(
+            event.fatal
+              ? `${safeLeaseMessage(event.reason)} Stopping before the next write.`
+              : `Writer lease renewal failed (${event.reason}); retrying while the lease is valid...`,
+          );
           break;
         case 'recovery':
           write(`  ${event.actionId}: resuming transaction ${event.transactionHash}`);

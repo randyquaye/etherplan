@@ -167,12 +167,17 @@ export interface FenceEntry {
   principal: string;
 }
 
+/** A `renew` or `assertHeld` rejection with `code: 'lease-lost'` is final; any other rejection is retried while the lease is valid. */
 export interface Lease {
   fencingToken: number;
   renew(): Promise<void>;
   assertHeld(): Promise<void>;
   release(): Promise<void>;
 }
+
+/** Fixed lease diagnostics. Provider error text never crosses an output boundary. */
+export type LeaseFailure =
+  'lease-lost' | 'lease-expired' | 'timeout' | 'network' | 'throttled' | 'request-failed';
 
 export interface LeaseInspection {
   holder: unknown;
@@ -213,10 +218,16 @@ export interface AcquireLeasesInput {
   addresses: Address[];
   planHash: Hash | undefined;
   principal?: string | undefined;
-  /** At least 3000; defaults to 30000. */
+  /** At least 3000; defaults to 60000. Leases renew every third of the TTL. */
   ttlMs?: number | undefined;
   onRenew?(event: { holder: LeaseHolder; scopes: LockScope[] }): unknown;
-  onRenewFailure?(event: { holder: LeaseHolder; error: Error }): unknown;
+  /** A `fatal` failure stops the writer; any other failure retries until the lease would expire. */
+  onRenewFailure?(event: {
+    holder: LeaseHolder;
+    error: Error;
+    failure: LeaseFailure;
+    fatal: boolean;
+  }): unknown;
 }
 
 // Stores
@@ -659,7 +670,7 @@ export type ReportEvent = ReportEventBase &
   (
     | { type: 'lock-acquisition'; holder: LockHolder; fencingTokens?: number[]; lockWaitMs: number }
     | { type: 'lock-renewal' }
-    | { type: 'lock-renewal-failure'; reason: string }
+    | { type: 'lock-renewal-failure'; reason: LeaseFailure; fatal: boolean }
     | ({
         type: 'intent' | 'signed' | 'broadcast-attempt' | 'receipt' | 'verified';
       } & JournalEventFields)
