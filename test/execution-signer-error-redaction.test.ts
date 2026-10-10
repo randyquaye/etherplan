@@ -177,7 +177,7 @@ test('lease renewal errors cannot expose provider text through apply diagnostics
     { project: 'signer-redaction', environment: 'test', label: 'lease' },
     { id: 31337, genesisHash: `0x${'aa'.repeat(32)}` },
   );
-  const reports: string[] = [];
+  const reports: { failure: string; fatal: boolean; message: string }[] = [];
   const leases = await acquireLeases({
     scope,
     addresses: [deployerA.address],
@@ -196,19 +196,35 @@ test('lease renewal errors cannot expose provider text through apply diagnostics
       },
     },
     onRenewFailure: (event) => {
-      reports.push(safeExternalError(event.error));
+      reports.push({
+        failure: event.failure,
+        fatal: event.fatal,
+        message: safeExternalError(event.error),
+      });
     },
   });
   try {
+    // One failed renewal is retried while the lease is still valid.
     await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await leases.assertHeld();
+    assert.deepEqual(reports, [
+      { failure: 'request-failed', fatal: false, message: 'External operation failed.' },
+    ]);
+    // Past the TTL without a successful renewal the lease is treated as expired.
+    await new Promise((resolve) => setTimeout(resolve, 2_400));
     await assert.rejects(
       leases.assertHeld(),
       (error) =>
         error instanceof Error &&
-        error.message === 'Writer lease renewal failed.' &&
+        error.message === 'Writer lease expired before a renewal succeeded.' &&
         !error.message.includes(responseSecret),
     );
-    assert.deepEqual(reports, ['External operation failed.']);
+    assert.deepEqual(reports.at(-1), {
+      failure: 'lease-expired',
+      fatal: true,
+      message: 'External operation failed.',
+    });
+    assert.ok(!JSON.stringify(reports).includes(responseSecret));
   } finally {
     await leases.release();
   }

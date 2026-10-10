@@ -95,7 +95,7 @@ export function memoryBackend(scope) {
         locks.set(id, { token, holder, expiresAt: Date.now() + ttlMs });
         const assertHeld = () => {
           if (!held([{ scope: lockScope, token, holderId: holder.id }]))
-            throw new Error('Writer lease is lost.');
+            throw Object.assign(new Error('Writer lease is lost.'), { code: 'lease-lost' });
         };
         return {
           fencingToken: token,

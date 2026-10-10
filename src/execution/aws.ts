@@ -47,6 +47,23 @@ const isConditional = (error: unknown) =>
   error instanceof Error &&
   (error.name === 'ConditionalCheckFailedException' ||
     error.name === 'TransactionCanceledException');
+const leaseLost = () =>
+  Object.assign(new Error('Writer lease is no longer held.'), { code: 'lease-lost' as const });
+
+/** Bounded so a stalled request surfaces well inside a lease TTL instead of consuming it. */
+const DYNAMODB_REQUEST_TIMEOUT_MS = 5_000;
+const DYNAMODB_CONNECTION_TIMEOUT_MS = 3_000;
+const DYNAMODB_MAX_ATTEMPTS = 3;
+
+function dynamoDbClient(): DynamoDBClient {
+  return new DynamoDBClient({
+    maxAttempts: DYNAMODB_MAX_ATTEMPTS,
+    requestHandler: {
+      requestTimeout: DYNAMODB_REQUEST_TIMEOUT_MS,
+      connectionTimeout: DYNAMODB_CONNECTION_TIMEOUT_MS,
+    },
+  });
+}
 
 function requireFence(fence: FenceEntry[] | null): {
   ConditionCheck: {
@@ -101,7 +118,7 @@ export function createAwsBackend({
   kmsKeyId,
   bucket,
   prefix = 'etherplan',
-  dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
+  dynamodb = DynamoDBDocumentClient.from(dynamoDbClient(), {
     marshallOptions: { removeUndefinedValues: true },
   }),
   kms = new KMSClient({}),
@@ -165,22 +182,27 @@ export function createAwsBackend({
         fencingToken,
         async renew() {
           const current = Date.now();
-          await dynamodb.send(
-            new UpdateCommand({
-              TableName: tableName,
-              Key: key,
-              UpdateExpression: 'SET #expiresAt = :newExpiry, #updatedAt = :updatedAt',
-              ConditionExpression:
-                '#token = :token AND #holderId = :holderId AND #expiresAt > :now',
-              ExpressionAttributeNames: { ...condition, '#updatedAt': 'updatedAt' },
-              ExpressionAttributeValues: {
-                ...values,
-                ':newExpiry': current + ttlMs,
-                ':updatedAt': new Date(current).toISOString(),
-                ':now': current,
-              },
-            }),
-          );
+          try {
+            await dynamodb.send(
+              new UpdateCommand({
+                TableName: tableName,
+                Key: key,
+                UpdateExpression: 'SET #expiresAt = :newExpiry, #updatedAt = :updatedAt',
+                ConditionExpression:
+                  '#token = :token AND #holderId = :holderId AND #expiresAt > :now',
+                ExpressionAttributeNames: { ...condition, '#updatedAt': 'updatedAt' },
+                ExpressionAttributeValues: {
+                  ...values,
+                  ':newExpiry': current + ttlMs,
+                  ':updatedAt': new Date(current).toISOString(),
+                  ':now': current,
+                },
+              }),
+            );
+          } catch (error) {
+            // A failed condition means the lease moved on; anything else is a transport problem.
+            throw isConditional(error) ? leaseLost() : error;
+          }
         },
         async assertHeld() {
           const found = await dynamodb.send(
@@ -191,7 +213,7 @@ export function createAwsBackend({
             found.Item?.holderId !== holder.id ||
             found.Item.expiresAt <= Date.now()
           )
-            throw new Error('Writer lease is no longer held.');
+            throw leaseLost();
         },
         async release() {
           try {

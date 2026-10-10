@@ -299,7 +299,8 @@ export async function openApplyContext({
             chain: plan.chain,
             scope: backend.scope,
             principal: event.holder.principal,
-            reason: safeExternalError(event.error),
+            reason: event.failure,
+            fatal: event.fatal,
           }),
       })
     : localLocks!.lock;
