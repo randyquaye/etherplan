@@ -9,7 +9,7 @@ It deploys through the canonical CREATE2 factory, can adopt existing contracts, 
 Use Node.js 22.18 or newer. Install the current beta in your Solidity project from its GitHub tag:
 
 ```sh
-npm install --save-dev 'github:randyquaye/etherplan#v0.1.1-beta'
+npm install --save-dev 'github:randyquaye/etherplan#v0.1.2-beta'
 npx etherplan --version
 ```
 
